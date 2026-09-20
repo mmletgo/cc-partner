@@ -29,6 +29,10 @@ import 'workbench_shell.dart';
 import 'worktree_strip.dart';
 import 'worktrees_page.dart';
 
+/// 当前项目 worktrees 详情的加载状态（对齐 web projectDetailStatus：ready 才允许
+/// 同项目早退，error 时必须给出重试入口）。
+enum _ProjectDetailStatus { idle, loading, ready, error }
+
 /// Dual-mode workbench: global 项目/待处理/传输/设置/Provider,
 /// project 终端/浏览器/文件/Git/worktrees/自动化.
 class WorkbenchHome extends StatefulWidget {
@@ -90,6 +94,17 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// 旧响应后到不得把 _worktrees/_worktreeId 覆盖回先点的树（对齐 web
   /// refreshWorktrees 的 worktreesRequestIdRef 丢弃守卫）。
   int _worktreesLoadSeq = 0;
+
+  /// 当前项目 worktrees 详情加载状态与失败文案（对齐 web projectDetailStatus/error）：
+  /// 同项目早退要求 ready；error 时项目列表上方显示错误条 + 重试入口。
+  _ProjectDetailStatus _projectDetailStatus = _ProjectDetailStatus.idle;
+  String? _projectDetailError;
+
+  /// 终端会话刷新令牌：Git 页/worktrees 页/终端页 worktree 变更成功后 bump，
+  /// TerminalPage didUpdateWidget 检测变化后拉权威会话并清理已消失会话的常驻缓冲
+  /// （对齐 web onRefreshSessions + removeBuffer 的收敛语义）。
+  int _terminalSessionsToken = 0;
+
   /// Files 草稿控制器（测试可注入）：dirty 预检、清快照与 FilesPage 共用同一实例。
   late final FileWorkspaceController _files =
       widget.filesWorkspace ?? FileWorkspaceController();
@@ -495,11 +510,14 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// （状态点/badge/可推送），列表统一带 includeGitStatus 拉取。请求成败同时
   /// 驱动壳层连接态：失败进入离线态（保留缓存提示），失败后的下一次成功视为
   /// 恢复边沿并对当前项目重跑拉取（对齐 web 断线恢复自动刷新权威数据）。
+  /// 本次加载也是当前项目的「worktrees 详情」：成败同步推进详情状态
+  /// （ready/error，对齐 web projectDetailStatus），供同项目早退门槛与项目列表
+  /// 错误条重试入口使用。
   ///
   /// Code Logic: 进入即自增 _worktreesLoadSeq 并捕获局部快照；每次 await 之后、
   /// 写 _worktrees/_worktreeId（setState）之前校验自己仍是最新一次请求且页面仍在，
   /// 否则直接丢弃——快速连点两个 worktree chip 时旧响应晚到不得覆盖新选中。
-  /// 成功/失败分别上报连接态（丢弃的旧响应不上报）。
+  /// 成功/失败分别上报连接态与详情状态（丢弃的旧响应不上报）。
   Future<void> _loadWorktrees(
     ProjectSummary project, {
     required bool projectChanged,
@@ -516,6 +534,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       final trees = asObjectList(body, wrapKey: 'worktrees');
       setState(() {
         _worktrees = trees;
+        _projectDetailStatus = _ProjectDetailStatus.ready;
+        _projectDetailError = null;
         _worktreeId = resumeWorktreeId != null
             ? resolveActiveWorktreeId(
                 trees: trees,
@@ -534,6 +554,12 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         return;
       }
       _noteConnectionFailure(error);
+      final message = error.toString();
+      setState(() {
+        _projectDetailStatus = _ProjectDetailStatus.error;
+        _projectDetailError =
+            message.length > 160 ? '${message.substring(0, 160)}…' : message;
+      });
     }
   }
 
@@ -600,6 +626,57 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     if (choice == 'discard') {
       _files.markClean();
       return true;
+    }
+    return false;
+  }
+
+  /// Business Logic: 切换到不同项目前，Files 未保存草稿会随旧项目上下文一起失效，
+  /// 必须先让用户显式处置（对齐 web confirmFileContextSwitch 的跨项目预检；三选
+  /// 「取消/丢弃/保存」对齐 AGENTS.md 文档与文件预览页 PopScope 的同款三选）。
+  ///
+  /// Code Logic: 无 dirty 快照直接放行；有则弹三选——取消中止切换（不调后端、
+  /// 不清快照）；丢弃清 dirty 快照后放行；保存经草稿页注册的保存委托执行真实保存，
+  /// 成功（内部已 markClean）放行、失败保持 dirty 并中止切换。草稿页未注册委托
+  /// （canSave=false）时只提供取消/丢弃两项。
+  Future<bool> _confirmProjectSwitchLeaveDirty() async {
+    if (!_files.snapshot.dirty) {
+      return true;
+    }
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('project-switch-dirty-dialog'),
+        title: const Text('未保存的文件'),
+        content: const Text('切换项目前请保存或丢弃当前文件草稿。'),
+        actions: [
+          TextButton(
+            key: const Key('project-switch-dirty-cancel'),
+            onPressed: () => Navigator.pop(context, 'cancel'),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            key: const Key('project-switch-dirty-discard'),
+            onPressed: () => Navigator.pop(context, 'discard'),
+            child: const Text('丢弃'),
+          ),
+          if (_files.canSave)
+            FilledButton(
+              key: const Key('project-switch-dirty-save'),
+              onPressed: () => Navigator.pop(context, 'save'),
+              child: const Text('保存'),
+            ),
+        ],
+      ),
+    );
+    if (!mounted) {
+      return false;
+    }
+    if (choice == 'discard') {
+      _files.markClean();
+      return true;
+    }
+    if (choice == 'save') {
+      return _files.save();
     }
     return false;
   }
@@ -927,18 +1004,23 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   }
 
   /// Business Logic: 打开项目进入工作台。返回项目列表不再清空上下文后，项目列表
-  /// 点「同一项目」要直接回到原 worktree/session（不重拉、不走 dirty 确认——
-  /// 上下文没变，对齐 web shouldSkipMobileProjectReload 的同项目早退）；点不同项目
-  /// 才走完整切换流程（dirty 确认、清旧项目上下文）。attention/automation 聚焦
-  /// 同项目的指定 session 时不受早退影响，仍要精确切换。
-  /// Code Logic: 同项目且未显式指定 worktree/session → 只切目标面板；否则沿用
-  /// 既有流程：项目变化时清 worktree/常驻面板/mutation 锁，再拉权威列表。
-  void _openProject(
+  /// 点「同一项目」要在 worktrees 详情加载成功（ready）时才直接回到原 worktree/
+  /// session（不重拉、不走 dirty 确认——上下文没变，对齐 web
+  /// shouldSkipMobileProjectReload 仅 ready 早退）；上次详情加载失败（error）时点
+  /// 同项目即完整重拉，成为恢复入口。切换到不同项目才走完整切换流程：先过 Files
+  /// dirty 三选预检（取消不调后端），通过后清旧项目上下文再拉权威列表。
+  /// attention/automation 聚焦同项目的指定 session 时不受早退影响，仍要精确切换。
+  ///
+  /// Code Logic: 同项目且详情 ready 且未显式指定 worktree/session → 只切目标面板；
+  /// 不同项目先 [_confirmProjectSwitchLeaveDirty]（取消直接返回）；否则沿用既有
+  /// 流程：详情置 loading、项目变化时清 worktree/常驻面板/mutation 锁，再拉权威
+  /// 列表（成败由 [_loadWorktrees] 推进详情 ready/error）。
+  Future<void> _openProject(
     ProjectSummary project, {
     WorkbenchPanel panel = WorkbenchPanel.terminal,
     String? sessionId,
     String? resumeWorktreeId,
-  }) {
+  }) async {
     final sameProject = _project?.id == project.id;
     // 恢复/跳转目标面板若被内测开关关闭，则回落到可用面板。
     final gated = resolvePanelForFeatures(
@@ -947,14 +1029,25 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       automationEnabled: _automationEnabled,
       browserEnabled: _browserEnabled,
     );
-    if (sameProject && sessionId == null && resumeWorktreeId == null) {
+    if (sameProject &&
+        _projectDetailStatus == _ProjectDetailStatus.ready &&
+        sessionId == null &&
+        resumeWorktreeId == null) {
       setState(() => _gotoPanel(gated));
       return;
     }
     final projectChanged = !sameProject;
+    if (projectChanged && !await _confirmProjectSwitchLeaveDirty()) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
     setState(() {
       _project = project;
       _sessionId = sessionId;
+      _projectDetailStatus = _ProjectDetailStatus.loading;
+      _projectDetailError = null;
       if (projectChanged) {
         _worktreeId = clearWorktreeOnLeaveProject();
         _worktrees = [];
@@ -978,6 +1071,37 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       projectChanged: projectChanged,
       resumeWorktreeId: resumeWorktreeId,
     );
+  }
+
+  /// Business Logic: worktrees 详情加载失败后，项目列表错误条上的「重试」要能
+  /// 显式重拉当前项目详情（对齐 web handleReloadProjectDetails 的 forceReload）；
+  /// 成功后错误条随之清除（详情状态由 [_loadWorktrees] 推进为 ready）。
+  /// Code Logic: 仅在有激活项目且非 loading 中时响应；置 loading 清错误后重跑加载。
+  void _retryProjectDetail() {
+    final project = _project;
+    if (project == null || _projectDetailStatus == _ProjectDetailStatus.loading) {
+      return;
+    }
+    setState(() {
+      _projectDetailStatus = _ProjectDetailStatus.loading;
+      _projectDetailError = null;
+    });
+    unawaited(_loadWorktrees(project, projectChanged: false));
+  }
+
+  /// Business Logic: Git 页/worktrees 页/终端页的 worktree 变更（删除/合并/commit
+  /// 收敛）成功后必须统一收敛壳层：重拉权威 worktrees（active 失效按主树优先回落，
+  /// 对齐 web onWorktreesChange + setActiveWorktreeWithSession 兜底）并 bump 终端
+  /// 会话刷新令牌（TerminalPage 据此拉权威会话并清理已消失会话的常驻缓冲，对齐 web
+  /// onRefreshSessions + removeBuffer）。
+  /// Code Logic: 列表重拉走既有 [_loadWorktrees]（含请求序号守卫与回落解析）；
+  /// 令牌自增触发 TerminalPage didUpdateWidget。
+  void _handleWorktreesMutated() {
+    final project = _project;
+    if (project != null) {
+      unawaited(_loadWorktrees(project, projectChanged: false));
+    }
+    setState(() => _terminalSessionsToken += 1);
   }
 
   void _select(WorkbenchPanel next) {
@@ -1032,10 +1156,17 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         return ProjectsPage(
           book: widget.book,
           http: widget.http,
-          onOpen: _openProject,
+          onOpen: (project) => unawaited(_openProject(project)),
           onProjectRemoved: _onProjectRemoved,
           confirmRemove: _confirmProjectRemove,
           activeProjectId: _project?.id,
+          // worktrees 详情 error 态：项目列表上方错误条 + 重试（对齐 web
+          // projectDetailRetry；仅当前项目可见）。
+          detailError: _project != null &&
+                  _projectDetailStatus == _ProjectDetailStatus.error
+              ? (_projectDetailError ?? '加载失败')
+              : null,
+          onRetryDetail: _retryProjectDetail,
         );
       case WorkbenchPanel.attention:
         return AttentionPage(
@@ -1088,16 +1219,12 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
           onFullscreenChanged: (fullscreen) {
             setState(() => _terminalFullscreen = fullscreen);
           },
-          onWorktreesMutated: () {
-            final project = _project;
-            if (project != null) {
-              unawaited(_loadWorktrees(project, projectChanged: false));
-            }
-          },
+          onWorktreesMutated: _handleWorktreesMutated,
           // 合并激活树前先过 Files dirty 预检（取消不调后端；丢弃清快照，
           // 成功回落主树后不对已删树弹「请保存或丢弃」，对齐 web merge flow）。
           confirmLeaveDirty: _confirmTerminalMergeLeaveDirty,
           onActiveSessionChanged: _handleLiveSessionChanged,
+          sessionsRefreshToken: _terminalSessionsToken,
         );
       case WorkbenchPanel.files:
         return FilesPage(
@@ -1115,13 +1242,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
           http: widget.http,
           project: _project!,
           worktreeId: _worktreeId,
-          // B3 接缝契约：merge 成功后回写壳层刷新权威 worktrees 列表。
-          onWorktreesMutated: () {
-            final project = _project;
-            if (project != null) {
-              unawaited(_loadWorktrees(project, projectChanged: false));
-            }
-          },
+          // B3 接缝契约：merge/commit 成功后回写壳层统一收敛（重拉列表 + bump
+          // 终端会话刷新令牌）。
+          onWorktreesMutated: _handleWorktreesMutated,
           // B3 接缝契约：Git 页拿不到 FileWorkspaceController，dirty 确认由壳层注入。
           confirmLeaveDirty: (worktreeId) => _confirmLeaveDirty(worktreeId),
           // B4 接缝契约：hook 修复返回的 terminalSessionId 聚焦到终端面板。
@@ -1137,6 +1260,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
             unawaited(_selectWorktree(tree, goTerminal: true));
           },
           confirmLeaveDirty: (worktreeId) => _confirmLeaveDirty(worktreeId),
+          // 删除/合并成功后壳层统一收敛：重拉权威列表（active 失效回落主树，
+          // strip 不残留已删树）+ bump 终端会话刷新令牌（对齐 web
+          // MobileWorktreePanel onWorktreesChange/onRefreshSessions 回写）。
+          onWorktreesMutated: _handleWorktreesMutated,
         );
       case WorkbenchPanel.automation:
         return AutomationPage(
@@ -1214,7 +1341,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// Business Logic: 用户在项目列表移除当前打开的项目时，必须清空项目上下文回到项目列表
   /// （对齐 web MobileWorkbench：移除激活项目后不再停留在悬空项目面板；固定接缝契约）。
   /// Code Logic: 仅当移除的是当前项目才清 _project/_sessionId/_worktreeId 并切回 projects；
-  /// 其他项目被移除不影响当前上下文。
+  /// 其他项目被移除不影响当前上下文。详情状态一并复位（旧项目的 error/loading
+  /// 不得投射到项目列表）。
   void _onProjectRemoved(String projectId) {
     if (_project?.id != projectId) {
       return;
@@ -1225,6 +1353,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       _sessionId = null;
       _worktreeId = clearWorktreeOnLeaveProject();
       _worktrees = [];
+      _projectDetailStatus = _ProjectDetailStatus.idle;
+      _projectDetailError = null;
       // 激活项目被移除：项目级常驻面板整体失效并卸载。
       _visitedPanels.removeAll(kProjectBoundPanels);
     });

@@ -281,6 +281,37 @@ class _ExitedAfterCloseSessions extends _FakeSessions {
   }
 }
 
+/// resize 脚本化失败的 fake：resizeError 非 null 时 resize 抛错（500 上屏 / 404 静默断言）。
+class _FailingResizeSessions extends _FakeSessions {
+  _FailingResizeSessions(super.sessions);
+
+  /// 非 null 时 resize 抛出该错误。
+  Object? resizeError;
+
+  @override
+  Future<void> resize(String sessionId, int cols, int rows) async {
+    resizeCalls.add((sessionId, cols, rows));
+    final error = resizeError;
+    if (error != null) {
+      throw error;
+    }
+  }
+}
+
+/// paste-image 挂起在 Completer 上的 fake：贴图 HTTP 挂起期间断言入口禁用。
+class _GatedPasteImageSessions extends _FakeSessions {
+  _GatedPasteImageSessions(super.sessions);
+
+  final Completer<void> pasteGate = Completer<void>();
+  int pasteImageCalls = 0;
+
+  @override
+  Future<void> pasteImage(String sessionId, String dataUrl) async {
+    pasteImageCalls += 1;
+    await pasteGate.future;
+  }
+}
+
 /// 测试内存 Socket：无真实 IO，`add` 计数用于断言「是否向外发送过字节」。
 class _FakeSocket extends Stream<Uint8List> implements Socket {
   final StreamController<Uint8List> _incoming = StreamController<Uint8List>();
@@ -555,6 +586,26 @@ class _FakeGit extends GitClient {
   }
 }
 
+/// commit 挂起在 Completer 上的 fake：动作 busy 在途期断言 chip 选择不被整体禁用。
+class _GatedCommitGit extends _FakeGit {
+  _GatedCommitGit() : super();
+
+  final Completer<void> commitGate = Completer<void>();
+
+  @override
+  Future<Map<String, dynamic>> commit({
+    required String worktreeId,
+    required String clientOperationId,
+    String? message,
+  }) async {
+    commitCalls += 1;
+    commitOperationIds.add(clientOperationId);
+    lastCommitMessage = message;
+    await commitGate.future;
+    return commitResult;
+  }
+}
+
 class _FakePrompts extends PromptsClient {
   _FakePrompts({this.favorites, this.error}) : super(LanHttpClient(), 'http://127.0.0.1:1');
 
@@ -615,13 +666,16 @@ Future<void> _pump(
   Future<bool> Function(String worktreeId)? confirmLeaveDirty,
   ValueChanged<SessionSummary?>? onActiveSessionChanged,
   LanHttpClient Function()? eventsHttpClientFactory,
+  int sessionsRefreshToken = 0,
   bool backgroundTimersDisabled = true,
 }) async {
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
       // key 随 worktreeInfo 变化：本测试 helper 换 key 重挂 TerminalPage（壳层实际
       // 已是稳定 key 常驻），避免同类型 widget 复用旧 State（旧 State 的 _git 注入
-      // 实例会过期，导致断言打到旧 fake 上）。
+      // 实例会过期，导致断言打到旧 fake 上）。key 不变时 State 复用，widget 参数
+      // 变化（如 sessionsRefreshToken）走 didUpdateWidget——令牌驱动的 prune 测试
+      // 正是借助该语义驱动 _pruneRemovedSessions。
       body: TerminalPage(
         key: ValueKey('terminal-under-test-$worktreeInfo'),
         book: _book(baseUrl ?? 'http://127.0.0.1:1'),
@@ -634,6 +688,7 @@ Future<void> _pump(
         onWorktreesMutated: onWorktreesMutated,
         confirmLeaveDirty: confirmLeaveDirty,
         onActiveSessionChanged: onActiveSessionChanged,
+        sessionsRefreshToken: sessionsRefreshToken,
         sessionsClient: sessions,
         promptsClient: prompts,
         gitClient: git,
@@ -2122,5 +2177,168 @@ void main() {
     expect(sessions.replayIds, [
       'sA0', 'sA1', 'sA2', 'sA3', 'sA4', 'sA5', 'sA6', 'sA7', 'sB', 'sA0',
     ]);
+  });
+
+  testWidgets('low-3 会话 chip 不被动作 busy 整体禁用：commit 在途仍可切换会话',
+      (tester) async {
+    final socket = _FakeSocket();
+    final git = _GatedCommitGit();
+    final sessions = _FakeSessions([_s('s0'), _s('s1')]);
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      http: _StubWebSocketHttp(() => socket),
+    );
+    expect(sessions.replayIds, ['s0']);
+
+    // 工具行一键 commit（message 空 = AI 生成，无对话框）挂起在途。
+    await tester.tap(find.byIcon(Icons.commit));
+    await tester.pump();
+    expect(git.commitCalls, 1);
+
+    // busy 在途：chip 选择仍可用（对齐 web 仅关闭 X gated）——切到 s1 并 replay。
+    await tester.tap(find.text('s1 · 0 pane'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.replayIds, ['s0', 's1']);
+    expect(sessions.focusedIds, contains('s1'));
+
+    // 放行 commit：正常收尾（成功 SnackBar 2.5s），避免残留 Timer。
+    git.commitGate.complete();
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('low-4 PTY resize 失败：500 上屏错误条；404 视为会话关闭静默',
+      (tester) async {
+    // 阶段 A：500 → 常驻错误条「调整终端尺寸失败」。
+    final sessionsA = _FailingResizeSessions([_s('s0')])
+      ..resizeError = LanHttpException(500, 'boom');
+    await _pump(tester, sessions: sessionsA);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(sessionsA.resizeCalls, isNotEmpty);
+    expect(find.textContaining('调整终端尺寸失败'), findsOneWidget);
+
+    // 阶段 B：404 → 会话已关闭属预期，静默（换 worktreeInfo 迫使换 key 重挂，
+    // 注入新的 sessions fake）。
+    final sessionsB = _FailingResizeSessions([_s('s9')])
+      ..resizeError = LanHttpException(404, 'not found');
+    await _pump(
+      tester,
+      sessions: sessionsB,
+      worktreeInfo: const {
+        'id': 'w1',
+        'name': 'w1',
+        'branch': 'feat/resize',
+        'isMain': false,
+      },
+    );
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(sessionsB.resizeCalls, isNotEmpty);
+    expect(find.textContaining('调整终端尺寸失败'), findsNothing);
+  });
+
+  testWidgets('low-5 相册贴图 busy 防重：HTTP 挂起期间入口禁用、完成后恢复',
+      (tester) async {
+    final socket = _FakeSocket();
+    final sessions = _GatedPasteImageSessions([_s('s0')]);
+    // pickImage 方法通道返回临时图片文件；文件创建用同步 IO（fake async 内异步
+    // 文件写永不完成会挂死测试），读文件走 runAsync 内的真实 IO。
+    final tempDir = Directory.systemTemp.createTempSync('paste-image-test');
+    final File pickFile = File('${tempDir.path}/pick.png')
+      ..writeAsBytesSync(List<int>.generate(16, (i) => i));
+    addTearDown(() {
+      if (tempDir.existsSync()) {
+        tempDir.deleteSync(recursive: true);
+      }
+    });
+    const pickerChannel = MethodChannel('plugins.flutter.io/image_picker');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(pickerChannel, (call) async {
+      if (call.method == 'pickImage') {
+        return pickFile.path;
+      }
+      return null;
+    });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(pickerChannel, null);
+    });
+
+    await _pump(tester, sessions: sessions, http: _StubWebSocketHttp(() => socket));
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
+    expect(_iconButton(tester, Icons.photo_outlined).onPressed, isNotNull);
+
+    // 选图 + 读文件走真实 IO：整段包在 runAsync 里让真实事件循环驱动，
+    // 直到 paste-image 请求发出（busy 已置位）。
+    await tester.runAsync(() async {
+      await tester.tap(find.byIcon(Icons.photo_outlined));
+      while (sessions.pasteImageCalls == 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    });
+    await tester.pump();
+    expect(sessions.pasteImageCalls, 1);
+    // HTTP 挂起期间入口禁用（防重入）。
+    expect(_iconButton(tester, Icons.photo_outlined).onPressed, isNull);
+
+    // 完成（finally 复位）：入口恢复可用。
+    sessions.pasteGate.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(_iconButton(tester, Icons.photo_outlined).onPressed, isNotNull);
+  });
+
+  testWidgets('low-6 合并后令牌驱动权威刷新：激活会话被删收敛下一会话，已消失会话常驻缓冲被清理',
+      (tester) async {
+    final socket = _FakeSocket();
+    final sessions = _FakeSessions([
+      _s('s0', status: 'exited'),
+      _s('s1'),
+    ]);
+    await _pump(tester, sessions: sessions, http: _StubWebSocketHttp(() => socket));
+    // boot：同 worktree running 优先 → s1 激活并 replay。
+    expect(sessions.replayIds, ['s1']);
+
+    // 模拟 Git 页合并删除 s1 所属 worktree：权威列表只剩 s0，壳层 bump 令牌 0→1。
+    sessions.sessions = [_s('s0', status: 'exited')];
+    await _pump(
+      tester,
+      sessions: sessions,
+      http: _StubWebSocketHttp(() => socket),
+      sessionsRefreshToken: 1,
+    );
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    // 激活会话 s1 被清理 → 按优先级收敛到剩余的 s0（exited 可查看，replay 建画面）。
+    expect(sessions.replayIds, ['s1', 's0']);
+    expect(find.text('s1 · 0 pane'), findsNothing);
+    expect(find.text('s0 · 0 pane'), findsOneWidget);
+
+    // 外部又新建 s1：令牌 1→2 刷新后 chip 恢复；点 s1 需重新 replay——证明旧
+    // 常驻缓冲已被 prune（若未清理，切回会命中缓冲不 replay）。
+    sessions.sessions = [_s('s0', status: 'exited'), _s('s1')];
+    await _pump(
+      tester,
+      sessions: sessions,
+      http: _StubWebSocketHttp(() => socket),
+      sessionsRefreshToken: 2,
+    );
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('s1 · 0 pane'), findsOneWidget);
+    await tester.tap(find.text('s1 · 0 pane'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.replayIds, ['s1', 's0', 's1']);
   });
 }

@@ -385,11 +385,18 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
 
   @override
   void dispose() {
+    // 兜底：页面销毁时若保存委托仍指向本页（异常路径下 dirty 未清），解除注册，
+    // 避免壳层三选「保存」打到已卸载页面的 State。
+    if (identical(widget.workspace.saveHandler, _save)) {
+      widget.workspace.saveHandler = null;
+    }
     _editor.dispose();
     super.dispose();
   }
 
   void _markDirty() {
+    // 注册保存委托：壳层跨项目切换三选「保存」经此执行真实保存（成功后清除）。
+    widget.workspace.saveHandler = _save;
     widget.workspace.markDirty(
       projectId: widget.projectId,
       worktreeId: widget.worktreeId,
@@ -455,7 +462,11 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
         _dirty = false;
         _saving = false;
       });
+      // 保存成功即清 dirty 快照与保存委托（三选「保存」通道随之收口）。
       widget.workspace.markClean();
+      if (identical(widget.workspace.saveHandler, _save)) {
+        widget.workspace.saveHandler = null;
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已保存')));
       }
@@ -645,6 +656,9 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
           Navigator.of(context).pop();
         } else if (choice == 'discard') {
           widget.workspace.markClean();
+          if (identical(widget.workspace.saveHandler, _save)) {
+            widget.workspace.saveHandler = null;
+          }
           Navigator.of(context).pop();
         }
       },

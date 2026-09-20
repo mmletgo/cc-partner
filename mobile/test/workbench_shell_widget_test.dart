@@ -406,6 +406,112 @@ class _CtxHttp extends LanHttpClient {
   }
 }
 
+/// worktrees 页删除收敛测试假 HTTP：单项目 p1 三棵树（wt-main 主树 + wt-1/wt-2
+/// 功能树）+ 绑定 wt-1 的会话；worktrees/remove 返回成功 envelope 并同步把该树
+/// 从权威列表移除，计数 worktrees/sessions 请求次数（终端会话刷新令牌断言）。
+class _WorktreesMutationHttp extends LanHttpClient {
+  int worktreesListCalls = 0;
+  int sessionsListCalls = 0;
+
+  List<Map<String, dynamic>> trees = [
+    {'id': 'wt-main', 'name': 'main', 'branch': 'main', 'isMain': true, 'path': '/repo'},
+    {
+      'id': 'wt-1',
+      'name': 'feat',
+      'branch': 'feat/app',
+      'isMain': false,
+      'path': '/repo/.worktrees/feat-app',
+    },
+    {
+      'id': 'wt-2',
+      'name': 'chore',
+      'branch': 'chore/x',
+      'isMain': false,
+      'path': '/repo/.worktrees/chore-x',
+    },
+  ];
+
+  @override
+  Future<Map<String, dynamic>> getJson(String baseUrl, String path) async {
+    if (path == '/api/orchestrator/config') {
+      return <String, dynamic>{};
+    }
+    if (path == '/api/health') {
+      return {
+        'protocol_version': 2,
+        'capabilities': ['attention.v1', 'attention.v2'],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> getDynamic(String baseUrl, String path) async {
+    if (path == '/api/mobile/attention/v2' || path == '/api/mobile/attention') {
+      return {'items': <Map<String, dynamic>>[]};
+    }
+    if (path == '/api/mobile/workbench/projects/list') {
+      return {
+        'projects': [
+          {'id': 'p1', 'name': 'demo', 'path': '/repo', 'kind': 'local'},
+        ],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    if (path == '/api/mobile/workbench/sessions/list') {
+      sessionsListCalls += 1;
+      return [
+        {'id': 's1', 'projectId': 'p1', 'name': 's1', 'status': 'running', 'worktreeId': 'wt-1'},
+      ];
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String baseUrl,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      worktreesListCalls += 1;
+      return {
+        'ok': true,
+        'worktrees': [for (final tree in trees) Map<String, dynamic>.from(tree)],
+      };
+    }
+    if (path == '/api/mobile/workbench/worktrees/remove') {
+      final id = body['worktreeId'] as String?;
+      trees = [
+        for (final tree in trees)
+          if (tree['id'] != id) Map<String, dynamic>.from(tree),
+      ];
+      return {'kind': 'succeeded'};
+    }
+    if (path == '/api/mobile/workbench/sessions/replay') {
+      return {'sessionId': body['sessionId'], 'snapshot': 'boot-ok', 'lastSeq': 0};
+    }
+    if (path == '/api/mobile/workbench/sessions/focus' ||
+        path == '/api/mobile/workbench/sessions/zoom-pane') {
+      return <String, dynamic>{};
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<WebSocket> openWebSocket(
+    String baseUrl,
+    String path, {
+    Iterable<String>? protocols,
+  }) {
+    return Completer<WebSocket>().future;
+  }
+}
+
 /// P1-3「看见即已读」测试假 HTTP：单树单会话列表 + 两条未读 agentNeedsInput 条目
 /// （一条命中当前会话 s1，一条属于其它会话 s9）；记录 markRead 请求体与
 /// sessions/focus 的 streamActive 取值，验证切会话/离开终端面板时的 unfocus 补发。
@@ -769,7 +875,7 @@ Future<AddressBook> _pumpHomeWithFiles(
 }
 
 /// 挂载 WorkbenchHome 并返回地址簿（lastLocation 持久化断言用）。
-Future<AddressBook> _pumpHomeWithBook(WidgetTester tester, _CtxHttp http) async {
+Future<AddressBook> _pumpHomeWithBook(WidgetTester tester, LanHttpClient http) async {
   final book = await _panelBook();
   await tester.pumpWidget(
     MaterialApp(home: WorkbenchHome(book: book, http: http)),
@@ -1668,5 +1774,140 @@ void main() {
     expect(http.replayedSessionIds, ['s-p1', 's-p2'],
         reason: '切回 p1 命中跨项目常驻缓冲，不重放 s-p1');
     expect(find.text('会话一 · 0 pane'), findsOneWidget, reason: '切回后 chip 列表回到 p1 会话');
+  });
+
+  testWidgets('low-1 worktrees 详情失败：同项目行完整重拉；错误条「重试」重拉成功后清除',
+      (tester) async {
+    final http = _CtxHttp();
+    http.failWorktreesList = true;
+    await _pumpHomeWithBook(tester, http);
+    await tester.tap(find.text('demo'));
+    await tester.pumpAndSettle();
+    expect(http.worktreesListCalls, 1, reason: '首次打开加载失败（详情 error）');
+
+    // 返回项目列表：详情 error 态显示错误条 + 重试（对齐 web projectDetailRetry）。
+    await _backToProjectsViaDrawer(tester);
+    expect(find.byKey(const Key('projects-detail-error')), findsOneWidget);
+    expect(find.byKey(const Key('projects-detail-retry')), findsOneWidget);
+
+    // 详情 error 时点同一项目行：不再早退，完整重拉（仍失败）。
+    await tester.tap(find.byKey(const Key('project-row-p1')));
+    await tester.pumpAndSettle();
+    expect(http.worktreesListCalls, 2, reason: '详情失败后点同项目应重拉（恢复入口）');
+
+    await _backToProjectsViaDrawer(tester);
+    expect(find.byKey(const Key('projects-detail-error')), findsOneWidget);
+
+    // 恢复后点「重试」：重拉成功 → 详情 ready → 错误条与重试入口消失。
+    http.failWorktreesList = false;
+    await tester.tap(find.byKey(const Key('projects-detail-retry')));
+    await tester.pumpAndSettle();
+    expect(http.worktreesListCalls, 4,
+        reason: '「重试」重跑详情加载（#3），成功后连接态恢复在线边沿再自动重拉一次（#4）');
+    expect(find.byKey(const Key('projects-detail-error')), findsNothing);
+    expect(find.byKey(const Key('projects-detail-retry')), findsNothing);
+
+    // 详情 ready 后点同项目行：早退——直接回终端且不重拉。
+    await tester.tap(find.byKey(const Key('project-row-p1')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('worktree-strip')), findsOneWidget);
+    expect(http.worktreesListCalls, 4, reason: '详情 ready 后同项目早退不重拉');
+  });
+
+  testWidgets('low-2 Worktrees 页删除成功回调壳层：激活树删除回落主树、strip 同步移除',
+      (tester) async {
+    final http = _WorktreesMutationHttp();
+    await _pumpHomeWithBook(tester, http);
+    await tester.tap(find.text('demo'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('worktree-strip')), findsOneWidget);
+
+    // 切到功能树 wt-1（激活树）。
+    await tester.tap(find.byKey(const Key('worktree-wt-1')));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<ChoiceChip>(find.byKey(const Key('worktree-wt-1'))).selected,
+      isTrue,
+    );
+
+    // 进入 Worktrees 页删除激活树 wt-1。
+    await _gotoPanelViaDrawer(tester, 'worktrees');
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '移除'));
+    await tester.pumpAndSettle();
+
+    // 壳层收敛：strip 不再含已删树，激活按主树优先回落 wt-main。
+    await _gotoPanelViaDrawer(tester, 'terminal');
+    expect(find.byKey(const Key('worktree-wt-1')), findsNothing);
+    expect(find.byKey(const Key('worktree-wt-2')), findsOneWidget);
+    expect(
+      tester.widget<ChoiceChip>(find.byKey(const Key('worktree-wt-main'))).selected,
+      isTrue,
+      reason: '删除激活树后壳层应回落主树',
+    );
+    final sessionsAfterActiveRemove = http.sessionsListCalls;
+
+    // 删除非激活树 wt-2：strip 同步移除；令牌 bump 驱动终端会话权威刷新。
+    await _gotoPanelViaDrawer(tester, 'worktrees');
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-2')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '移除'));
+    await tester.pumpAndSettle();
+    await _gotoPanelViaDrawer(tester, 'terminal');
+    expect(find.byKey(const Key('worktree-wt-2')), findsNothing);
+    expect(find.byKey(const Key('worktree-wt-main')), findsOneWidget);
+    expect(http.sessionsListCalls, greaterThan(sessionsAfterActiveRemove),
+        reason: 'worktrees 变更后壳层 bump 会话刷新令牌，终端拉权威列表');
+
+    // 泵过 SnackBar 时长，避免残留 Timer。
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('low-7 跨项目切换 dirty 三选：取消不切换；丢弃后切换且清 dirty 快照',
+      (tester) async {
+    final http = _CtxHttp();
+    final files = FileWorkspaceController();
+    // 模拟打开中的草稿页注册保存委托（三选中的「保存」因此可见）。
+    files.saveHandler = () async {
+      files.markClean();
+      return true;
+    };
+    await _pumpHomeWithFiles(tester, http, files);
+    await tester.tap(find.text('demo'));
+    await tester.pumpAndSettle();
+    expect(http.worktreesListCalls, 1);
+    files.markDirty(projectId: 'p1', worktreeId: 'wt-main', path: 'src/main.rs');
+
+    // 返回项目列表，点不同项目 p2：先弹「取消/丢弃/保存」三选（对齐 web
+    // confirmFileContextSwitch 的跨项目预检）。
+    await _backToProjectsViaDrawer(tester);
+    await tester.tap(find.byKey(const Key('project-row-p2')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('project-switch-dirty-dialog')), findsOneWidget);
+    expect(find.byKey(const Key('project-switch-dirty-cancel')), findsOneWidget);
+    expect(find.byKey(const Key('project-switch-dirty-discard')), findsOneWidget);
+    expect(find.byKey(const Key('project-switch-dirty-save')), findsOneWidget);
+
+    // 取消：中止切换——激活项目仍是 p1，未拉取 p2 的列表。
+    await tester.tap(find.byKey(const Key('project-switch-dirty-cancel')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('project-row-active-p1')), findsOneWidget);
+    expect(http.worktreesListCalls, 1, reason: '取消后不得发起切换');
+    expect(files.snapshot.dirty, isTrue, reason: '取消不清 dirty 快照');
+
+    // 再点 p2 并选择丢弃：清 dirty 快照后走完整切换。
+    await tester.tap(find.byKey(const Key('project-row-p2')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('project-switch-dirty-discard')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('worktree-strip')), findsOneWidget);
+    expect(
+      tester.widget<ChoiceChip>(find.byKey(const Key('worktree-wt-p2-main'))).selected,
+      isTrue,
+    );
+    expect(http.worktreesListCalls, 2, reason: '丢弃确认后切换到 p2 并拉取其列表');
+    expect(files.snapshot.dirty, isFalse, reason: '丢弃路径应清 dirty 快照');
   });
 }

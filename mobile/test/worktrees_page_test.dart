@@ -146,6 +146,7 @@ void main() {
     onCreateSession,
     String? activeId = 'wt-main',
     Future<bool> Function(String worktreeId)? confirmLeaveDirty,
+    VoidCallback? onWorktreesMutated,
   }) {
     return MaterialApp(
       home: Scaffold(
@@ -158,6 +159,7 @@ void main() {
           gitClient: git,
           onCreateSession: onCreateSession,
           confirmLeaveDirty: confirmLeaveDirty,
+          onWorktreesMutated: onWorktreesMutated,
         ),
       ),
     );
@@ -700,6 +702,47 @@ void main() {
     expect(git.mutationOperationIds, [git.mergeOperationIds.first]);
     expect(find.byKey(const Key('worktrees-unknown-banner')), findsNothing);
     expect(find.textContaining('操作失败，可以重新发起'), findsOneWidget);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('删除/合并成功回调 onWorktreesMutated（壳层收敛接缝契约）', (tester) async {
+    final git = seed();
+    git.trees = [
+      ...git.trees,
+      {
+        'id': 'wt-2',
+        'name': 'chore',
+        'branch': 'chore/x',
+        'isMain': false,
+        'path': '/repo/.worktrees/chore-x',
+      },
+    ];
+    var mutated = 0;
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        activeId: 'wt-1',
+        onWorktreesMutated: () => mutated++,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 删除激活树 wt-1：成功 → 回调壳层一次。
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '移除'));
+    await tester.pumpAndSettle();
+    expect(git.removeCount, 1);
+    expect(mutated, 1, reason: '删除成功后应回调壳层（重拉列表 + bump 会话令牌）');
+
+    // 合并非激活树 wt-2：成功 → 再回调一次。
+    await tester.tap(find.byKey(const Key('worktree-merge-wt-2')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+    expect(git.mergeCount, 1);
+    expect(mutated, 2, reason: '合并成功后应再回调壳层一次');
     await flushSnackbars(tester);
   });
 }

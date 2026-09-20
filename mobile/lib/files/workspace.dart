@@ -238,6 +238,24 @@ class FileDirtySnapshot {
 class FileWorkspaceController {
   FileDirtySnapshot snapshot = const FileDirtySnapshot(dirty: false);
 
+  /// 保存委托：由持有草稿内容与保存通道的 FilePreviewPage 在草稿变 dirty 时注册；
+  /// 壳层「切换项目」三选确认中的「保存」经此执行真实保存（无页面注册时为 null）。
+  Future<bool> Function()? saveHandler;
+
+  /// 是否存在可执行的保存委托（决定三选确认是否展示「保存」项）。
+  bool get canSave => saveHandler != null;
+
+  /// Business Logic: 壳层在用户选择「保存并切换」时需要真正把草稿写回后端，
+  /// 但壳层拿不到草稿内容，必须委托给注册了保存通道的预览页。
+  /// Code Logic: 调用注册的委托并透传其成败；无委托时返回 false（调用方应中止切换）。
+  Future<bool> save() async {
+    final handler = saveHandler;
+    if (handler == null) {
+      return false;
+    }
+    return handler();
+  }
+
   void markDirty({
     required String projectId,
     required String worktreeId,

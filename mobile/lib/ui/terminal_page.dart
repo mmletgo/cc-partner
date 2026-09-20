@@ -47,12 +47,20 @@ const int _kResumeFollowMs = 8000;
 ///   会话私有）、Terminal 输出缓冲、ownerInstanceId/sequence 事件基线、resize 上报
 ///   基线与 hydration 触发状态；由页面的 LRU 表管理创建/复用/淘汰。
 class _MountedSession {
-  _MountedSession(this.sessionId, {required void Function(String) onOutput})
-      : policy = TerminalController(sessionId: sessionId),
+  _MountedSession(
+    this.sessionId, {
+    required this.projectId,
+    required void Function(String) onOutput,
+  })  : policy = TerminalController(sessionId: sessionId),
         terminal = Terminal(maxLines: 5000, onOutput: onOutput);
 
   /// 会话 id（与 policy.sessionId 一致，供 LRU 键与日志使用）。
   final String sessionId;
+
+  /// 该 buffer 所属项目 id：令牌驱动的 prune 只清理「当前项目内已消失会话」的
+  /// 常驻缓冲，其它项目的缓冲跨项目保留不受影响（对齐 web sessionsRef 仅含
+  /// 当前项目会话的口径）。
+  final String projectId;
 
   /// 本会话的协议策略（输入链路握手/背压、replayReady、hydration 标记均会话私有）。
   final TerminalController policy;
@@ -125,6 +133,7 @@ class TerminalPage extends StatefulWidget {
     this.onWorktreesMutated,
     this.confirmLeaveDirty,
     this.onActiveSessionChanged,
+    this.sessionsRefreshToken = 0,
     @visibleForTesting this.sessionsClient,
     @visibleForTesting this.promptsClient,
     @visibleForTesting this.gitClient,
@@ -163,6 +172,12 @@ class TerminalPage extends StatefulWidget {
   /// 壳层不能依赖 dispose），并取 [SessionSummary.displayName] 渲染状态行会话药丸
   /// （与 chip 条同源，对齐 web session={activeSession?.name}）。
   final ValueChanged<SessionSummary?>? onActiveSessionChanged;
+
+  /// 壳层会话刷新令牌：Git 页/worktrees 页 worktree 删除/合并成功后 bump。
+  /// didUpdateWidget 检测变化后拉当前项目权威会话列表，并 prune「本项目内已消失
+  /// 会话」的常驻缓冲（对齐 web onRefreshSessions + removeBuffer 的收敛语义；
+  /// 其它项目常驻缓冲不受影响）。默认 0 表示壳层未接（直连/测试）。
+  final int sessionsRefreshToken;
 
   /// 测试注入：覆盖默认 SessionsClient。
   final SessionsClient? sessionsClient;
@@ -395,6 +410,61 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       // preferred 会话变化（attention 跳转 / hook 修复聚焦）：复用 boot 的
       // pickPreferredSession 优先级选中目标会话（已有缓冲切回，否则 replay）。
       unawaited(_boot());
+    } else if (widget.sessionsRefreshToken != oldWidget.sessionsRefreshToken) {
+      // 壳层会话刷新令牌变化（Git 页/worktrees 页删除·合并成功）：拉权威列表并
+      // 清理本项目内已消失会话的常驻缓冲（对齐 web onRefreshSessions + removeBuffer）。
+      unawaited(_pruneRemovedSessions());
+    }
+  }
+
+  /// 业务逻辑：Git 页/worktrees 页删除·合并 worktree 成功后，源树的终端窗口已被
+  /// 服务端关闭；壳层 bump 会话刷新令牌后本页必须拉权威列表并清理「本项目内已消失
+  /// 会话」的常驻缓冲，避免后续 resize/输入打到不存在的会话（对齐 web
+  /// pruneMobileSessionsForClosedWorktree + removeBuffer）。其它项目的常驻缓冲
+  /// 跨项目保留，不受影响。
+  ///
+  /// Code Logic: 拉当前项目权威列表（失败静默保留现状，下次令牌变化或回前台再收敛）
+  /// → setState 写 _sessionList → 按「projectId 相同且 id 不在权威列表」收集待清理
+  /// buffer 并移除；若被清理的是当前激活会话，按既有「无会话/切换优先会话」路径收敛
+  /// （pickPreferredSession → _activateSession 或空态）。
+  Future<void> _pruneRemovedSessions() async {
+    List<SessionSummary> sessions;
+    try {
+      sessions = await _sessions.list(widget.project.id);
+    } catch (_) {
+      return;
+    }
+    if (!mounted || _disposed) {
+      return;
+    }
+    setState(() => _sessionList = sessions);
+    final validIds = sessions.map((session) => session.id).toSet();
+    final staleIds = [
+      for (final entry in _mounted.entries)
+        if (entry.value.projectId == widget.project.id &&
+            !validIds.contains(entry.key))
+          entry.key,
+    ];
+    if (staleIds.isEmpty) {
+      return;
+    }
+    setState(() {
+      for (final id in staleIds) {
+        final buffer = _mounted.remove(id);
+        buffer?.terminal.removeListener(_onTerminalStateMaybeChanged);
+      }
+    });
+    final activeId = _sessionId;
+    if (activeId != null && staleIds.contains(activeId)) {
+      // 激活会话被外部删除：与关闭当前会话同款收敛路径。
+      _sessionId = null;
+      final nextSession =
+          pickPreferredSession(sessions, worktreeId: widget.worktreeId);
+      if (nextSession != null) {
+        await _activateSession(nextSession);
+      } else {
+        await _showEmptyState();
+      }
     }
   }
 
@@ -576,7 +646,11 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     var buffer = _mounted[nextId];
     final isNewBuffer = buffer == null;
     if (buffer == null) {
-      buffer = _MountedSession(nextId, onOutput: _handleTerminalOutput)
+      buffer = _MountedSession(
+        nextId,
+        projectId: widget.project.id,
+        onOutput: _handleTerminalOutput,
+      )
         ..persistedCols = session.cols
         ..persistedRows = session.rows;
       _mounted[nextId] = buffer;
@@ -970,12 +1044,36 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           return;
         }
         buffer.lastSentResize = (sessionId, cols, rows);
-        _sessions.resize(sessionId, cols, rows).then<void>(
+        unawaited(_sessions.resize(sessionId, cols, rows).then<void>(
           (_) {},
-          onError: (Object _) {},
-        );
+          onError: (Object error) {
+            if (_disposed || !mounted) {
+              return;
+            }
+            // 会话已关闭（404/not-found 类）属预期：静默吞掉（对齐 web
+            // isExpectedClosedSessionError）；其余失败上屏常驻错误条。
+            if (_isClosedSessionError(error)) {
+              return;
+            }
+            _setPanelError('调整终端尺寸失败：$error');
+          },
+        ));
       });
     });
+  }
+
+  /// 判定错误是否为「会话已关闭」类（对齐 web classifyTerminalReplayError 的
+  /// not_found 分支）：LanHttpException 404 或错误文案含 not-found 语义时视为
+  /// 会话已不存在，resize/replay 类失败静默。
+  bool _isClosedSessionError(Object error) {
+    if (error is LanHttpException) {
+      return error.statusCode == 404;
+    }
+    final message = error.toString().toLowerCase();
+    return message.contains('404') ||
+        message.contains('not found') ||
+        message.contains('not_found') ||
+        message.contains('session_not_found');
   }
 
   /// 业务逻辑：xterm buffer/mouse 状态随输出变化，滚动转发门控翻转时需要重建手势层；
@@ -2421,25 +2519,42 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   }
 
   /// 业务逻辑：贴图要走现有 paste-image 通道，session 非 running 或输入流未就绪时禁用
-  /// （统一为 running + 流 ready + 门闩放行口径，对齐 web canPasteImage）。
-  bool get _canPasteImage => _canUseInputActions && _actionBusy == null;
+  /// （统一为 running + 流 ready + 门闩放行口径，对齐 web canPasteImage）；
+  /// 贴图在途（选图/上传）期间同样禁用，防重入（对齐 web pasteImageBusy）。
+  bool get _canPasteImage =>
+      _canUseInputActions && _actionBusy == null && !_pasteImageBusy;
 
+  /// 相册贴图在途标志：选图→读文件→paste-image 全程置位，finally 复位。
+  bool _pasteImageBusy = false;
+
+  /// 业务逻辑：相册选图后立刻经 paste-image 通道写入（无预览）；全程 busy 防重入，
+  /// HTTP 挂起期间入口禁用、完成（成败）后恢复（对齐 web pasteImageBusy +
+  /// finally 复位）；失败上屏常驻错误条。
   Future<void> _pasteImage() async {
     final sessionId = _sessionId;
     if (sessionId == null || !_canPasteImage) {
       return;
     }
-    final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
-    if (picked == null) {
+    if (!mounted || _disposed) {
       return;
     }
-    final bytes = await picked.readAsBytes();
-    final b64 = base64Encode(bytes);
-    final mime = picked.mimeType ?? 'image/jpeg';
+    setState(() => _pasteImageBusy = true);
     try {
+      final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+      if (picked == null) {
+        return;
+      }
+      final bytes = await picked.readAsBytes();
+      final b64 = base64Encode(bytes);
+      final mime = picked.mimeType ?? 'image/jpeg';
       await _sessions.pasteImage(sessionId, 'data:$mime;base64,$b64');
     } catch (error) {
       _setPanelError('粘贴图片失败：$error');
+    } finally {
+      _pasteImageBusy = false;
+      if (mounted && !_disposed) {
+        setState(() {});
+      }
     }
   }
 
@@ -2488,9 +2603,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
                   backgroundColor: _sessionStatusColor(session.status),
                 ),
                 label: Text('${session.displayName} · ${session.paneCount} pane'),
-                onPressed: _actionBusy == null
-                    ? () => unawaited(_activateSession(session))
-                    : null,
+                // 对齐 web MobileTerminalPanel：chip 选择不随通用动作 busy 整体
+                // 禁用（commit/merge 在途仍可切换查看其它会话）；仅关闭 X 保持 gated。
+                onPressed: () => unawaited(_activateSession(session)),
                 onDeleted: _actionBusy == null
                     ? () => unawaited(_closeSession(session))
                     : null,

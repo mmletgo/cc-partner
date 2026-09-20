@@ -34,6 +34,7 @@ class WorktreesPage extends StatefulWidget {
     this.gitClient,
     this.onCreateSession,
     this.confirmLeaveDirty,
+    this.onWorktreesMutated,
   });
 
   final AddressBook book;
@@ -52,6 +53,12 @@ class WorktreesPage extends StatefulWidget {
   /// 删除激活 worktree 前的脏文件预检（由壳层注入 _confirmLeaveDirty，与 GitPage
   /// 同款固定接缝契约——页面拿不到 FileWorkspaceController）；取消时终止删除。
   final Future<bool> Function(String worktreeId)? confirmLeaveDirty;
+
+  /// 删除/合并成功（含 unknown 对账确认成功）后通知壳层统一收敛：重拉权威列表
+  /// （active 失效按主树优先回落，strip 不残留已删树）+ bump 终端会话刷新令牌
+  /// （对齐 web MobileWorktreePanel 的 onWorktreesChange/onRefreshSessions 回写；
+  /// 固定接缝契约）。
+  final VoidCallback? onWorktreesMutated;
 
   @override
   State<WorktreesPage> createState() => _WorktreesPageState();
@@ -302,7 +309,7 @@ class _WorktreesPageState extends State<WorktreesPage> {
       );
       if (envelope.succeeded) {
         _tracker.markIdle();
-        await _refresh();
+        await _afterRemoveSuccess();
         if (mounted) {
           _showSnack('已移除 worktree「$name」');
         }
@@ -312,6 +319,7 @@ class _WorktreesPageState extends State<WorktreesPage> {
         await _reconcile(
           envelope.clientOperationId ?? operationId,
           successMessage: '已移除 worktree「$name」',
+          onSuccess: _afterRemoveSuccess,
         );
         return;
       }
@@ -436,11 +444,20 @@ class _WorktreesPageState extends State<WorktreesPage> {
     }
   }
 
+  /// 删除成功共享出口：页内刷新 + 通知壳层统一收敛（权威列表回落 active、strip
+  /// 同步移除、终端会话缓冲清理）。
+  Future<void> _afterRemoveSuccess() async {
+    await _refresh();
+    widget.onWorktreesMutated?.call();
+  }
+
   /// Business Logic: merge 成功后源 worktree 可能已被删除；源树正是当前 active 时
   /// 必须把选择交给 shell 兜底（resolveActiveWorktreeId 回落主树，dirty guard 保留）。
-  /// Code Logic: 刷新列表 → SnackBar「合并成功」→ merged 树是 activeId 时回调 onSelect(主树/首项)。
+  /// Code Logic: 刷新列表 → 通知壳层统一收敛 → SnackBar「合并成功」→ merged 树是
+  /// activeId 时回调 onSelect(主树/首项)。
   Future<void> _afterMergeSuccess(Map<String, dynamic> tree) async {
     await _refresh();
+    widget.onWorktreesMutated?.call();
     if (!mounted) {
       return;
     }

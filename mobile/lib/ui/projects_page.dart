@@ -16,6 +16,8 @@ class ProjectsPage extends StatefulWidget {
     this.onProjectRemoved,
     this.confirmRemove,
     this.activeProjectId,
+    this.detailError,
+    this.onRetryDetail,
     this.client,
     this.transferApi,
   });
@@ -35,6 +37,14 @@ class ProjectsPage extends StatefulWidget {
   /// 当前激活项目 id：命中的项目行高亮并带 selected 语义（对齐 web
   /// MobileProjectPanel mobileListItemActive + aria-pressed）；null 时无高亮。
   final String? activeProjectId;
+
+  /// 当前激活项目 worktrees 详情的加载失败文案（对齐 web projectDetailRetry 的
+  /// error 态投射）：非 null 时列表上方显示错误条 + 「重试」；null 不渲染。
+  final String? detailError;
+
+  /// 点错误条「重试」回调：壳层重跑当前项目 worktrees 详情加载，成功后 [detailError]
+  /// 随之清除。为 null 时错误条不提供重试入口。
+  final VoidCallback? onRetryDetail;
 
   /// 测试注入的项目接口；为空时按当前主机构造。
   final ProjectsClient? client;
@@ -274,6 +284,39 @@ class _ProjectsPageState extends State<ProjectsPage> {
             ],
           ),
         ),
+        if (widget.detailError != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Material(
+              key: const Key('projects-detail-error'),
+              color: Theme.of(context).colorScheme.errorContainer,
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.error_outline,
+                      size: 16,
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        widget.detailError!,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                    TextButton(
+                      key: const Key('projects-detail-retry'),
+                      onPressed: widget.onRetryDetail,
+                      child: const Text('重试'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         if (fleet != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
