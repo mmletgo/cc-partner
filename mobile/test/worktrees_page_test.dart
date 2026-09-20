@@ -163,6 +163,7 @@ void main() {
     String? activeId = 'wt-main',
     Future<bool> Function(String worktreeId)? confirmLeaveDirty,
     VoidCallback? onWorktreesMutated,
+    bool externalBusy = false,
   }) {
     return MaterialApp(
       home: Scaffold(
@@ -176,6 +177,7 @@ void main() {
           onCreateSession: onCreateSession,
           confirmLeaveDirty: confirmLeaveDirty,
           onWorktreesMutated: onWorktreesMutated,
+          externalBusy: externalBusy,
         ),
       ),
     );
@@ -832,6 +834,55 @@ void main() {
     // 合并完成后恢复可点（merged 树非激活树，成功后无兜底 onSelect）。
     gate.complete();
     await tester.pumpAndSettle();
+    expect(
+      tester.widget<ListTile>(find.byKey(const Key('worktree-item-wt-main'))).onTap,
+      isNotNull,
+    );
+    await tester.tap(find.byKey(const Key('worktree-item-wt-main')));
+    await tester.pump();
+    expect(selected, ['wt-main']);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('externalBusy（终端/Git 页合并在途）时卡片与合并/移除入口禁用，false 恢复', (
+    tester,
+  ) async {
+    final git = seed();
+    final selected = <String>[];
+
+    Future<void> pumpWith(bool externalBusy) async {
+      await tester.pumpWidget(
+        wrap(
+          await book(),
+          git,
+          onSelect: (tree) => selected.add(tree['id'] as String),
+          externalBusy: externalBusy,
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    // 终端/Git 页合并在途（壳层互斥锁置忙）：卡片选择禁用且不触发 onSelect，
+    // 合并/移除入口与页内忙碌锁同口径一并禁用（对齐 web isActionDisabled）。
+    await pumpWith(true);
+    expect(
+      tester.widget<ListTile>(find.byKey(const Key('worktree-item-wt-main'))).onTap,
+      isNull,
+    );
+    expect(
+      tester.widget<IconButton>(find.byKey(const Key('worktree-merge-wt-1'))).onPressed,
+      isNull,
+    );
+    expect(
+      tester.widget<IconButton>(find.byKey(const Key('worktree-delete-wt-1'))).onPressed,
+      isNull,
+    );
+    await tester.tap(find.byKey(const Key('worktree-item-wt-main')));
+    await tester.pump();
+    expect(selected, isEmpty);
+
+    // 合并结束（busy=false）：卡片与动作入口恢复，选择正常回调 onSelect。
+    await pumpWith(false);
     expect(
       tester.widget<ListTile>(find.byKey(const Key('worktree-item-wt-main'))).onTap,
       isNotNull,

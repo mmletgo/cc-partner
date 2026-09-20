@@ -35,6 +35,7 @@ class WorktreesPage extends StatefulWidget {
     this.onCreateSession,
     this.confirmLeaveDirty,
     this.onWorktreesMutated,
+    this.externalBusy = false,
   });
 
   final AddressBook book;
@@ -59,6 +60,12 @@ class WorktreesPage extends StatefulWidget {
   /// （对齐 web MobileWorktreePanel 的 onWorktreesChange/onRefreshSessions 回写；
   /// 固定接缝契约）。
   final VoidCallback? onWorktreesMutated;
+
+  /// 终端/Git 页合并在途时由壳层传入的外部互斥忙：与页内忙碌锁同口径禁用
+  /// 卡片选择与合并/移除入口——合并（将删源树）在途期间不允许从这里发起第二个
+  /// worktree 动作或切换（对齐 web MobileWorktreePanel busy=worktreeControlsBusy
+  /// → isActionDisabled；固定接缝契约，缺省 false 表示壳层未接）。
+  final bool externalBusy;
 
   @override
   State<WorktreesPage> createState() => _WorktreesPageState();
@@ -137,8 +144,11 @@ class _WorktreesPageState extends State<WorktreesPage> {
     );
   }
 
-  /// 动作按钮统一禁用条件：常规 busy 或 mutation 相位未回 idle。
-  bool get _actionLocked => _busy || _tracker.actionLocked;
+  /// 动作按钮统一禁用条件：常规 busy、mutation 相位未回 idle，或终端/Git 页
+  /// 合并在途的外部互斥忙（externalBusy 与页内锁同口径——卡片选择、合并/移除
+  /// 入口一并禁用，unknown 重新对账不受影响，对齐 web isActionDisabled）。
+  bool get _actionLocked =>
+      _busy || widget.externalBusy || _tracker.actionLocked;
 
   /// Business Logic: unknown 后必须用同一 clientOperationId 查 ledger + 权威列表对账
   /// （共享 reconcileWorktreeMutation 通道）；成功走成功流程、失败提示、仍 unknown 保持横幅。

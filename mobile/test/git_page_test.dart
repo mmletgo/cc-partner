@@ -28,6 +28,10 @@ class _FakeGitClient extends GitClient {
   /// 一次性 hook 修复闸门：非空时下一次 repairHookFailure 挂起（busy 态测试用）。
   Completer<Map<String, dynamic>>? repairGate;
 
+  /// 一次性 merge 挂起闸门：非空时下一次 merge 挂起直到 complete
+  /// （壳层 worktree 操作互斥忙回调的时序测试用）。
+  Completer<void>? mergeGate;
+
   /// push/pull/commit/merge 的动作脚本：默认成功 envelope，可改抛错或返回 unknown。
   Object? Function(String kind)? mutationScript;
   final List<String> mutationCalls = [];
@@ -121,7 +125,18 @@ class _FakeGitClient extends GitClient {
     required String worktreeId,
     required String clientOperationId,
   }) async {
-    return Map<String, dynamic>.from(_dispatch('merge') as Map);
+    // 请求已发出即记录（先于闸门与脚本，在途窗口内即可断言）；
+    // 闸门挂在记录之后、脚本执行之前——失败注入同样在在途窗口内等待放行
+    //（模拟合并请求仍在网络中，互斥忙时序测试控制完成时机）。
+    mutationCalls.add('merge');
+    final gate = mergeGate;
+    if (gate != null) {
+      mergeGate = null;
+      await gate.future;
+    }
+    final script = mutationScript;
+    final result = script != null ? script('merge') : _defaultMutation('merge');
+    return Map<String, dynamic>.from(result as Map);
   }
 
   @override
@@ -165,6 +180,7 @@ void main() {
     AddressBook addressBook,
     GitClient git, {
     VoidCallback? onWorktreesMutated,
+    ValueChanged<bool>? onWorktreeOperationBusyChanged,
     Future<bool> Function(String worktreeId)? confirmLeaveDirty,
     void Function(String sessionId)? onFocusRepairSession,
   }) {
@@ -177,6 +193,7 @@ void main() {
           worktreeId: 'wt-1',
           gitClient: git,
           onWorktreesMutated: onWorktreesMutated,
+          onWorktreeOperationBusyChanged: onWorktreeOperationBusyChanged,
           confirmLeaveDirty: confirmLeaveDirty,
           onFocusRepairSession: onFocusRepairSession,
         ),
@@ -812,5 +829,114 @@ void main() {
     expect(find.byKey(const Key('git-unknown-banner')), findsOneWidget);
     expect(git.mutationCalls, ['push']);
     expect(find.textContaining('同步主分支失败'), findsNothing);
+  });
+
+  testWidgets('B-low commit/push/pull 成功后回写壳层刷新 worktrees（onWorktreesMutated）', (
+    tester,
+  ) async {
+    final git = seed();
+    var mutated = 0;
+    await tester.pumpWidget(
+      wrap(await book(), git, onWorktreesMutated: () => mutated += 1),
+    );
+    await tester.pumpAndSettle();
+
+    // commit 成功 → 回调壳层（壳层 _loadWorktrees 重拉权威列表，strip/状态行收敛）。
+    await tester.tap(find.byKey(const Key('git-action-commit')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '提交').last);
+    await tester.pumpAndSettle();
+    expect(git.mutationCalls, contains('commit'));
+    expect(mutated, 1);
+
+    // push 成功 → 再回调一次（对齐 web refreshAfterAction('push')）。
+    await tester.tap(find.byKey(const Key('git-action-push')));
+    await tester.pumpAndSettle();
+    expect(git.mutationCalls, contains('push'));
+    expect(mutated, 2);
+
+    // pull 成功（带确认框）→ 再回调一次。
+    await tester.tap(find.byKey(const Key('git-action-pull')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('确认'));
+    await tester.pumpAndSettle();
+    expect(git.mutationCalls, contains('pull'));
+    expect(mutated, 3);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('B-low 同步完成后回写壳层刷新 worktrees（含部分兄弟失败）', (tester) async {
+    final git = seed()
+      ..allProjects = [
+        {'id': 'p1', 'deviceId': 'dev-a', 'gitRemoteFingerprint': 'fp-1'},
+        {
+          'id': 'p2',
+          'deviceId': 'dev-b',
+          'deviceName': '书房',
+          'gitRemoteFingerprint': 'fp-1',
+        },
+      ];
+    var mutated = 0;
+    await tester.pumpWidget(
+      wrap(await book(), git, onWorktreesMutated: () => mutated += 1),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('git-action-sync')));
+    await tester.pumpAndSettle();
+
+    // push + 兄弟 pull 执行完毕（对齐 web handleSync 尾部 refreshAfterAction('sync')）。
+    expect(git.mutationCalls, contains('push'));
+    expect(git.mutationCalls, contains('pull'));
+    expect(mutated, 1);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('B-low merge 全程回调壳层 worktree 操作互斥忙：置忙 → 成功/失败 finally 释放', (
+    tester,
+  ) async {
+    final git = seed();
+    final gate = Completer<void>();
+    git.mergeGate = gate;
+    final busyEvents = <bool>[];
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        onWorktreeOperationBusyChanged: busyEvents.add,
+        confirmLeaveDirty: (_) async => true,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 发起合并（源 wt-1 == 激活 worktree）并停在在途：确认框后即上报置忙。
+    await tester.tap(find.byKey(const Key('git-action-merge')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('确认'));
+    await tester.pump();
+    expect(busyEvents, [true]);
+
+    // 成功落地 → finally 释放；merge 调用发生在闸门放行后。
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(busyEvents, [true, false]);
+    expect(git.mutationCalls, contains('merge'));
+
+    // 失败路径（服务器确定失败）同样在 finally 成对释放，不泄漏忙状态。
+    final failGate = Completer<void>();
+    git.mergeGate = failGate;
+    git.mutationScript = (kind) {
+      git.mutationCalls.add(kind);
+      throw Exception('merge rejected');
+    };
+    await tester.tap(find.byKey(const Key('git-action-merge')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('确认'));
+    await tester.pump();
+    expect(busyEvents, [true, false, true]);
+    failGate.complete();
+    await tester.pumpAndSettle();
+    expect(busyEvents, [true, false, true, false]);
+    await flushSnackbars(tester);
   });
 }

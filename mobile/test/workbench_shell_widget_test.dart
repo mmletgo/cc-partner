@@ -628,6 +628,10 @@ class _AutoReadHttp extends LanHttpClient {
 class _TerminalMergeHttp extends LanHttpClient {
   int mergeCalls = 0;
 
+  /// 一次性 merge 挂起闸门：非空时 merge 请求挂起直到 complete
+  /// （壳层 worktree 操作互斥锁的时序测试用；null 表示不挂起）。
+  Completer<void>? mergeGate;
+
   List<Map<String, dynamic>> trees = [
     {'id': 'wt-main', 'name': 'main', 'branch': 'main', 'isMain': true, 'path': '/repo'},
     {
@@ -703,6 +707,11 @@ class _TerminalMergeHttp extends LanHttpClient {
     }
     if (path == '/api/mobile/workbench/worktrees/merge') {
       mergeCalls += 1;
+      // 在途挂起闸门：模拟 merge 请求仍在网络中（互斥锁测试控制完成时机）。
+      final gate = mergeGate;
+      if (gate != null) {
+        await gate.future;
+      }
       // 合并删源：权威列表同步移除 wt-1。
       trees = [
         for (final tree in trees)
@@ -737,6 +746,112 @@ class _TerminalMergeHttp extends LanHttpClient {
   }
 }
 
+/// low Git 页 commit 收敛测试假 HTTP：两棵树（wt-main 主树 + wt-1 功能树）+
+/// 绑定 wt-1 的会话；worktrees/commit 返回成功 envelope，计数 worktrees/list
+/// 与 sessions/list 调用次数（断言 commit 成功后壳层 _loadWorktrees 被触发 +
+/// 终端会话刷新令牌 bump 驱动 prune 拉取）。
+class _GitMutationShellHttp extends LanHttpClient {
+  int worktreesListCalls = 0;
+  int sessionsListCalls = 0;
+  int commitCalls = 0;
+
+  @override
+  Future<Map<String, dynamic>> getJson(String baseUrl, String path) async {
+    if (path == '/api/orchestrator/config') {
+      return <String, dynamic>{};
+    }
+    if (path == '/api/health') {
+      return {
+        'protocol_version': 2,
+        'capabilities': ['attention.v1', 'attention.v2'],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> getDynamic(String baseUrl, String path) async {
+    if (path == '/api/mobile/attention/v2' || path == '/api/mobile/attention') {
+      return {'items': <Map<String, dynamic>>[]};
+    }
+    if (path == '/api/mobile/workbench/projects/list') {
+      return {
+        'projects': [
+          {'id': 'p1', 'name': 'demo', 'path': '/repo', 'kind': 'local'},
+        ],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    if (path == '/api/mobile/workbench/sessions/list') {
+      sessionsListCalls += 1;
+      return [
+        {'id': 's1', 'projectId': 'p1', 'name': 's1', 'status': 'running', 'worktreeId': 'wt-1'},
+      ];
+    }
+    if (path == '/api/mobile/workbench/git/commits') {
+      return <Map<String, dynamic>>[];
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String baseUrl,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      worktreesListCalls += 1;
+      return {
+        'ok': true,
+        'worktrees': [
+          {'id': 'wt-main', 'name': 'main', 'branch': 'main', 'isMain': true, 'path': '/repo'},
+          {
+            'id': 'wt-1',
+            'name': 'feat',
+            'branch': 'feat/app',
+            'isMain': false,
+            'path': '/repo/.worktrees/feat-app',
+            'status': {
+              'branch': 'feat/app',
+              'changed': 2,
+              'ahead': 0,
+              'behind': 0,
+              'conflicts': 0,
+              'clean': false,
+              'canPush': true,
+            },
+          },
+        ],
+      };
+    }
+    if (path == '/api/mobile/workbench/worktrees/commit') {
+      commitCalls += 1;
+      return {'kind': 'succeeded', 'value': <String, dynamic>{}};
+    }
+    if (path == '/api/mobile/workbench/sessions/replay') {
+      return {'sessionId': body['sessionId'], 'snapshot': 'boot-ok', 'lastSeq': 0};
+    }
+    if (path == '/api/mobile/workbench/sessions/focus' ||
+        path == '/api/mobile/workbench/sessions/zoom-pane') {
+      return <String, dynamic>{};
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<WebSocket> openWebSocket(
+    String baseUrl,
+    String path, {
+    Iterable<String>? protocols,
+  }) {
+    return Completer<WebSocket>().future;
+  }
+}
 /// 跨项目终端缓冲常驻 + 状态行会话名测试假 HTTP：两个项目各一棵主树 + 一个会话
 /// （会话 name 与 id 不同，用于断言状态行显示会话名而非原始 id）；
 /// sessions/list 按请求 projectId 返回对应会话并记录，sessions/replay 记录重放的
@@ -1909,5 +2024,106 @@ void main() {
     );
     expect(http.worktreesListCalls, 2, reason: '丢弃确认后切换到 p2 并拉取其列表');
     expect(files.snapshot.dirty, isFalse, reason: '丢弃路径应清 dirty 快照');
+  });
+
+  testWidgets('low Git 页 commit 成功触发壳层权威收敛：_loadWorktrees 重拉 + 会话令牌 bump',
+      (tester) async {
+    final http = _GitMutationShellHttp();
+    await _pumpHome(tester, http);
+    await _openDemoProject(tester);
+
+    // 切到 Git 面板（非常驻：进入即重挂重拉）。
+    await _gotoPanelViaDrawer(tester, 'git');
+    await tester.pumpAndSettle();
+    final listsBeforeCommit = http.worktreesListCalls;
+    final sessionsBeforeCommit = http.sessionsListCalls;
+
+    // Git 页发起提交：说明框留空（AI 生成）→ 提交成功。
+    await tester.tap(find.byKey(const Key('git-action-commit')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '提交').last);
+    await tester.pumpAndSettle();
+    expect(http.commitCalls, 1);
+
+    // commit 成功后：Git 页自身 _refresh（+1）与壳层 onWorktreesMutated →
+    // _loadWorktrees（+1）都拉权威列表（对齐 web refreshAfterAction('commit')）；
+    // 终端会话刷新令牌 bump 驱动 prune 拉取（strip/状态行/终端合并门控收敛）。
+    expect(
+      http.worktreesListCalls,
+      listsBeforeCommit + 2,
+      reason: 'commit 成功后壳层应重拉权威 worktrees（页内刷新 + 壳层收敛各一次）',
+    );
+    expect(http.sessionsListCalls, greaterThan(sessionsBeforeCommit),
+        reason: '壳层 bump 会话刷新令牌，终端拉权威会话列表');
+
+    // 泵过 SnackBar 时长，避免残留 Timer。
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('low 终端合并挂起期间壳层互斥：strip chip 拒绝 + worktrees 卡片禁用，完成恢复',
+      (tester) async {
+    final http = _TerminalMergeHttp();
+    await _pumpHome(tester, http);
+    await _openDemoProject(tester);
+
+    // 选中功能树 wt-1（终端聚焦绑定会话 s1）。
+    await tester.tap(find.byKey(const Key('worktree-wt-1')));
+    await tester.pumpAndSettle();
+
+    // 发起合并并停在在途：merge 请求挂起 → 壳层互斥锁置忙。
+    http.mergeGate = Completer<void>();
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pump();
+    expect(http.mergeCalls, 1);
+
+    // 在途：点 strip 主树 chip 被拒绝并提示，选中态不变（合并将删源树，禁止切走）。
+    await tester.tap(find.byKey(const Key('worktree-wt-main')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('正在处理 worktree 操作，请稍候'), findsOneWidget);
+    expect(
+      tester.widget<ChoiceChip>(find.byKey(const Key('worktree-wt-1'))).selected,
+      isTrue,
+    );
+
+    // 在途：切到 worktrees 面板，卡片选择与合并/移除入口一并禁用（externalBusy）。
+    await _gotoPanelViaDrawer(tester, 'worktrees');
+    expect(
+      tester.widget<ListTile>(find.byKey(const Key('worktree-item-wt-main'))).onTap,
+      isNull,
+      reason: '合并在途时 worktrees 页卡片选择应禁用',
+    );
+    expect(
+      tester.widget<IconButton>(find.byKey(const Key('worktree-merge-wt-1'))).onPressed,
+      isNull,
+    );
+    expect(
+      tester.widget<IconButton>(find.byKey(const Key('worktree-delete-wt-1'))).onPressed,
+      isNull,
+    );
+
+    // 泵过拒绝提示的停留时长，避免后续断言被旧 SnackBar 干扰。
+    await tester.pump(const Duration(seconds: 5));
+
+    // 合并完成（成功）：壳层收敛 + 互斥释放。
+    http.mergeGate!.complete();
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<ListTile>(find.byKey(const Key('worktree-item-wt-main'))).onTap,
+      isNotNull,
+      reason: '合并完成后卡片选择应恢复',
+    );
+
+    // 恢复后点卡片正常切换进终端（无拒绝提示）。
+    await tester.tap(find.byKey(const Key('worktree-item-wt-main')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('正在处理 worktree 操作，请稍候'), findsNothing);
+    expect(find.byKey(const Key('worktree-strip')), findsOneWidget);
+
+    // 泵过「合并成功」SnackBar 时长，避免残留 Timer。
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
   });
 }

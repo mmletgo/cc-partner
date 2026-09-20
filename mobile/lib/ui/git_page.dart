@@ -37,6 +37,7 @@ class GitPage extends StatefulWidget {
     this.worktreeId,
     this.gitClient,
     this.onWorktreesMutated,
+    this.onWorktreeOperationBusyChanged,
     this.confirmLeaveDirty,
     this.onFocusRepairSession,
   });
@@ -52,6 +53,12 @@ class GitPage extends StatefulWidget {
   /// merge 成功（含 unknown 对账确认成功）后通知壳层刷新权威 worktrees 列表
   /// （对齐 web GitPanel onMergeWorktree/onRefreshWorktrees 回写；固定接缝契约）。
   final VoidCallback? onWorktreesMutated;
+
+  /// merge 全程（发起 → settle，含 unknown 对账）的壳层 worktree 操作互斥回调：
+  /// true 置忙 / false 释放（try/finally 成对；多个来源并发由壳层计数收敛）。
+  /// 壳层据此拒绝 worktree 切换并禁用 worktrees 页卡片（对齐 web
+  /// beginWorktreeOperation 全局计数锁；固定接缝契约）。
+  final ValueChanged<bool>? onWorktreeOperationBusyChanged;
 
   /// merge 的源 worktree 是当前激活 worktree 且 Files 有脏文件时的确认出口
   /// （GitPage 拿不到 FileWorkspaceController，由壳层注入 _confirmLeaveDirty；固定接缝契约）。
@@ -300,9 +307,11 @@ class _GitPageState extends State<GitPage> {
 
   /// Business Logic: commit/push/pull/merge 的统一执行通道——busy 防重入、稳定 operation id、
   /// unknown 相位锁定 + 对账，确定性失败解锁并提示，hook 失败转修复卡。
-  /// Code Logic: action 返回后端 envelope；succeeded → 成功提示+刷新（merge 再回写壳层刷新
-  /// worktrees）；failedHook → 修复卡；unknown → 自动对账，确认成功同样回写；传输异常
-  /// （超时/断连）→ 进入 unknown 相位；其余异常 → 解锁+错误提示。
+  /// Code Logic: action 返回后端 envelope；succeeded → 成功提示+刷新+回写壳层刷新
+  /// 权威 worktrees（merge 原有行为不变；对齐 web refreshAfterAction 对全部动作调
+  /// onRefreshWorktrees，壳层 _handleWorktreesMutated 为幂等收敛入口）；merge 全程
+  /// 回调壳层置忙（try/finally 成对释放）；failedHook → 修复卡；unknown → 自动对账，
+  /// 确认成功同样回写；传输异常（超时/断连）→ 进入 unknown 相位；其余异常 → 解锁+错误提示。
   Future<void> _runMutation(
     GitMutationKind kind,
     String label,
@@ -318,6 +327,12 @@ class _GitPageState extends State<GitPage> {
       worktreeId: tree['id'] as String? ?? '',
       nextOperationId: newClientOperationId(),
     );
+    // merge 会删除源 worktree：发起即通知壳层置忙，禁止在途期间切换 worktree
+    // （对齐 web handleMergeWorktree 的 beginWorktreeOperation 全程持锁）。
+    final isMerge = kind == GitMutationKind.merge;
+    if (isMerge) {
+      widget.onWorktreeOperationBusyChanged?.call(true);
+    }
     setState(() => _busy = label);
     try {
       final envelope = GitMutationEnvelope.from(await action(operationId));
@@ -327,10 +342,9 @@ class _GitPageState extends State<GitPage> {
           _showSnack('提交成功', transient: true);
         }
         await _refresh();
-        if (kind == GitMutationKind.merge) {
-          // merge 会删除源 worktree 或收集分支：回写壳层刷新权威列表（B3 接缝契约）。
-          widget.onWorktreesMutated?.call();
-        }
+        // commit/pull/push/merge 全部回写壳层收敛权威列表：壳层 strip/状态行/
+        // 终端合并门控依赖该回调保持新鲜（对齐 web refreshAfterAction）。
+        widget.onWorktreesMutated?.call();
         return;
       }
       if (envelope.failedHook) {
@@ -354,9 +368,8 @@ class _GitPageState extends State<GitPage> {
             _showSnack('提交成功', transient: true);
           }
           await _refresh();
-          if (kind == GitMutationKind.merge) {
-            widget.onWorktreesMutated?.call();
-          }
+          // 对账确认成功同样回写壳层（对齐 web 对账成功后 refreshAfterAction）。
+          widget.onWorktreesMutated?.call();
         } else if (result == GitMutationReconcile.confirmedFailed) {
           _showSnack('操作失败，可以重新发起。');
         }
@@ -375,6 +388,11 @@ class _GitPageState extends State<GitPage> {
         }
       }
     } finally {
+      // merge 置忙的成对释放：成功/失败/unknown 一律在 finally 释放（对齐 web
+      // endWorktreeOperation 的幂等 finally 语义）。
+      if (isMerge) {
+        widget.onWorktreeOperationBusyChanged?.call(false);
+      }
       if (mounted) {
         setState(() => _busy = null);
       }
@@ -656,6 +674,9 @@ class _GitPageState extends State<GitPage> {
       }
       await _refresh();
       await _loadProjects();
+      // 同步完成（含部分兄弟失败）也回写壳层收敛权威列表（对齐 web
+      // handleSync 尾部的 refreshAfterAction('sync')）。
+      widget.onWorktreesMutated?.call();
     } catch (error) {
       if (isTransportUnknownError(error)) {
         // push 请求可能已到达也可能没到达：进入 unknown 相位等对账，禁止盲重试。

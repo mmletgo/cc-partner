@@ -136,6 +136,13 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// strip 删除 worktree 进行中（防重复提交）。
   bool _removingTree = false;
 
+  /// 终端/Git 页合并在途的壳层互斥计数与收敛布尔（对齐 web
+  /// beginWorktreeOperation 全局计数锁 + worktreeOperationBusy）：
+  /// 各来源 true/false 成对上报，计数 > 0 即置忙——合并（将删源树）在途期间
+  /// 壳层拒绝 worktree 切换，worktrees 页卡片一并禁用；重复 true 由计数幂等收敛。
+  int _externalWorktreeOpCount = 0;
+  bool _externalWorktreeOpBusy = false;
+
   /// strip 创建 worktree 进行中（防重复提交）。
   bool _creatingTree = false;
 
@@ -714,14 +721,34 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     return _confirmLeaveDirty(fallbackId);
   }
 
+  /// Business Logic: 终端/Git 页合并上报的 worktree 操作互斥回调：true 计数 +1、
+  /// false 计数 -1（clamp 0 防御性收敛），> 0 即置忙。多个来源（终端 Offstage
+  /// 常驻 + Git 页）并发时按计数收敛；setState 仅在忙布尔翻转时触发。
+  /// Code Logic: 计数收敛 + 布尔缓存驱动 [_selectWorktree] 守卫与 worktrees 页
+  /// `externalBusy`（对齐 web worktreeOperationBusyRef + setWorktreeOperationBusy）。
+  void _handleWorktreeOperationBusyChanged(bool busy) {
+    _externalWorktreeOpCount = busy
+        ? _externalWorktreeOpCount + 1
+        : (_externalWorktreeOpCount - 1).clamp(0, 1 << 30);
+    final next = _externalWorktreeOpCount > 0;
+    if (next == _externalWorktreeOpBusy) {
+      return;
+    }
+    _externalWorktreeOpBusy = next;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
   /// Business Logic: worktrees 页/切换条选中新 worktree 后的统一入口：
   /// dirty 确认 → 写入 worktreeId；goTerminal 决定是否自动进入终端面板
   /// （对齐 web：点击 worktree 卡片切换后自动进入终端）。strip 删除/创建等
   /// worktree 操作全程在途时拒绝切换（对齐 web beginWorktreeOperation 的
   /// worktreeOperationBusy 互斥——创建全程持锁，不只是删除），避免与在途
-  /// 刷新/删除/创建竞态。
-  /// Code Logic: 创建在途、strip mutation 非 idle 或删除在途则提示并放弃；
-  /// dirty guard 不过则放弃；同树只更新选中，跨树刷新列表并回落 active。
+  /// 刷新/删除/创建竞态；终端/Git 页合并在途（壳层互斥计数 > 0）同样拒绝
+  /// （合并会删除源 worktree，切走激活树会与删除回落竞态，仅靠请求序号兜底）。
+  /// Code Logic: 创建在途、strip mutation 非 idle、删除在途或外部合并置忙则
+  /// 提示并放弃；dirty guard 不过则放弃；同树只更新选中，跨树刷新列表并回落 active。
   Future<void> _selectWorktree(
     Map<String, dynamic> tree, {
     bool goTerminal = false,
@@ -730,7 +757,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     if (id.isEmpty) {
       return;
     }
-    if (_removingTree || _creatingTree || _stripMutation.actionLocked) {
+    if (_removingTree ||
+        _creatingTree ||
+        _stripMutation.actionLocked ||
+        _externalWorktreeOpBusy) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('正在处理 worktree 操作，请稍候')),
@@ -1220,6 +1250,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
             setState(() => _terminalFullscreen = fullscreen);
           },
           onWorktreesMutated: _handleWorktreesMutated,
+          // Issue2 接缝契约：终端合并全程上报壳层互斥锁（拒绝切换 + 禁用 worktrees 卡片）。
+          onWorktreeOperationBusyChanged: _handleWorktreeOperationBusyChanged,
           // 合并激活树前先过 Files dirty 预检（取消不调后端；丢弃清快照，
           // 成功回落主树后不对已删树弹「请保存或丢弃」，对齐 web merge flow）。
           confirmLeaveDirty: _confirmTerminalMergeLeaveDirty,
@@ -1245,6 +1277,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
           // B3 接缝契约：merge/commit 成功后回写壳层统一收敛（重拉列表 + bump
           // 终端会话刷新令牌）。
           onWorktreesMutated: _handleWorktreesMutated,
+          // Issue2 接缝契约：Git 页合并全程上报壳层互斥锁（拒绝切换 + 禁用 worktrees 卡片）。
+          onWorktreeOperationBusyChanged: _handleWorktreeOperationBusyChanged,
           // B3 接缝契约：Git 页拿不到 FileWorkspaceController，dirty 确认由壳层注入。
           confirmLeaveDirty: (worktreeId) => _confirmLeaveDirty(worktreeId),
           // B4 接缝契约：hook 修复返回的 terminalSessionId 聚焦到终端面板。
@@ -1264,6 +1298,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
           // strip 不残留已删树）+ bump 终端会话刷新令牌（对齐 web
           // MobileWorktreePanel onWorktreesChange/onRefreshSessions 回写）。
           onWorktreesMutated: _handleWorktreesMutated,
+          // Issue2 接缝契约：终端/Git 页合并在途（壳层互斥锁置忙）时卡片选择
+          // 与合并/移除入口一并禁用（与页内忙碌锁同口径，对齐 web
+          // MobileWorktreePanel busy → isActionDisabled）。
+          externalBusy: _externalWorktreeOpBusy,
         );
       case WorkbenchPanel.automation:
         return AutomationPage(

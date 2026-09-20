@@ -131,6 +131,7 @@ class TerminalPage extends StatefulWidget {
     this.worktreePath,
     this.onFullscreenChanged,
     this.onWorktreesMutated,
+    this.onWorktreeOperationBusyChanged,
     this.confirmLeaveDirty,
     this.onActiveSessionChanged,
     this.sessionsRefreshToken = 0,
@@ -161,6 +162,13 @@ class TerminalPage extends StatefulWidget {
 
   /// commit/merge 成功后通知壳层刷新 worktrees（固定接缝契约）。
   final VoidCallback? onWorktreesMutated;
+
+  /// merge 全程（发起 → settle，含 unknown 对账）的壳层 worktree 操作互斥回调：
+  /// true 置忙 / false 释放（try/finally 成对；多个来源并发由壳层计数收敛）。
+  /// 壳层据此拒绝 worktree 切换并禁用 worktrees 页卡片——合并（将删源树）在途
+  /// 期间不允许切到其它树（对齐 web beginWorktreeOperation 全局计数锁；
+  /// 固定接缝契约，缺省 null 表示壳层未接（直连/测试））。
+  final ValueChanged<bool>? onWorktreeOperationBusyChanged;
 
   /// 合并激活 worktree 前的脏文件预检接缝（由壳层注入，与 GitPage/WorktreesPage
   /// 同款签名）：返回 false 时合并中止且不调后端；缺省 null 表示壳层未接（直连/测试）。
@@ -2377,6 +2385,10 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       nextOperationId: buildClientOperationId('merge'),
     );
     setState(() => _actionBusy = 'merge');
+    // 合并会删除源 worktree：发起即通知壳层置忙，禁止在途期间切换 worktree
+    // （对齐 web handleMergeWorktree 的 beginWorktreeOperation 全程持锁；
+    // finally 成对释放，成功/失败/unknown 一律释放）。
+    widget.onWorktreeOperationBusyChanged?.call(true);
     try {
       final envelope = await _git.merge(
         projectId: widget.project.id,
@@ -2411,6 +2423,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       _mergeMutation.markIdle();
       _setPanelError('合并失败：$error');
     } finally {
+      // 壳层互斥的成对释放（幂等；嵌套的 _reconcileMerge 各自配对）。
+      widget.onWorktreeOperationBusyChanged?.call(false);
       if (mounted && !_disposed) {
         setState(() => _actionBusy = null);
       }
@@ -2421,6 +2435,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// （对齐 web MobileTerminalPanel merge unknown 分支 + 共享对账矩阵），禁止新 id 盲重放。
   /// Code Logic: reconcileWorktreeMutation（merge intent 会取主分支提交作 authority）→
   /// 成功 → 合并成功流程；失败 → 显示原因并解锁；仍 unknown → 保持横幅可再对账。
+  /// 横幅独立入口与 _mergeWorktree 内嵌调用都在壳层 worktree 操作互斥锁内执行
+  /// （对账期间源树可能已被删，壳层计数对嵌套 true/false 成对收敛）。
   Future<void> _reconcileMerge({String? envelopeOperationId}) async {
     final operationId = envelopeOperationId ?? _mergeMutation.operationId;
     if (operationId == null) {
@@ -2430,21 +2446,26 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     if (mounted && !_disposed) {
       setState(() {});
     }
-    final result = await reconcileWorktreeMutation(
-      client: _git,
-      projectId: widget.project.id,
-      operationId: operationId,
-    );
-    _mergeMutation.settleReconcile(result);
-    if (!mounted || _disposed) {
-      return;
-    }
-    if (result == GitMutationReconcile.confirmedSucceeded) {
-      await _afterMergeSuccess();
-    } else if (result == GitMutationReconcile.confirmedFailed) {
-      _toast('合并失败，可以重新发起');
-    } else {
-      setState(() {});
+    widget.onWorktreeOperationBusyChanged?.call(true);
+    try {
+      final result = await reconcileWorktreeMutation(
+        client: _git,
+        projectId: widget.project.id,
+        operationId: operationId,
+      );
+      _mergeMutation.settleReconcile(result);
+      if (!mounted || _disposed) {
+        return;
+      }
+      if (result == GitMutationReconcile.confirmedSucceeded) {
+        await _afterMergeSuccess();
+      } else if (result == GitMutationReconcile.confirmedFailed) {
+        _toast('合并失败，可以重新发起');
+      } else {
+        setState(() {});
+      }
+    } finally {
+      widget.onWorktreeOperationBusyChanged?.call(false);
     }
   }
 

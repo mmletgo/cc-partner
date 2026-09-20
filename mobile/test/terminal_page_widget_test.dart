@@ -638,6 +638,35 @@ class _GatedCommitGit extends _FakeGit {
   }
 }
 
+/// merge 挂起在 Completer 上的 fake：断言壳层 worktree 操作互斥忙回调的
+/// 置忙/释放时序（在途 true，成功/失败 finally false）。
+class _GatedMergeGit extends _FakeGit {
+  _GatedMergeGit();
+
+  /// 一次性 merge 挂起闸门：非空时下一次 merge 挂起直到 complete。
+  Completer<void>? mergeGate;
+
+  @override
+  Future<Map<String, dynamic>> merge({
+    required String projectId,
+    required String worktreeId,
+    required String clientOperationId,
+  }) async {
+    mergeCalls += 1;
+    mergeOperationIds.add(clientOperationId);
+    final gate = mergeGate;
+    if (gate != null) {
+      mergeGate = null;
+      await gate.future;
+    }
+    final error = mergeError;
+    if (error != null) {
+      throw error;
+    }
+    return mergeResult;
+  }
+}
+
 class _FakePrompts extends PromptsClient {
   _FakePrompts({this.favorites, this.error}) : super(LanHttpClient(), 'http://127.0.0.1:1');
 
@@ -693,6 +722,7 @@ Future<void> _pump(
   String? baseUrl,
   ValueChanged<bool>? onFullscreenChanged,
   VoidCallback? onWorktreesMutated,
+  ValueChanged<bool>? onWorktreeOperationBusyChanged,
   Map<String, dynamic>? worktreeInfo,
   String? worktreePath,
   Future<bool> Function(String worktreeId)? confirmLeaveDirty,
@@ -718,6 +748,7 @@ Future<void> _pump(
         worktreePath: worktreePath,
         onFullscreenChanged: onFullscreenChanged,
         onWorktreesMutated: onWorktreesMutated,
+        onWorktreeOperationBusyChanged: onWorktreeOperationBusyChanged,
         confirmLeaveDirty: confirmLeaveDirty,
         onActiveSessionChanged: onActiveSessionChanged,
         sessionsRefreshToken: sessionsRefreshToken,
@@ -873,6 +904,57 @@ void main() {
     expect(mutated, 1);
     expect(find.text('合并成功'), findsOneWidget);
     // 让 SnackBar 的自动消失 Timer 走完，避免测试结束残留 pending Timer。
+    await tester.pump(const Duration(milliseconds: 3200));
+  });
+
+  testWidgets('merge 全程回调壳层 worktree 操作互斥忙：挂起置忙，成功/失败 finally 释放',
+      (tester) async {
+    final sessions = _FakeSessions([_s('s0')]);
+    final git = _GatedMergeGit();
+    final busyEvents = <bool>[];
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      onWorktreeOperationBusyChanged: busyEvents.add,
+      worktreeInfo: const {
+        'id': 'w1',
+        'name': 'w1',
+        'branch': 'feat/app',
+        'isMain': false,
+      },
+    );
+
+    // 发起合并并停在在途：确认框后即上报置忙（对齐 web beginWorktreeOperation）。
+    final gate = Completer<void>();
+    git.mergeGate = gate;
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pump();
+    expect(git.mergeCalls, 1);
+    expect(busyEvents, [true]);
+
+    // 成功落地 → finally 释放。
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(busyEvents, [true, false]);
+    expect(find.text('合并成功'), findsOneWidget);
+
+    // 失败路径（服务器确定失败）同样在 finally 成对释放，不泄漏忙状态。
+    final failGate = Completer<void>();
+    git.mergeGate = failGate;
+    git.mergeError = Exception('merge rejected');
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pump();
+    expect(busyEvents, [true, false, true]);
+    failGate.complete();
+    await tester.pumpAndSettle();
+    expect(busyEvents, [true, false, true, false]);
+    expect(find.textContaining('合并失败：'), findsOneWidget);
+    // 让首个「合并成功」SnackBar 的自动消失 Timer 走完，避免残留 pending Timer。
     await tester.pump(const Duration(milliseconds: 3200));
   });
 
