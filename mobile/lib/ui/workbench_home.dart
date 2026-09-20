@@ -73,10 +73,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   String? _sessionId;
   List<Map<String, dynamic>> _worktrees = [];
 
-  /// 终端页上报的「当前真实激活会话」（终端页内部切会话不经过壳层 setState 的
-  /// `_sessionId`）：离开终端面板/退出工作台时据此对旧会话补发 unfocus
-  /// （对齐 web activeSession effect cleanup 的 compare-and-clear）。
-  String? _liveTerminalSessionId;
+  /// 终端页上报的「当前真实激活会话」权威 DTO（终端页内部切会话不经过壳层 setState
+  /// 的 `_sessionId`）：离开终端面板/退出工作台时据此对旧会话补发 unfocus（对齐 web
+  /// activeSession effect cleanup 的 compare-and-clear）；[SessionSummary.displayName]
+  /// 驱动状态行会话药丸（对齐 web session={activeSession?.name}，与 chip 条同源）。
+  SessionSummary? _liveTerminalSession;
 
   /// needsInput「看见即已读」的聚焦 epoch（面板==terminal 且激活会话 id）：
   /// 变化时清空尝试集合，同会话只标一次（对齐 web useMarkNeedsInputAttentionOnSessionFocus）。
@@ -301,7 +302,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// fire-and-forget unfocus 当前终端会话：停止其远端窗口正文流过滤目标
   /// （失败静默，下一次 focus 以当前窗口重建；对齐 web sessions.focus(id, false)）。
   void _unfocusLiveTerminalSession() {
-    final id = _liveTerminalSessionId;
+    final id = _liveTerminalSession?.id;
     if (id == null || id.isEmpty) {
       return;
     }
@@ -326,7 +327,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       _attentionUnread = countTodayUnreadAttentionItems(items, DateTime.now());
     });
     final activeSession = _panel == WorkbenchPanel.terminal
-        ? (_liveTerminalSessionId ?? _sessionId)
+        ? (_liveTerminalSession?.id ?? _sessionId)
         : null;
     if (activeSession != null) {
       await _markNeedsInputReadFromSnapshot(activeSession, items);
@@ -343,7 +344,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// markRead，成功刷新徽章，失败回退尝试集合并保持未读（下次触发可重试）。
   void _scheduleNeedsInputAutoRead() {
     final activeSession = _panel == WorkbenchPanel.terminal
-        ? (_liveTerminalSessionId ?? _sessionId)
+        ? (_liveTerminalSession?.id ?? _sessionId)
         : null;
     final epoch = activeSession ?? '';
     if (epoch == _needsInputReadEpoch) {
@@ -888,18 +889,24 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     return null;
   }
 
-  /// 终端页上报当前真实激活会话：仅写字段 + 帧末重估「看见即已读」epoch，
-  /// 不 setState（终端页 dispose/重建可能发生在壳层 build/卸载期间，setState 不安全；
-  /// 该字段只驱动 fire-and-forget unfocus 与 epoch 比较）。
-  void _handleLiveSessionChanged(String? sessionId) {
-    if (_liveTerminalSessionId == sessionId) {
+  /// 终端页上报当前真实激活会话：写字段 + 帧末刷新状态行并重估「看见即已读」epoch
+  /// （setState 推迟到帧末且先校验 mounted——终端页 dispose/重建可能发生在壳层
+  /// build/卸载期间，不能在上报路径上同步 setState）。
+  ///
+  /// Code Logic：字段驱动三件事——fire-and-forget unfocus（离开面板/退出工作台）、
+  /// 状态行会话药丸（displayName，对齐 web session={activeSession?.name}）、
+  /// needsInput「看见即已读」epoch 比较。
+  void _handleLiveSessionChanged(SessionSummary? session) {
+    if (_liveTerminalSession?.id == session?.id &&
+        (_liveTerminalSession != null) == (session != null)) {
       return;
     }
-    _liveTerminalSessionId = sessionId;
+    _liveTerminalSession = session;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
       }
+      setState(() {});
       _scheduleNeedsInputAutoRead();
     });
   }
@@ -954,9 +961,14 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         // 切项目后旧 mutation unknown 锁不得污染新上下文（对齐 web 重置 effect）。
         _stripMutation.reset();
         _stripMutationError = null;
-        // 旧项目的项目级面板（终端/文件/Git/浏览器/worktrees/自动化）整体失效：
+        // 旧项目的项目级面板（文件/Git/浏览器/worktrees/自动化）整体失效：
         // 清除常驻记录让其随旧项目卸载，避免隐藏页面持有旧项目上下文。
-        _visitedPanels.removeAll(kProjectBoundPanels);
+        // 终端例外：终端页跨项目 hidden 常驻（对齐 web terminal 面板常驻 +
+        // backgroundSessions 跨项目保留输出缓冲），页面经 didUpdateWidget 自行
+        // 断开旧上下文并按新项目重新 boot，切回原项目时命中缓冲不清屏不重放。
+        _visitedPanels.removeAll(
+          kProjectBoundPanels.where((panel) => panel != WorkbenchPanel.terminal),
+        );
       }
       _gotoPanel(gated);
     });
@@ -1061,7 +1073,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       case WorkbenchPanel.terminal:
         final worktreeInfo = _currentWorktreeInfo;
         return TerminalPage(
-          key: ValueKey('terminal-${_project!.id}-$_worktreeId-$_sessionId'),
+          // key 稳定：终端面板跨项目/worktree/session 常驻（对齐 web terminal 面板
+          // hidden 常驻 + backgroundSessions 跨项目保留输出缓冲）。project/worktree/
+          // preferredSession 变化由页面 didUpdateWidget 断开旧上下文并重新 boot，
+          // _mounted 缓冲按 sessionId 跨项目保留，切回原项目不清屏不重放。
+          key: ValueKey('terminal'),
           book: widget.book,
           http: widget.http,
           project: _project!,
@@ -1256,7 +1272,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         hideAppBar: _terminalFullscreen,
         connection: _connection,
         worktreeLabel: _statusWorktreeLabel(),
-        sessionLabel: _sessionId,
+        // 状态行会话药丸显示激活会话显示名（与 chip 条同源），无激活会话回落 null
+        // （壳层渲染「session」占位，对齐 web session={activeSession?.name ?? null}）。
+        sessionLabel: _liveTerminalSession?.displayName,
         onSelect: _select,
         onDrawerOpened: _handleDrawerOpened,
         onBackToProjects: () {

@@ -15,6 +15,10 @@ import 'package:cc_partner_mobile/ui/terminal_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+// 终端缓冲内容断言：读 TerminalView 挂载的 Terminal buffer 调试文本
+// （xterm 与 terminal_page.dart 一致 hide 掉本包 TerminalController 命名冲突）。
+// ignore: depend_on_referenced_packages
+import 'package:xterm/xterm.dart' hide TerminalController;
 
 SessionSummary _s(
   String id, {
@@ -22,12 +26,13 @@ SessionSummary _s(
   bool panes = false,
   int paneCount = 0,
   String? worktreeId = 'w1',
+  String projectId = 'p1',
   int? cols,
   int? rows,
 }) =>
     SessionSummary(
       id: id,
-      projectId: 'p1',
+      projectId: projectId,
       name: id,
       status: status,
       worktreeId: worktreeId,
@@ -187,6 +192,39 @@ class _GatedReplaySessions extends _FakeSessions {
       {bool refreshHistory = false}) {
     replayIds.add(sessionId);
     return initialReplay.future;
+  }
+}
+
+/// hydration（refreshHistory replay）挂起在 Completer 上的 fake：
+/// complete(快照) / completeError 控制 hydration 网络往返的时序，
+/// 供「往返期间注入 live chunk」的暂存补写测试使用。
+class _GatedHydrateSessions extends _FakeSessions {
+  _GatedHydrateSessions(super.sessions);
+
+  final Completer<Map<String, dynamic>> hydrateGate =
+      Completer<Map<String, dynamic>>();
+
+  @override
+  Future<Map<String, dynamic>> hydrateScrollback(
+    String sessionId, {
+    Duration? timeout,
+  }) async {
+    hydrateIds.add(sessionId);
+    return hydrateGate.future;
+  }
+}
+
+/// 按项目过滤会话列表的 fake：记录每次 list 请求的 projectId（跨项目 boot 断言），
+/// 返回该项目的会话（TerminalPage boot/切上下文按新项目重新拉取）。
+class _MultiProjectSessions extends _FakeSessions {
+  _MultiProjectSessions(super.sessions);
+
+  final List<String> listedProjectIds = [];
+
+  @override
+  Future<List<SessionSummary>> list(String projectId) async {
+    listedProjectIds.add(projectId);
+    return sessions.where((session) => session.projectId == projectId).toList();
   }
 }
 
@@ -552,13 +590,14 @@ Future<void> _pump(
   Map<String, dynamic>? worktreeInfo,
   String? worktreePath,
   Future<bool> Function(String worktreeId)? confirmLeaveDirty,
-  ValueChanged<String?>? onActiveSessionChanged,
+  ValueChanged<SessionSummary?>? onActiveSessionChanged,
   LanHttpClient Function()? eventsHttpClientFactory,
 }) async {
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
-      // key 随 worktreeInfo 变化：模拟 shell 的 ValueKey 换树行为，避免同类型 widget
-      // 复用旧 State（旧 State 的 _git 注入实例会过期，导致断言打到旧 fake 上）。
+      // key 随 worktreeInfo 变化：本测试 helper 换 key 重挂 TerminalPage（壳层实际
+      // 已是稳定 key 常驻），避免同类型 widget 复用旧 State（旧 State 的 _git 注入
+      // 实例会过期，导致断言打到旧 fake 上）。
       body: TerminalPage(
         key: ValueKey('terminal-under-test-$worktreeInfo'),
         book: _book(baseUrl ?? 'http://127.0.0.1:1'),
@@ -1428,7 +1467,7 @@ void main() {
     expect(sessionsA.resizeCalls.length, 2);
 
     // 阶段 B：持久化 cols/rows 与实测相同（取阶段 A 实测值）→ 首帧不回传 resize。
-    // worktreeInfo 变化迫使壳层 key 换树，保证注入新的 sessions fake。
+    // worktreeInfo 变化迫使本测试 helper 的 key 换树，保证注入新的 sessions fake。
     final persisted = sessionsA.resizeCalls.first;
     final sessionsB = _FakeSessions([_s('s3', cols: persisted.$2, rows: persisted.$3)]);
     await _pump(
@@ -1741,18 +1780,269 @@ void main() {
 
   testWidgets('onActiveSessionChanged：boot/切会话/销毁均上报当前真实会话', (tester) async {
     final sessions = _FakeSessions([_s('s0'), _s('s1')]);
-    final reported = <String?>[];
+    final reported = <SessionSummary?>[];
     await _pump(tester, sessions: sessions, onActiveSessionChanged: reported.add);
-    expect(reported, ['s0']);
+    expect(reported.map((s) => s?.id), ['s0']);
+    // 上报的是权威 DTO：壳层据此取 displayName 渲染状态行会话药丸。
+    expect(reported.single?.displayName, 's0');
 
     await tester.tap(find.text('s1 · 0 pane'));
     await tester.pump();
     await tester.pump();
     await tester.pump();
-    expect(reported, ['s0', 's1']);
+    expect(reported.map((s) => s?.id), ['s0', 's1']);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
-    expect(reported, ['s0', 's1', null]);
+    expect(reported.map((s) => s?.id), ['s0', 's1', null]);
+  });
+
+  testWidgets('切换到 exited 会话：跳过 focus/zoom，无「切换终端失败」错误条，回放照常',
+      (tester) async {
+    final sessions = _FakeSessions([
+      _s('s0'),
+      _s('s1', status: 'exited', panes: true, paneCount: 1),
+    ]);
+    await _pump(tester, sessions: sessions);
+    expect(sessions.focusedIds, ['s0']);
+
+    // 切到 exited 的 s1：对齐 web focusSessionAndZoomById 首行——非 running 不调
+    // focus/zoom RPC，也不产生该路径的错误条；replay/清屏照常（仍可查看终态输出）。
+    await tester.tap(find.text('s1 · 1 pane'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.focusedIds, ['s0'], reason: 'exited 会话不调 focus');
+    expect(sessions.zoomCalls, 0, reason: 'exited 会话不调 zoom-pane');
+    expect(find.textContaining('切换终端失败'), findsNothing);
+    expect(sessions.replayIds, ['s0', 's1'], reason: '回放基线照常建立');
+
+    // 切回 running 的 s0：focus 照常。
+    await tester.tap(find.text('s0 · 0 pane'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.focusedIds, ['s0', 's0']);
+  });
+
+  testWidgets('hydration 在途实时输出不丢失：快照后按 seq 补写（seq<=lastSeq 跳过）',
+      (tester) async {
+    final socket = _FakeSocket();
+    final http = _ScriptedEventsHttp(socket);
+    final sessions = _GatedHydrateSessions([_s('s0')]);
+    await _pump(
+      tester,
+      sessions: sessions,
+      http: http,
+      eventsHttpClientFactory: () => http,
+    );
+
+    // 首次上滑触发 hydration，往返挂起在 gate 上。
+    final terminalCenter = tester.getCenter(find.byKey(const Key('terminal-view')));
+    final gesture = await tester.startGesture(terminalCenter);
+    await gesture.moveBy(const Offset(0, 120));
+    await tester.pump();
+    await gesture.up();
+    await tester.pump();
+    expect(sessions.hydrateIds, ['s0']);
+
+    // 往返期间 events 送达 live chunk（seq 5/6）：不写 terminal，进入暂存。
+    http.emitFrame({
+      'type': 'terminalOutput',
+      'ownerInstanceId': 'owner-1',
+      'sequence': 5,
+      'payload': {'sessionId': 's0', 'chunk': 'live-old\n'},
+    });
+    http.emitFrame({
+      'type': 'terminalOutput',
+      'ownerInstanceId': 'owner-1',
+      'sequence': 6,
+      'payload': {'sessionId': 's0', 'chunk': 'live-new\n'},
+    });
+    await tester.pump();
+    await tester.pump();
+
+    // 快照返回（lastSeq=5）：seq5 的 chunk 已含于快照被跳过，seq6 补写在快照之后。
+    sessions.hydrateGate.complete({
+      'sessionId': 's0',
+      'buffer': 'SNAPSHOT\n',
+      'lastSeq': 5,
+      'ownerInstanceId': 'owner-1',
+    });
+    await tester.pump();
+    await tester.pump();
+
+    final text = tester
+        .widget<TerminalView>(find.byKey(const Key('terminal-view')))
+        .terminal
+        .buffer
+        .toString();
+    expect(text, contains('SNAPSHOT'), reason: '快照已应用');
+    expect(text, contains('live-new'), reason: '往返期间的实时输出不丢失');
+    expect(text, isNot(contains('live-old')), reason: 'seq<=快照 lastSeq 的 chunk 已含于快照');
+    expect(text.indexOf('SNAPSHOT') < text.indexOf('live-new'), isTrue,
+        reason: '暂存 chunk 补写在权威快照之后');
+  });
+
+  testWidgets('hydration 失败：暂存 live chunk 先按序补写（防丢失）再上屏错误',
+      (tester) async {
+    final socket = _FakeSocket();
+    final http = _ScriptedEventsHttp(socket);
+    final sessions = _GatedHydrateSessions([_s('s0')]);
+    await _pump(
+      tester,
+      sessions: sessions,
+      http: http,
+      eventsHttpClientFactory: () => http,
+    );
+
+    final terminalCenter = tester.getCenter(find.byKey(const Key('terminal-view')));
+    final gesture = await tester.startGesture(terminalCenter);
+    await gesture.moveBy(const Offset(0, 120));
+    await tester.pump();
+    await gesture.up();
+    await tester.pump();
+    expect(sessions.hydrateIds, ['s0']);
+
+    http.emitFrame({
+      'type': 'terminalOutput',
+      'ownerInstanceId': 'owner-1',
+      'sequence': 9,
+      'payload': {'sessionId': 's0', 'chunk': 'live-lost\n'},
+    });
+    await tester.pump();
+    await tester.pump();
+
+    sessions.hydrateGate.completeError(Exception('hydration down'));
+    await tester.pump();
+    await tester.pump();
+
+    final text = tester
+        .widget<TerminalView>(find.byKey(const Key('terminal-view')))
+        .terminal
+        .buffer
+        .toString();
+    expect(text, contains('live-lost'), reason: '失败路径同样补写暂存 chunk，防丢失');
+    expect(find.textContaining('加载终端历史失败'), findsOneWidget);
+    expect(find.byKey(const Key('terminal-panel-error-action')), findsOneWidget);
+  });
+
+  testWidgets('跨项目切换：终端页 State 常驻，didUpdateWidget 重新 boot 且缓冲跨项目保留',
+      (tester) async {
+    final book = _book();
+    final sessions = _MultiProjectSessions([
+      _s('sA', worktreeId: 'wA'),
+      _s('sB', worktreeId: 'wB', projectId: 'p2'),
+    ]);
+    Widget pageFor(ProjectSummary project, String worktreeId) => MaterialApp(
+          home: Scaffold(
+            body: TerminalPage(
+              // 稳定 key：模拟壳层终端面板跨项目常驻（不再按 project/worktree 换 key）。
+              key: ValueKey('terminal'),
+              book: book,
+              http: LanHttpClient(),
+              project: project,
+              worktreeId: worktreeId,
+              sessionsClient: sessions,
+              backgroundTimersDisabled: true,
+            ),
+          ),
+        );
+
+    Future<void> rebuild(ProjectSummary project, String worktreeId) async {
+      await tester.pumpWidget(pageFor(project, worktreeId));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+    }
+
+    await rebuild(_project, 'wA');
+    expect(sessions.listedProjectIds, ['p1']);
+    expect(sessions.replayIds, ['sA']);
+    expect(find.text('sA · 0 pane'), findsOneWidget);
+
+    // 切到 p2/wB：didUpdateWidget 断开旧上下文（unfocus sA）并按新项目重新 boot。
+    await rebuild(const ProjectSummary(id: 'p2', name: 'demo2', path: '/tmp/demo2'), 'wB');
+    expect(sessions.listedProjectIds, ['p1', 'p2'], reason: '切项目后按新项目重新拉会话');
+    expect(sessions.unfocusedIds, ['sA'], reason: '切上下文对旧会话补发 unfocus');
+    expect(sessions.replayIds, ['sA', 'sB'], reason: 'p2 无缓冲 → replay sB');
+    expect(find.text('sB · 0 pane'), findsOneWidget);
+    expect(find.text('sA · 0 pane'), findsNothing, reason: 'chip 列表随新项目刷新');
+
+    // 切回 p1/wA：命中跨项目常驻缓冲 → 不清屏不重放。
+    await rebuild(_project, 'wA');
+    expect(sessions.listedProjectIds, ['p1', 'p2', 'p1']);
+    expect(sessions.replayIds, ['sA', 'sB'], reason: '切回 p1 命中缓冲，不重放 sA');
+    expect(sessions.focusedIds, ['sA', 'sB', 'sA']);
+    expect(sessions.unfocusedIds, ['sA', 'sB']);
+    expect(find.text('sA · 0 pane'), findsOneWidget);
+  });
+
+  testWidgets('LRU 常驻缓冲跨项目一视同仁淘汰（超出 8 个淘汰最久未用）', (tester) async {
+    final book = _book();
+    final sessions = _MultiProjectSessions([
+      for (var i = 0; i < 8; i++) _s('sA$i', worktreeId: 'wA'),
+      _s('sB', worktreeId: 'wB', projectId: 'p2'),
+    ]);
+    const project2 = ProjectSummary(id: 'p2', name: 'demo2', path: '/tmp/demo2');
+    Widget pageFor(
+      ProjectSummary project,
+      String worktreeId, {
+      String? preferredSessionId,
+    }) =>
+        MaterialApp(
+          home: Scaffold(
+            body: TerminalPage(
+              key: ValueKey('terminal'),
+              book: book,
+              http: LanHttpClient(),
+              project: project,
+              preferredSessionId: preferredSessionId,
+              worktreeId: worktreeId,
+              sessionsClient: sessions,
+              backgroundTimersDisabled: true,
+            ),
+          ),
+        );
+
+    Future<void> rebuild(
+      ProjectSummary project,
+      String worktreeId, {
+      String? preferredSessionId,
+    }) async {
+      await tester.pumpWidget(
+        pageFor(project, worktreeId, preferredSessionId: preferredSessionId),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+    }
+
+    await rebuild(_project, 'wA');
+    expect(sessions.replayIds, ['sA0']);
+
+    // 依次以 preferred 会话激活 sA1..sA7（同项目 preferredSessionId 变化 → boot 选中）：
+    // 共 8 个常驻缓冲。
+    for (var i = 1; i < 8; i++) {
+      await rebuild(_project, 'wA', preferredSessionId: 'sA$i');
+    }
+    expect(sessions.replayIds, [
+      'sA0', 'sA1', 'sA2', 'sA3', 'sA4', 'sA5', 'sA6', 'sA7',
+    ]);
+
+    // 切到 p2：boot 激活 sB → 第 9 个缓冲 → 最久未用（p1 的 sA0）被淘汰。
+    await rebuild(project2, 'wB');
+    expect(sessions.replayIds.last, 'sB');
+
+    // 切回 p1：boot 优先选中 sA0（同 worktree running 首个）→ 缓冲已被淘汰 → 重新 replay。
+    await rebuild(_project, 'wA');
+    expect(
+      sessions.replayIds.where((id) => id == 'sA0').length,
+      2,
+      reason: 'LRU 淘汰不分项目：p1 最久未用的 sA0 被淘汰后切回重新 replay',
+    );
+    expect(sessions.replayIds, [
+      'sA0', 'sA1', 'sA2', 'sA3', 'sA4', 'sA5', 'sA6', 'sA7', 'sB', 'sA0',
+    ]);
   });
 }

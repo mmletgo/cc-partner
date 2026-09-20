@@ -79,6 +79,18 @@ class _MountedSession {
 
   /// hydration 触发前累计的向上滚动意图（行）。
   int hydrationIntent = 0;
+
+  /// hydration（refreshHistory replay）在途期间暂存的实时输出 chunk：
+  /// 元素为 (帧 sequence, 帧 ownerInstanceId, chunk 文本)，sequence/owner 缺失时为 null。
+  ///
+  /// Business Logic: hydration 往返期间 events 流仍会送达 live chunk；若照常写入
+  /// terminal，会被快照返回后的「清屏 + 写快照」吞掉，且这些帧的 seq 已推进事件基线、
+  /// 服务端不会重发（对齐 web hydration held live 的防丢失语义）。
+  ///
+  /// Code Logic: 在途标志复用 [hydrating]；events 循环写 chunk 前检查该标志，在途则
+  /// 追加到此列表而不写 terminal；快照返回后由页面按序补写「seq > 快照 lastSeq 且
+  /// owner 一致」的 chunk，失败/切走路径全部按序补写。
+  final List<(int?, String?, String)> heldLiveChunks = <(int?, String?, String)>[];
 }
 
 /// 局域网远端项目终端页。
@@ -92,8 +104,8 @@ class _MountedSession {
 ///
 /// Code Logic（做什么）:
 ///   会话切换 = 清屏 + replay 快照 + 事件基线归零 + 重建输入 WS + 重启 events 循环 + zoom-pane 幂等；
-///   events 断开后指数退避（1s→…→15s）重连并携带最近 ownerInstanceId+afterSequence，
-///   45 秒无任何帧主动断开重连，回前台立即重连；输入 WS 断开后 1s→…→10s 重建，
+///   events 断开后固定 2s 节奏重连并携带最近 ownerInstanceId+afterSequence，
+///   35 秒无任何帧主动断开重连，回前台立即重连；输入 WS 断开后 1s→…→10s 重建，
 ///   未确认输入按既有策略丢弃不重放。
 ///   触控滚动：xterm 4.0.0 在 normal buffer + mouse tracking 下不转发滚轮（alt screen 内置
 ///   转发又是非标准 68/69 + 方向键回退），故包一层手势层，拖动经纯函数编码为
@@ -145,10 +157,12 @@ class TerminalPage extends StatefulWidget {
   /// 同款签名）：返回 false 时合并中止且不调后端；缺省 null 表示壳层未接（直连/测试）。
   final Future<bool> Function(String worktreeId)? confirmLeaveDirty;
 
-  /// 激活会话变化回调（固定接缝契约）：壳层据此跟踪「当前真实会话」，用于离开终端
-  /// 面板/退出工作台时对旧会话补发 unfocus（终端页 Offstage 常驻不销毁，壳层不能
-  /// 依赖 dispose）。
-  final ValueChanged<String?>? onActiveSessionChanged;
+  /// 激活会话变化回调（固定接缝契约）：上报当前激活会话的权威 DTO（对齐 web
+  /// onActiveSessionChange 传整个 session 对象）——壳层据此跟踪「当前真实会话」
+  /// 用于离开终端面板/退出工作台时对旧会话补发 unfocus（终端页 Offstage 常驻不销毁，
+  /// 壳层不能依赖 dispose），并取 [SessionSummary.displayName] 渲染状态行会话药丸
+  /// （与 chip 条同源，对齐 web session={activeSession?.name}）。
+  final ValueChanged<SessionSummary?>? onActiveSessionChanged;
 
   /// 测试注入：覆盖默认 SessionsClient。
   final SessionsClient? sessionsClient;
@@ -370,6 +384,74 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     _handleResumed();
   }
 
+  @override
+  void didUpdateWidget(covariant TerminalPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final projectChanged = oldWidget.project.id != widget.project.id;
+    final worktreeChanged = oldWidget.worktreeId != widget.worktreeId;
+    if (projectChanged || worktreeChanged) {
+      _handleTerminalContextSwitch();
+    } else if (oldWidget.preferredSessionId != widget.preferredSessionId) {
+      // preferred 会话变化（attention 跳转 / hook 修复聚焦）：复用 boot 的
+      // pickPreferredSession 优先级选中目标会话（已有缓冲切回，否则 replay）。
+      unawaited(_boot());
+    }
+  }
+
+  /// 业务逻辑：终端面板跨项目 hidden 常驻（对齐 web terminal 面板常驻 +
+  /// backgroundSessions 跨项目保留输出缓冲）：切换项目/worktree 时本页 State 不再
+  /// 重建，必须显式断开旧上下文并按新上下文重新 boot；`_mounted` 常驻缓冲按
+  /// sessionId 跨项目保留（LRU 8 一视同仁），切回原项目命中缓冲不清屏不重放。
+  ///
+  /// Code Logic：对旧会话 unfocus（停止远端窗口正文流）并丢弃未确认输入；递增两条
+  /// 通道代数断开 events 流与输入 WS；清空会话列表/错误/门闩等页面级视图状态
+  /// （commit/merge unknown 锁与 hook 失败卡同 web 一并不带入新上下文）；随后走既有
+  /// boot 流程按新 project/worktree 拉会话并选优先会话（命中缓冲切回、否则 replay）。
+  /// worktree strip 回调、全屏回调、dirty 接缝等全部来自 widget 参数，本帧起自然更新。
+  void _handleTerminalContextSwitch() {
+    final previousId = _sessionId;
+    _stopEventsLoop();
+    _eventsIdleTimer?.cancel();
+    _active?.policy.takeUnackedOnDisconnect();
+    if (previousId != null) {
+      _unfocusSession(previousId);
+    }
+    // 输入 WS：递增代数让旧回调失效并关闭连接（未确认输入已丢弃，不重放）。
+    _inputGeneration += 1;
+    _inputReconnectTimer?.cancel();
+    _inputReconnectTimer = null;
+    _socket?.close();
+    _socket = null;
+    _view.clearSelection();
+    if (!mounted || _disposed) {
+      return;
+    }
+    setState(() {
+      _sessionId = null;
+      _active = null;
+      _sessionList = <SessionSummary>[];
+      _error = null;
+      _status = '连接中';
+      _panelError = null;
+      _panelErrorActionLabel = null;
+      _panelErrorAction = null;
+      _connectedOnce = false;
+      _eventsDown = false;
+      _selectionBarVisible = false;
+      _selectedLineCount = 0;
+      _resumePinUntil = null;
+      _actionBusy = null;
+      _hookRepair = null;
+      _laneId = null;
+      _seq = 1;
+    });
+    // 切换项目/worktree 后不得把旧上下文的 mutation unknown 锁带入新上下文
+    // （对齐 web context 切换 effect 的 setCommitPhase/mergePhase idle 重置）。
+    _commitMutation.reset();
+    _mergeMutation.reset();
+    unawaited(_boot());
+  }
+
   /// 业务逻辑：手机回前台后半开连接无法探测，输入通道必须立即重建、事件流立即重连一次；
   /// 同时视口应跟随最新输出（对齐 web mobileTerminalResumeFollow：8s pin 窗口）。
   ///
@@ -475,12 +557,18 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     if (previousId != null) {
       _unfocusSession(previousId);
     }
-    try {
-      await _sessions.focus(nextId);
-    } catch (error) {
-      _setPanelError('切换终端失败：$error');
+    // 对齐 web focusSessionAndZoomById 首行：目标会话非 running 时跳过 focus/zoom
+    // RPC——exited 会话仍可切换查看终态输出（replay/清屏照常），且不产生该路径的
+    // 「切换终端失败」错误条。
+    if (session.status == 'running') {
+      try {
+        await _sessions.focus(nextId);
+      } catch (error) {
+        _setPanelError('切换终端失败：$error');
+      }
     }
-    // 移动端单屏只能展示一个 pane：切会话后把 tmux 分屏收成 zoom 单 pane（幂等）。
+    // 移动端单屏只能展示一个 pane：切会话后把 tmux 分屏收成 zoom 单 pane（幂等；
+    // _ensurePaneZoomed 内部同样按 running 门控跳过）。
     await _ensurePaneZoomed(session);
     if (!mounted || _disposed) {
       return;
@@ -515,8 +603,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       // 切换会话保持全屏（对齐 web：isTerminalFullscreen 只随 visibleSession 存在性变化）。
     });
     buffer.policy.onInputLinkChanged = _onInputLinkChanged;
-    // 壳层接缝：上报当前真实激活会话（用于离开终端面板/退出工作台时 unfocus）。
-    widget.onActiveSessionChanged?.call(nextId);
+    // 壳层接缝：上报当前真实激活会话的权威 DTO（壳层取 id 做 unfocus 跟踪、
+    // 取 displayName 渲染状态行会话药丸，与 chip 条同源）。
+    widget.onActiveSessionChanged?.call(session);
     if (isNewBuffer) {
       // 首次激活：清屏 + replay 快照建立基线；完成（成功或失败）前输入门闩保持关闭。
       buffer.terminal.write('\x1b[3J\x1b[2J\x1b[H');
@@ -605,12 +694,31 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     } catch (_) {}
   }
 
-  /// replay 响应中提取快照文本：兼容 snapshot / data / output 三种字段名（宽容解析）。
+  /// replay 响应中提取快照文本：后端权威字段为 buffer（WorkbenchSessionReplayDto
+  /// camelCase 投影，web 同读 replay.buffer），snapshot/data/output 为旧后端宽容兜底。
   String _replaySnapshotOf(Map<String, dynamic> replay) {
-    return replay['snapshot'] as String? ??
+    return replay['buffer'] as String? ??
+        replay['snapshot'] as String? ??
         replay['data'] as String? ??
         replay['output'] as String? ??
         '';
+  }
+
+  /// replay 响应中提取快照基线序列号（camelCase 为主、snake_case 兜底）；
+  /// 缺失返回 null，表示无法按 seq 过滤暂存 chunk（全部按序补写）。
+  int? _replayLastSeqOf(Map<String, dynamic> replay) {
+    final seq = replay['lastSeq'] ?? replay['last_seq'];
+    if (seq is int) {
+      return seq;
+    }
+    return seq is num ? seq.toInt() : null;
+  }
+
+  /// replay 响应中提取快照 ownerInstanceId（camelCase 为主、snake_case 兜底）；
+  /// 缺失返回 null（与无主 chunk 视为同 authority，对齐 web `?? null` 比较）。
+  String? _replayOwnerOf(Map<String, dynamic> replay) {
+    final owner = replay['ownerInstanceId'] ?? replay['owner_instance_id'];
+    return owner is String && owner.isNotEmpty ? owner : null;
   }
 
   /// pane 操作通用门控：session 支持 panes 且无动作占用（对齐 web canRunMobilePaneMutation）。
@@ -988,8 +1096,10 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   ///
   /// Code Logic：单飞门闩（buffer.hydrating）；是否已灌按会话 + ownerInstanceId 判定
   /// （/resume 换 owner 后允许重灌，对齐 web hydratedScrollbackSessionRef + owner）；记录
-  /// 替换前「距底部行距」作锚点；成功后清屏（含 scrollback 擦除）+ 写入快照，帧末把视口
-  /// 钉回相同底部锚点；失败不标记 hydrated、错误上屏并附「重试」，live 流继续不受影响。
+  /// 替换前「距底部行距」作锚点；成功后清屏（含 scrollback 擦除）+ 写入快照 + 按序补写
+  /// 往返期间暂存的 live chunk（seq > 快照 lastSeq 且 owner 一致，对齐 web
+  /// appendHeldLiveAfterReplay），帧末把视口钉回相同底部锚点；失败不标记 hydrated、
+  /// 先补写暂存 chunk（防丢失）再错误上屏并附「重试」，live 流继续不受影响。
   Future<void> _beginHistoryHydration(_MountedSession buffer) async {
     if (buffer.hydrating ||
         buffer.policy.isHistoryHydrated(ownerInstanceId: buffer.owner)) {
@@ -1005,24 +1115,44 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         sessionId,
         timeout: const Duration(milliseconds: kHistoryHydrationTimeoutMs),
       );
-      if (!mounted || _disposed || !identical(_active, buffer)) {
+      if (_disposed) {
+        return;
+      }
+      if (!mounted || !identical(_active, buffer)) {
+        // 会话在往返期间被切走：快照作废（下次回看重新 hydration），但暂存的
+        // live chunk 仍要全部按序补写进常驻缓冲——这些帧的 seq 已推进事件基线，
+        // 不补写就会永久丢失。
+        _flushHeldLiveChunks(buffer);
         return;
       }
       final snapshot = _replaySnapshotOf(replay);
+      final snapshotLastSeq = _replayLastSeqOf(replay);
       buffer.terminal.write('\x1b[3J\x1b[2J\x1b[H');
       if (snapshot.isNotEmpty) {
         buffer.terminal.write(snapshot);
       }
+      // 往返期间到达的实时输出按序补写在权威快照之后（只补 owner 一致且
+      // seq > 快照 lastSeq 的 chunk），随后恢复实时写。
+      _flushHeldLiveChunks(
+        buffer,
+        afterSeq: snapshotLastSeq,
+        snapshotOwner: _replayOwnerOf(replay),
+      );
+      if (snapshotLastSeq != null && snapshotLastSeq > buffer.sequence) {
+        // 快照已包含比本地 events 基线更新的序列：推进基线，避免断线重连按旧
+        // afterSequence 重拉已随快照上屏的内容（对齐 web store.reset 设新 cursor）。
+        buffer.sequence = snapshotLastSeq;
+      }
       buffer.policy.markHistoryHydrated(ownerInstanceId: buffer.owner);
       buffer.hydrationIntent = 0;
-      if (identical(_active, buffer)) {
-        _setPanelError(null);
-      }
+      _setPanelError(null);
       if (distFromBottom != null) {
         _anchorViewportFromBottom(distFromBottom);
       }
     } catch (error) {
-      // hydration 失败可重试：不标记 hydrated，错误上屏并附「重试」入口。
+      // hydration 失败可重试：先按序补写暂存 chunk（防丢失，不标记 hydrated），
+      // 错误上屏并附「重试」入口；live 流继续不受影响。
+      _flushHeldLiveChunks(buffer);
       if (mounted && !_disposed && identical(_active, buffer)) {
         _setPanelError(
           '加载终端历史失败：$error',
@@ -1032,6 +1162,36 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       }
     } finally {
       buffer.hydrating = false;
+    }
+  }
+
+  /// 把 hydration 在途暂存的 live chunk 按到达顺序补写进 buffer.terminal 并清空暂存。
+  ///
+  /// Code Logic：[afterSeq]/[snapshotOwner] 提供时（快照成功路径）按 web
+  /// appendHeldLiveAfterReplay 口径过滤——owner 与快照 owner 不一致（含一方为 null）
+  /// 的 chunk 跳过、有 seq 且 seq <= 快照 lastSeq 的 chunk 跳过（内容已在权威快照内）；
+  /// 无 seq 的 chunk 无法判定新旧，按序补写（fail-open 防丢失）。不传过滤参数
+  /// （失败/会话切走路径）时暂存 chunk 全部按序补写。
+  void _flushHeldLiveChunks(
+    _MountedSession buffer, {
+    int? afterSeq,
+    String? snapshotOwner,
+  }) {
+    if (buffer.heldLiveChunks.isEmpty) {
+      return;
+    }
+    final held = List<(int?, String?, String)>.from(buffer.heldLiveChunks);
+    buffer.heldLiveChunks.clear();
+    for (final (seq, owner, chunk) in held) {
+      if (afterSeq != null || snapshotOwner != null) {
+        if (owner != snapshotOwner) {
+          continue;
+        }
+        if (seq != null && afterSeq != null && seq <= afterSeq) {
+          continue;
+        }
+      }
+      buffer.terminal.write(chunk);
     }
   }
 
@@ -1204,7 +1364,18 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           if (payload is Map && payload['sessionId'] == sessionId) {
             final chunk = payload['chunk'] as String? ?? '';
             if (chunk.isNotEmpty) {
-              buffer.terminal.write(chunk);
+              if (buffer.hydrating) {
+                // hydration 往返期间：暂存 (seq, owner, chunk)、不写 terminal——
+                // 快照返回后按序补写，防止被「清屏 + 写快照」吞掉（seq 已被事件
+                // 基线消费、服务端不会重发，见 _flushHeldLiveChunks）。
+                buffer.heldLiveChunks.add((
+                  seq is int ? seq : null,
+                  frameOwner,
+                  chunk,
+                ));
+              } else {
+                buffer.terminal.write(chunk);
+              }
             }
           }
         }

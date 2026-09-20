@@ -631,6 +631,111 @@ class _TerminalMergeHttp extends LanHttpClient {
   }
 }
 
+/// 跨项目终端缓冲常驻 + 状态行会话名测试假 HTTP：两个项目各一棵主树 + 一个会话
+/// （会话 name 与 id 不同，用于断言状态行显示会话名而非原始 id）；
+/// sessions/list 按请求 projectId 返回对应会话并记录，sessions/replay 记录重放的
+/// sessionId（跨项目缓冲命中时不重放）；focus/zoom 幂等成功；openWebSocket 挂起。
+class _CrossProjectHttp extends LanHttpClient {
+  final List<String> listedProjectIds = [];
+  final List<String> replayedSessionIds = [];
+
+  static const Map<String, List<Map<String, dynamic>>> _treesByProject = {
+    'p1': [
+      {'id': 'wt-p1', 'name': 'main', 'branch': 'main', 'isMain': true, 'path': '/repo1'},
+    ],
+    'p2': [
+      {'id': 'wt-p2', 'name': 'main', 'branch': 'main', 'isMain': true, 'path': '/repo2'},
+    ],
+  };
+
+  static const Map<String, String> _sessionNameByProject = {
+    'p1': '会话一',
+    'p2': '会话二',
+  };
+
+  Map<String, dynamic> _sessionFor(String projectId) => {
+        'id': 's-$projectId',
+        'projectId': projectId,
+        'name': _sessionNameByProject[projectId],
+        'status': 'running',
+        'worktreeId': 'wt-$projectId',
+      };
+
+  @override
+  Future<Map<String, dynamic>> getJson(String baseUrl, String path) async {
+    if (path == '/api/orchestrator/config') {
+      return <String, dynamic>{};
+    }
+    if (path == '/api/health') {
+      return {
+        'protocol_version': 2,
+        'capabilities': ['attention.v1', 'attention.v2'],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> getDynamic(String baseUrl, String path) async {
+    if (path == '/api/mobile/attention/v2' || path == '/api/mobile/attention') {
+      return {'items': <Map<String, dynamic>>[]};
+    }
+    if (path == '/api/mobile/workbench/projects/list') {
+      return {
+        'projects': [
+          {'id': 'p1', 'name': 'demo', 'path': '/repo1', 'kind': 'local'},
+          {'id': 'p2', 'name': 'other', 'path': '/repo2', 'kind': 'local'},
+        ],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    if (path == '/api/mobile/workbench/sessions/list') {
+      final projectId = body['projectId'] as String? ?? 'p1';
+      listedProjectIds.add(projectId);
+      return [_sessionFor(projectId)];
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String baseUrl,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      final trees = _treesByProject[body['projectId'] as String? ?? 'p1']!;
+      return {
+        'ok': true,
+        'worktrees': [for (final tree in trees) Map<String, dynamic>.from(tree)],
+      };
+    }
+    if (path == '/api/mobile/workbench/sessions/replay') {
+      final sessionId = body['sessionId'] as String;
+      replayedSessionIds.add(sessionId);
+      return {'sessionId': sessionId, 'buffer': 'boot-ok', 'lastSeq': 0};
+    }
+    if (path == '/api/mobile/workbench/sessions/focus' ||
+        path == '/api/mobile/workbench/sessions/zoom-pane') {
+      return <String, dynamic>{};
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<WebSocket> openWebSocket(
+    String baseUrl,
+    String path, {
+    Iterable<String>? protocols,
+  }) {
+    return Completer<WebSocket>().future;
+  }
+}
+
 /// 构造带一个离线 server 的地址簿（面板级测试共用）。
 Future<AddressBook> _panelBook() async {
   final book = AddressBook(store: MemoryAddressBookStore());
@@ -684,6 +789,14 @@ Future<void> _gotoPanelViaDrawer(WidgetTester tester, String panelName) async {
   await tester.tap(find.byTooltip('Open navigation menu'));
   await tester.pumpAndSettle();
   await tester.tap(find.byKey(Key('nav-$panelName')));
+  await tester.pumpAndSettle();
+}
+
+/// 经 Drawer「项目」返回项目列表（只切面板，项目上下文保留）。
+Future<void> _backToProjectsViaDrawer(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('Open navigation menu'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(const Key('nav-back-projects')));
   await tester.pumpAndSettle();
 }
 
@@ -1224,7 +1337,7 @@ void main() {
     await tester.tap(find.byKey(const Key('worktree-wt-1')));
     await tester.pumpAndSettle();
     expect(http.worktreesListCalls, 2);
-    // Flutter 既有行为：worktreeId 是终端 ValueKey 的一部分，切树重挂载并重新 boot。
+    // 切树：终端页常驻不重建，didUpdateWidget 检测 worktree 变化重新 boot。
     expect(http.sessionsListCalls, 2);
 
     // 返回项目列表：只切面板，上下文全保留（对齐 web handleBackToProjects）。
@@ -1242,12 +1355,12 @@ void main() {
     final chip = tester.widget<ChoiceChip>(find.byKey(const Key('worktree-wt-1')));
     expect(chip.selected, isTrue, reason: '原 worktree 选中态保留');
 
-    // 再返回列表，点不同项目：走完整切换（拉新列表 + 终端换 key 重 boot）。
+    // 再返回列表，点不同项目：走完整切换（拉新列表 + 终端 didUpdateWidget 重新 boot）。
     await backToProjects();
     await tester.tap(find.byKey(const Key('project-row-p2')));
     await tester.pumpAndSettle();
     expect(http.worktreesListCalls, 3, reason: '切换项目应拉取新项目 worktrees');
-    expect(http.sessionsListCalls, 3, reason: '切换项目终端重挂载并 boot');
+    expect(http.sessionsListCalls, 3, reason: '切换项目终端按新项目重新 boot');
     final p2Chip = tester.widget<ChoiceChip>(find.byKey(const Key('worktree-wt-p2-main')));
     expect(p2Chip.selected, isTrue);
   });
@@ -1505,5 +1618,55 @@ void main() {
     // 让 SnackBar 自动消失，避免测试残留 Timer。
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
+  });
+
+  testWidgets('跨项目终端缓冲常驻：切回原项目不清屏不重放；状态行显示会话名而非 id',
+      (tester) async {
+    final http = _CrossProjectHttp();
+    await _pumpHome(tester, http);
+
+    // 打开 p1：终端 boot（list p1 + replay s-p1）。
+    await tester.tap(find.text('demo'));
+    await tester.pumpAndSettle();
+    expect(http.listedProjectIds, ['p1']);
+    expect(http.replayedSessionIds, ['s-p1']);
+    // 状态行会话药丸 = 激活会话显示名（对齐 web session={activeSession?.name}），
+    // 不再是原始会话 id。
+    expect(
+      tester.widget<Text>(
+        find.descendant(
+          of: find.byKey(const Key('shell-status-session')),
+          matching: find.byType(Text),
+        ),
+      ).data,
+      '会话一',
+    );
+    expect(find.text('s-p1'), findsNothing);
+
+    // 返回项目列表（终端面板常驻不销毁），打开 p2：终端页不卸载，
+    // didUpdateWidget 断开旧上下文并按 p2 重新 boot。
+    await _backToProjectsViaDrawer(tester);
+    await tester.tap(find.text('other'));
+    await tester.pumpAndSettle();
+    expect(http.listedProjectIds, ['p1', 'p2'], reason: '切项目后终端页按新项目重新拉会话');
+    expect(http.replayedSessionIds, ['s-p1', 's-p2'], reason: 'p2 会话无缓冲 → replay');
+    expect(
+      tester.widget<Text>(
+        find.descendant(
+          of: find.byKey(const Key('shell-status-session')),
+          matching: find.byType(Text),
+        ),
+      ).data,
+      '会话二',
+    );
+
+    // 切回 p1：命中跨项目常驻缓冲 → 不重放（不清屏）。
+    await _backToProjectsViaDrawer(tester);
+    await tester.tap(find.text('demo'));
+    await tester.pumpAndSettle();
+    expect(http.listedProjectIds, ['p1', 'p2', 'p1'], reason: '切回 p1 仍按 p1 重新拉会话列表');
+    expect(http.replayedSessionIds, ['s-p1', 's-p2'],
+        reason: '切回 p1 命中跨项目常驻缓冲，不重放 s-p1');
+    expect(find.text('会话一 · 0 pane'), findsOneWidget, reason: '切回后 chip 列表回到 p1 会话');
   });
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -248,17 +249,22 @@ class _BrowserPageState extends State<BrowserPage> {
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   const Text('候选 dev server：', style: TextStyle(fontSize: 12)),
-                  for (final target in _targets)
-                    ChoiceChip(
-                      key: Key('browser-target-chip-${target.id}'),
-                      // 已打开预览时高亮按 preview.targetUrl 匹配（对齐 web data-active），
-                      // 无预览时不亮任何 chip。
-                      selected:
-                          _previewTargetUrl != null && _previewTargetUrl == target.url,
-                      onSelected: (_) => setState(() {
-                        // 点 chip 先填真实 URL，由「打开预览」发起建会话。
-                        _url.text = target.url;
-                      }),
+                    for (final target in _targets)
+                      ChoiceChip(
+                        key: Key('browser-target-chip-${target.id}'),
+                        // 已打开预览时高亮按 preview.targetUrl 匹配（对齐 web data-active），
+                        // 无预览时不亮任何 chip。
+                        selected:
+                            _previewTargetUrl != null && _previewTargetUrl == target.url,
+                        // 点 chip = 回填 URL + 直接建 preview 打开（对齐 web openTarget(target)；
+                        // 复用 _open 的 busy 门闩与错误路径，busy 中点击忽略不重复建会话）。
+                        onSelected: (_) {
+                          if (_busy) {
+                            return;
+                          }
+                          setState(() => _url.text = target.url);
+                          unawaited(_open());
+                        },
                       label: Column(
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.start,

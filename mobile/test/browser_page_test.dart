@@ -99,6 +99,9 @@ class _FakeBrowserClient extends BrowserClient {
   /// 非空时 discover 停在门闩上，供 busy 态断言。
   Completer<void>? discoverGate;
 
+  /// 非空时 createPreview 停在门闩上（busy 中点 chip 忽略断言）。
+  Completer<void>? createPreviewGate;
+
   BrowserDiscovery get effectiveDiscovery =>
       _discovery ??
       const BrowserDiscovery(
@@ -143,6 +146,10 @@ class _FakeBrowserClient extends BrowserClient {
   }) async {
     createPreviewCalls += 1;
     createdTargetUrl = targetUrl;
+    final gate = createPreviewGate;
+    if (gate != null) {
+      await gate.future;
+    }
     if (failCreatePreview) {
       throw LanHttpException(500, 'preview down');
     }
@@ -305,7 +312,8 @@ void main() {
 
   testWidgets('discover candidates render as chips with source labels and tapping fills the URL field',
       (tester) async {
-    await _pumpPage(tester, _FakeBrowserClient());
+    final client = _FakeBrowserClient();
+    await _pumpPage(tester, client);
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('browser-target-chip-t-1')), findsOneWidget);
     expect(find.byKey(const Key('browser-target-chip-t-2')), findsOneWidget);
@@ -315,10 +323,45 @@ void main() {
     // 无 source 的旧后端候选不渲染来源行。
     expect(find.byKey(const Key('browser-target-source-t-1')), findsNothing);
 
+    // 点 chip 即回填 URL 并直接建 preview 打开（对齐 web openTarget(target)）。
     await tester.tap(find.byKey(const Key('browser-target-chip-t-2')));
-    await tester.pump();
+    await tester.pumpAndSettle();
     final field = tester.widget<TextField>(find.byType(TextField));
     expect(field.controller!.text, 'http://127.0.0.1:3000');
+    expect(client.createPreviewCalls, 1, reason: '点 chip 应直接建 preview，无需点「打开预览」');
+    expect(client.createdTargetUrl, 'http://127.0.0.1:3000');
+    expect(find.byKey(const Key('browser-live-preview')), findsOneWidget);
+    // chip 高亮随 preview.targetUrl（data-active 口径）。
+    expect(
+      tester.widget<ChoiceChip>(find.byKey(const Key('browser-target-chip-t-2'))).selected,
+      isTrue,
+    );
+  });
+
+  testWidgets('busy 中点击候选 chip 被忽略：不回填 URL 也不重复建 preview', (tester) async {
+    final client = _FakeBrowserClient()..createPreviewGate = Completer<void>();
+    await _pumpPage(tester, client);
+    await tester.pumpAndSettle();
+
+    // 第一次点 chip：建 preview 在途（busy）。
+    await tester.tap(find.byKey(const Key('browser-target-chip-t-2')));
+    await tester.pump();
+    expect(client.createPreviewCalls, 1);
+
+    // busy 中再点其它 chip：整体忽略（复用 _open busy 门闩）。
+    await tester.tap(find.byKey(const Key('browser-target-chip-t-1')));
+    await tester.pump();
+    expect(client.createPreviewCalls, 1, reason: 'busy 中点击不应再次建会话');
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'http://127.0.0.1:3000',
+      reason: 'busy 中点击不回填 URL',
+    );
+
+    // 放行后预览正常打开。
+    client.createPreviewGate!.complete();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('browser-live-preview')), findsOneWidget);
   });
 
   testWidgets('discover failure shows the error area and re-discover recovers', (
