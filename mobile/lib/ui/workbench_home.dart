@@ -310,16 +310,27 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
 
   /// Business Logic: 进入工作台时 Drawer「待处理」要显示未读数，且数字必须与列表一致。
   /// Code Logic: 拉取移动端可见条目，按 filter.dart 的本地日口径统计今天未读；离线失败静默保留旧值。
+  /// 刷新成功后用同一份快照重查「聚焦会话的 needsInput 未读」（对齐 web 快照驱动
+  /// 的看见即已读：停留在终端期间新到达的条目也立即标已读）。
   Future<void> _refreshAttentionUnread() async {
+    List<AttentionItem> items;
     try {
-      final items = await _attentionClient.listVisible();
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _attentionUnread = countTodayUnreadAttentionItems(items, DateTime.now());
-      });
-    } catch (_) {}
+      items = await _attentionClient.listVisible();
+    } catch (_) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _attentionUnread = countTodayUnreadAttentionItems(items, DateTime.now());
+    });
+    final activeSession = _panel == WorkbenchPanel.terminal
+        ? (_liveTerminalSessionId ?? _sessionId)
+        : null;
+    if (activeSession != null) {
+      await _markNeedsInputReadFromSnapshot(activeSession, items);
+    }
   }
 
   /// Business Logic: 用户切到正在等待输入的终端即表示已经看见，对应 Inbox 未读
@@ -361,6 +372,20 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     if (!mounted) {
       return;
     }
+    await _markNeedsInputReadFromSnapshot(sessionId, items);
+  }
+
+  /// Business Logic: 用户停留在同一终端会话期间 Agent 新发起等待输入时，快照里
+  /// 新出现的未读条目也要立即标已读（对齐 web 该 hook 依赖 snapshot、每次快照
+  /// 变化都重新 plan 的分支），不能等切会话/切面板再回来才补标。
+  ///
+  /// Code Logic: 接收一次已拉取的 Inbox 快照，按当前会话匹配未读 needsInput
+  /// 条目并 fire-and-forget markRead；成功刷新徽章（其自身的快照重查因条目已读
+  /// 而空跑收敛），失败回退尝试集合保持未读，由下一次快照重查重试。
+  Future<void> _markNeedsInputReadFromSnapshot(
+    String sessionId,
+    List<AttentionItem> items,
+  ) async {
     final ids = <String>[
       for (final item in items)
         if (item.isUnread &&
@@ -379,7 +404,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       await _attentionClient.markRead(ids);
       await _refreshAttentionUnread();
     } catch (_) {
-      // 失败保持未读：回退尝试集合，下次聚焦变化可重试（对齐 web）。
+      // 失败保持未读：回退尝试集合，下次快照重查可重试（对齐 web）。
       _needsInputAttemptedIds.removeAll(ids);
     }
   }

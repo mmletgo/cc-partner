@@ -1435,6 +1435,39 @@ void main() {
     expect(http.focusCalls, contains(('s2', false)));
   });
 
+  testWidgets('P1-3 聚焦同一会话期间快照新增的 needsInput 未读也立即标已读', (tester) async {
+    final http = _AutoReadHttp();
+    await _pumpHome(tester, http);
+    await _openDemoProject(tester);
+
+    // boot 聚焦 s1，初始未读 a1 已被标已读。
+    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump();
+    expect(http.markReadBodies, [
+      ['a1'],
+    ]);
+
+    // 用户停留在 s1（epoch 不变）期间 Agent 新发起等待输入：快照新增 a3。
+    http.attentionItems.add({
+      'id': 'a3',
+      'sourceKind': 'agentNeedsInput',
+      'title': '新到达等待输入',
+      'target': {'kind': 'agentSession', 'projectId': 'p1', 'terminalSessionId': 's1'},
+    });
+
+    // 无任何会话/面板切换：10s 徽章轮询 tick 拉到新快照即重查并标已读（对齐 web
+    // 快照驱动分支），成功后徽章刷新为空跑收敛。
+    await tester.pump(const Duration(seconds: 10));
+    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump();
+    expect(http.markReadBodies, [
+      ['a1'],
+      ['a3'],
+    ]);
+  });
+
   testWidgets('P1-2 终端合并激活树：dirty 预检丢弃清快照，合并成功后不对已删树弹确认', (tester) async {
     final http = _TerminalMergeHttp();
     final files = FileWorkspaceController();
