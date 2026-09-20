@@ -6,6 +6,7 @@ class ProjectSummary {
     required this.name,
     this.kind,
     this.path,
+    this.deviceName,
   });
 
   final String id;
@@ -13,11 +14,19 @@ class ProjectSummary {
   final String? kind;
   final String? path;
 
+  /// 项目所在设备名（后端 WorkbenchProjectDto.deviceName，camelCase）；
+  /// 旧后端缺字段时为 null，UI 侧不展示。
+  final String? deviceName;
+
+  /// Business Logic: 项目列表行需要 kind 徽章与设备名对齐 web MobileProjectPanel；
+  /// 解析必须宽容，缺字段不能让列表崩溃。
+  /// Code Logic: 宽容读取 id/name(title 兜底)/kind/path/deviceName，缺省为空串或 null。
   factory ProjectSummary.fromJson(Map<String, dynamic> json) => ProjectSummary(
         id: json['id'] as String? ?? '',
         name: json['name'] as String? ?? json['title'] as String? ?? '',
         kind: json['kind'] as String?,
         path: json['path'] as String?,
+        deviceName: json['deviceName'] as String?,
       );
 }
 

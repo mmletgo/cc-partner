@@ -1982,7 +1982,7 @@ class _AutomationPageState extends State<AutomationPage> {
           if (_experiments.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text('暂无实验组。可在创建弹窗中发起比较实验。'),
+              child: Text('暂无实验组'),
             ),
           for (final experiment in _experiments)
             _buildExperimentCard(theme, experiment),

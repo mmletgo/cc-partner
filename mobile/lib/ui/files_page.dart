@@ -87,6 +87,10 @@ class _FilesPageState extends State<FilesPage> {
     }
   }
 
+  /// Business Logic: 点击文件后应进入预览；打开失败（网络断开/文件已删除/权限受限）
+  /// 必须显式提示并停留在列表页，不能静默无反应（对齐 web 失败提示语义）。
+  /// Code Logic: 目录节点入栈并刷新；文件节点调 client.open，成功 push FilePreviewPage；
+  /// 失败 SnackBar「打开文件失败：{原因}」后直接返回。
   Future<void> _open(Map<String, dynamic> node) async {
     final kind = node['kind'] as String? ?? node['type'] as String? ?? 'file';
     final path = node['path'] as String? ?? node['name'] as String? ?? '';
@@ -95,11 +99,21 @@ class _FilesPageState extends State<FilesPage> {
       await _reload();
       return;
     }
-    final opened = await _client.open(
-      projectId: widget.project.id,
-      path: path,
-      worktreeId: widget.worktreeId,
-    );
+    final Map<String, dynamic> opened;
+    try {
+      opened = await _client.open(
+        projectId: widget.project.id,
+        path: path,
+        worktreeId: widget.worktreeId,
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('打开文件失败：$error')),
+        );
+      }
+      return;
+    }
     if (!mounted) {
       return;
     }
@@ -117,13 +131,68 @@ class _FilesPageState extends State<FilesPage> {
     );
   }
 
+  /// Business Logic: 目录列表加载失败时不能只给一行裸错误——用户需要明确的失败卡与
+  /// 重试入口，且错误态同样可下拉刷新（对齐 web filesPanel 的 error + reload 语义）。
+  /// Code Logic: RefreshIndicator 包住 AlwaysScrollable 列表，错误卡展示具体原因与
+  /// 重试按钮，结构与项目页错误卡一致。
+  Widget _errorPanel() {
+    final theme = Theme.of(context);
+    return RefreshIndicator(
+      onRefresh: _reload,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          Card(
+            key: const Key('files-error-card'),
+            margin: const EdgeInsets.all(16),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.error_outline, color: theme.colorScheme.error),
+                      const SizedBox(width: 8),
+                      Text('加载失败', style: theme.textTheme.titleMedium),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(_error ?? '', style: theme.textTheme.bodySmall),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    key: const Key('files-error-retry'),
+                    onPressed: _reload,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('重试'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Business Logic: 文件行需要元信息对齐 web filesPanel（名称 + 目录/大小）；
+  /// 后端 size 字段缺失时退化为类型文案，不能渲染「null」。
+  /// Code Logic: 目录显示「目录」；文件复用 workspace 的 B/KB/MB 分级格式化 size，
+  /// size 缺失时显示「文件」。
+  String _nodeMetaLabel(Map<String, dynamic> node) {
+    final kind = node['kind'] as String? ?? node['type'] as String? ?? 'file';
+    if (kind == 'dir' || kind == 'directory') {
+      return '目录';
+    }
+    final size = (node['size'] as num?)?.toInt();
+    return formatFileSizeLabel(size) ?? '文件';
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
-    }
-    if (_error != null) {
-      return Center(child: Text(_error!));
     }
     return Column(
       children: [
@@ -137,23 +206,46 @@ class _FilesPageState extends State<FilesPage> {
             },
           ),
         Expanded(
-          child: RefreshIndicator(
-            onRefresh: _reload,
-            child: ListView.builder(
-              physics: const AlwaysScrollableScrollPhysics(),
-              itemCount: _nodes.length,
-              itemBuilder: (context, index) {
-                final node = _nodes[index];
-                final name = node['name'] as String? ?? node['path'] as String? ?? '';
-                final kind = node['kind'] as String? ?? 'file';
-                return ListTile(
-                  leading: Icon(kind == 'dir' || kind == 'directory' ? Icons.folder : Icons.insert_drive_file),
-                  title: Text(name),
-                  onTap: () => _open(node),
-                );
-              },
-            ),
-          ),
+          child: _error != null
+              ? _errorPanel()
+              : _nodes.isEmpty
+                  ? RefreshIndicator(
+                      onRefresh: _reload,
+                      child: ListView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        children: const [
+                          SizedBox(height: 120),
+                          Center(child: Text('空目录')),
+                        ],
+                      ),
+                    )
+                  : RefreshIndicator(
+                      onRefresh: _reload,
+                      child: ListView.builder(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        itemCount: _nodes.length,
+                        itemBuilder: (context, index) {
+                          final node = _nodes[index];
+                          final name = node['name'] as String? ??
+                              node['path'] as String? ??
+                              '';
+                          final kind = node['kind'] as String? ??
+                              node['type'] as String? ??
+                              'file';
+                          return ListTile(
+                            leading: Icon(kind == 'dir' || kind == 'directory'
+                                ? Icons.folder
+                                : Icons.insert_drive_file),
+                            title: Text(name),
+                            trailing: Text(
+                              _nodeMetaLabel(node),
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                            onTap: () => _open(node),
+                          );
+                        },
+                      ),
+                    ),
         ),
       ],
     );

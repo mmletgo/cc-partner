@@ -82,6 +82,10 @@ class _GitPageState extends State<GitPage> {
   final GitMutationTracker _tracker = GitMutationTracker();
 
   Map<String, dynamic>? _hookFailure;
+
+  /// hook 失败的宽容视图（stdout/stderr/exitCode/stage），与 [_hookFailure] 同步写入；
+  /// 修复接口仍回传原始载荷 [_hookFailure]。
+  HookFailureView? _hookFailureView;
   String? _hookWorktreeId;
   List<WorkbenchGitCommit> _commits = [];
   bool _commitsLoading = false;
@@ -210,6 +214,17 @@ class _GitPageState extends State<GitPage> {
     );
   }
 
+  /// Business Logic: failedHook envelope 要在页面上展示 hook 输出，同时修复接口需要原始载荷。
+  /// Code Logic: 记录原始 hookFailure + 宽容解析出的 HookFailureView（stdout/stderr 拼接）+
+  /// 目标 worktree id，供修复卡展示与 `_repairHook` 回传。
+  void _showHookFailure(Map<String, dynamic> failure, String worktreeId) {
+    setState(() {
+      _hookFailure = failure;
+      _hookFailureView = HookFailureView.fromJson(failure);
+      _hookWorktreeId = worktreeId;
+    });
+  }
+
   /// Business Logic: 提交/推送/合并/拉取返回 unknown（网络异常等无法确定结果）时禁止盲重放，
   /// 必须用同一 clientOperationId 查 ledger + 权威列表对账出「实际已成功/未生效」。
   /// Code Logic: 共享 reconcileWorktreeMutation 通道（mutation-operation 查 ledger → 刷新 worktrees
@@ -299,10 +314,7 @@ class _GitPageState extends State<GitPage> {
       }
       if (envelope.failedHook) {
         _tracker.markIdle();
-        setState(() {
-          _hookFailure = envelope.hookFailure ?? const {};
-          _hookWorktreeId = tree['id'] as String?;
-        });
+        _showHookFailure(envelope.hookFailure ?? const {}, tree['id'] as String? ?? '');
         return;
       }
       if (envelope.unknown) {
@@ -422,7 +434,10 @@ class _GitPageState extends State<GitPage> {
       final terminalSessionId = result['terminalSessionId'] as String? ??
           result['terminal_session_id'] as String?;
       if (mounted) {
-        setState(() => _hookFailure = null);
+        setState(() {
+          _hookFailure = null;
+          _hookFailureView = null;
+        });
       }
       if (terminalSessionId != null && terminalSessionId.isNotEmpty) {
         // 壳层负责刷新 sessions、切终端面板并聚焦该会话（B4 接缝契约）。
@@ -483,8 +498,13 @@ class _GitPageState extends State<GitPage> {
   }
 
   /// Business Logic: 同步 = push 本仓库主分支 → 逐个兄弟设备 list → pull 主 worktree，
-  /// 汇总成功/部分失败摘要（对齐 web handleSync）。
-  /// Code Logic: push/任一 pull 失败或 unknown 都不中断其余兄弟；完成后 SnackBar 摘要并刷新。
+  /// 汇总成功/部分失败摘要（对齐 web handleSync）。push 是会产生远端副作用的 mutation：
+  /// unknown（envelope 或传输异常）时必须纳入相位机锁定，靠同一 clientOperationId 对账解锁，
+  /// 禁止盲重放；兄弟设备 pull 阶段的失败不锁定，仍走摘要 SnackBar。
+  /// Code Logic: push 前用 `_tracker.begin(kind: push)` 拿稳定 operation id；push unknown →
+  /// 复用 `_reconcile`（共享 reconcileWorktreeMutation 通道）自动对账：确认成功 → 继续兄弟
+  /// 拉取；确认失败 → 提示解锁；仍 unknown → 保持 `git-unknown-banner` + 「重新对账」；
+  /// 传输异常 → `_tracker.markUnknown` 等手动对账。pull 循环逐设备捕获异常不中断。
   Future<void> _sync() async {
     if (!_canSync) {
       return;
@@ -495,27 +515,43 @@ class _GitPageState extends State<GitPage> {
       return;
     }
     final siblings = _siblings;
+    final operationId = _tracker.begin(
+      kind: GitMutationKind.push,
+      worktreeId: mainId,
+      nextOperationId: newClientOperationId(),
+    );
     setState(() => _busy = '同步');
     try {
       final pushEnvelope = GitMutationEnvelope.from(
         await _client.push(
           projectId: widget.project.id,
           worktreeId: mainId,
-          clientOperationId: newClientOperationId(),
+          clientOperationId: operationId,
         ),
       );
       if (pushEnvelope.failedHook) {
-        setState(() {
-          _hookFailure = pushEnvelope.hookFailure ?? const {};
-          _hookWorktreeId = mainId;
-        });
+        _tracker.markIdle();
+        _showHookFailure(pushEnvelope.hookFailure ?? const {}, mainId);
         return;
       }
       if (pushEnvelope.unknown) {
-        _showSnack('操作结果未知，请刷新后人工核对');
-        return;
-      }
-      if (!pushEnvelope.succeeded) {
+        // 与 commit/push/merge 同通道：先自动对账；仍不确定则锁定等「重新对账」。
+        final result = await _reconcile(pushEnvelope.clientOperationId ?? operationId);
+        _tracker.settleReconcile(result);
+        if (!mounted) {
+          return;
+        }
+        if (result == GitMutationReconcile.confirmedFailed) {
+          _showSnack('同步主分支失败: 推送未生效，可重新发起');
+          return;
+        }
+        if (result != GitMutationReconcile.confirmedSucceeded) {
+          return;
+        }
+      } else if (pushEnvelope.succeeded) {
+        _tracker.markIdle();
+      } else {
+        _tracker.markIdle();
         _showSnack('同步主分支失败: 推送未成功');
         return;
       }
@@ -559,8 +595,14 @@ class _GitPageState extends State<GitPage> {
       await _refresh();
       await _loadProjects();
     } catch (error) {
-      if (mounted) {
-        _showSnack('同步主分支失败: $error');
+      if (isTransportUnknownError(error)) {
+        // push 请求可能已到达也可能没到达：进入 unknown 相位等对账，禁止盲重试。
+        _tracker.markUnknown();
+      } else {
+        _tracker.markIdle();
+        if (mounted) {
+          _showSnack('同步主分支失败: $error');
+        }
       }
     } finally {
       if (mounted) {
@@ -621,15 +663,7 @@ class _GitPageState extends State<GitPage> {
                   ),
                 ),
               ),
-            if (_hookFailure != null)
-              Card(
-                color: Theme.of(context).colorScheme.errorContainer,
-                child: ListTile(
-                  title: const Text('Git hook 失败'),
-                  subtitle: Text('${_hookFailure!['output'] ?? _hookFailure}'),
-                  trailing: TextButton(onPressed: _repairHook, child: const Text('hook-repair')),
-                ),
-              ),
+            if (_hookFailure != null) _buildHookFailureCard(context),
             for (final tree in _trees)
               Card(
                 child: ListTile(
@@ -643,6 +677,45 @@ class _GitPageState extends State<GitPage> {
             _buildCommitsSection(selected),
           ],
         ],
+      ),
+    );
+  }
+
+  /// Business Logic: hook 失败要给用户看得到 stdout/stderr 输出与阶段/退出码，
+  /// 交互口径与终端页 hook 修复卡一致（可展开/收起，空输出占位），并保留 AI 修复出口。
+  /// Code Logic: 复用 HookFailureView 宽容解析（camel/snake 双读）与 formattedOutput
+  /// 拼接；标题保持「Git hook 失败」，阶段/退出码作为附属信息行。
+  Widget _buildHookFailureCard(BuildContext context) {
+    final theme = Theme.of(context);
+    final failure =
+        _hookFailureView ?? HookFailureView.fromJson(_hookFailure);
+    final stageLabel = failure.isPush ? 'pre-push' : 'pre-commit';
+    return Card(
+      color: theme.colorScheme.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text('Git hook 失败', style: theme.textTheme.titleMedium),
+                ),
+                Text('$stageLabel 阶段', style: theme.textTheme.bodySmall),
+                if (failure.exitCode != null) ...[
+                  const SizedBox(width: 8),
+                  Text('退出码 ${failure.exitCode}', style: theme.textTheme.bodySmall),
+                ],
+              ],
+            ),
+            _HookOutputToggle(output: failure.formattedOutput),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(onPressed: _repairHook, child: const Text('hook-repair')),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -902,6 +975,52 @@ class _GitPageState extends State<GitPage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// 可展开的 hook 输出区（「展开钩子输出 / 收起钩子输出」，空输出给占位文案）。
+///
+/// Business Logic（为什么需要）:
+///   Git 页 hook 失败卡要与终端页同一交互口径：默认收起避免刷屏，用户按需展开
+///   查看 stdout/stderr；没有输出时给明确占位而不是空白。
+///
+/// Code Logic（做什么）:
+///   本地 _expanded 状态切换按钮文案与输出区显隐；终端页的同类组件是私有的，
+///   跨文件不可复用，此处按同一形态在页内落地。
+class _HookOutputToggle extends StatefulWidget {
+  const _HookOutputToggle({required this.output});
+
+  final String output;
+
+  @override
+  State<_HookOutputToggle> createState() => _HookOutputToggleState();
+}
+
+class _HookOutputToggleState extends State<_HookOutputToggle> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        TextButton(
+          onPressed: () => setState(() => _expanded = !_expanded),
+          child: Text(_expanded ? '收起钩子输出' : '展开钩子输出'),
+        ),
+        if (_expanded)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(8),
+            color: theme.colorScheme.surface,
+            child: Text(
+              widget.output.isEmpty ? '（未捕获到输出）' : widget.output,
+              style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+            ),
+          ),
+      ],
     );
   }
 }

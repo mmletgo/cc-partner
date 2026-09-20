@@ -479,6 +479,24 @@ class _TransferPageState extends State<TransferPage> {
             ],
           ),
         ),
+        // 进行中任务行内进度条与字节文本（对齐 web 行内进度条）；completed/failed 不显示。
+        if (canCancel) ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: LinearProgressIndicator(
+              key: Key('transfer-progress-${task.id}'),
+              value: task.progress > 0 ? task.progress.clamp(0.0, 1.0).toDouble() : null,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              transferTaskProgressText(task),
+              key: Key('transfer-progress-text-${task.id}'),
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+        ],
         if (actionError != null)
           Padding(
             key: Key('transfer-error-${task.id}'),
@@ -608,6 +626,21 @@ String formatTransferBytes(int bytes) {
     return '${(bytes / 1024).toStringAsFixed(1)} KB';
   }
   return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+}
+
+/// Business Logic: 进行中任务行要把「已传多少 / 总共多少 / 百分比」直接呈现，
+/// 对齐 web 任务行内进度文本；completed/failed 行不展示。
+/// Code Logic: 已传字节优先 `TransferTask.transferredBytes`，缺失时按
+/// `progress × fileSize` 估算；总量未知（fileSize 缺失）只显示「已传 X」。
+String transferTaskProgressText(TransferTask task) {
+  final total = task.fileSize ?? 0;
+  final transferred = task.transferredBytes ??
+      (total > 0 ? (task.progress.clamp(0, 1) * total).round() : 0);
+  if (total <= 0) {
+    return '已传 ${formatTransferBytes(transferred)}';
+  }
+  final percent = ((transferred / total) * 100).clamp(0, 100).toStringAsFixed(0);
+  return '已传 ${formatTransferBytes(transferred)} / ${formatTransferBytes(total)}（$percent%）';
 }
 
 Future<void> saveTransferBytesToPhone({

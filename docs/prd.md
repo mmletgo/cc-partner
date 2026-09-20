@@ -501,7 +501,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 2.21 Flutter 原生移动客户端
 
-**描述**：正式 iOS/Android 客户端（一套 Flutter 代码），在局域网内切换多台 PC 工作台。网页 `/mobile` 继续存在且不改 UI。设计见 [`docs/superpowers/specs/2026-09-19-flutter-mobile-app-design.md`](superpowers/specs/2026-09-19-flutter-mobile-app-design.md)。状态：工作台面板与交互已与网页 `/mobile` 两轮对齐（第二轮补齐终端会话/窗格/全屏/触控滚动转发/惰性历史、壳层实验开关、Git Sync 与 mutation 对账、自动化任务块与 experiments、传输恢复与对账轮询、Attention summary/freshness/分组等）；推送点开导航等原生集成项仍待真机验证。
+**描述**：正式 iOS/Android 客户端（一套 Flutter 代码），在局域网内切换多台 PC 工作台。网页 `/mobile` 继续存在且不改 UI。设计见 [`docs/superpowers/specs/2026-09-19-flutter-mobile-app-design.md`](superpowers/specs/2026-09-19-flutter-mobile-app-design.md)。状态：工作台面板与交互已与网页 `/mobile` 三轮对齐（第三轮补齐面板常驻挂载——Files 草稿/终端流/传输进度不因切面板销毁、终端 boot 重试与 replay 输入门闩、输入 WS 未就绪禁用输入行、会话列表重连/回前台刷新、同步 push unknown 纳入对账、Git hook 卡对齐终端语义、传输行内进度、文件/Attention 错误重试与刷新入口、Attention 可见时轮询、Drawer 断开入口、删除激活项目 dirty 预检、项目 kind 徽章与设备名）；推送点开导航等原生集成项仍待真机验证。
 
 **功能点**：
 - 本地地址簿：手填 `IP:端口`（默认端口 62116）、粘贴 URL、扫描桌面现有 `/mobile` 二维码（只取主机和端口）；同一规范化 host:port 不重复；保存前 health 探测，失败允许强制保存但不得标为在线，并展示失败原因。iOS 必须声明本地网络用途（`NSLocalNetworkUsageDescription`）。地址簿在打开、回到前台和下拉刷新时重新探测 `GET /api/health`

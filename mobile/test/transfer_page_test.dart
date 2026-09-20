@@ -274,7 +274,9 @@ void main() {
         TransferTask(id: 't-done', direction: 'Receive', status: 'completed'),
       ]),
     );
-    await tester.pumpAndSettle();
+    // 进行中任务行带 indeterminate 进度条（动画永不停止），不能 pumpAndSettle。
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('进行中'), findsOneWidget);
     expect(find.text('需注意'), findsOneWidget);
     expect(find.text('已完成'), findsOneWidget);
@@ -300,6 +302,70 @@ void main() {
     expect(find.text('进行中'), findsNothing);
     expect(find.text('需注意'), findsNothing);
     expect(find.byTooltip('下载'), findsOneWidget);
+  });
+
+  testWidgets('active task rows show progress bar and transferred-bytes text', (tester) async {
+    await _pumpPage(
+      tester,
+      _FakeTransferApi(tasks: [
+        TransferTask(
+          id: 't-act',
+          direction: 'Send',
+          status: 'transferring',
+          fileSize: 2 * 1024 * 1024,
+          progress: 0.5,
+        ),
+        TransferTask(
+          id: 't-bytes',
+          direction: 'Send',
+          status: 'pending',
+          fileSize: 3 * 1024 * 1024,
+          transferredBytes: 1572864,
+        ),
+        TransferTask(id: 't-fail', direction: 'Send', status: 'failed'),
+        TransferTask(id: 't-done', direction: 'Receive', status: 'completed'),
+      ]),
+    );
+    // indeterminate 进度条动画永不停止，不能 pumpAndSettle。
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // progress 值作为确定进度；字节文本按 progress × fileSize 估算。
+    final bar = tester.widget<LinearProgressIndicator>(
+      find.byKey(const Key('transfer-progress-t-act')),
+    );
+    expect(bar.value, 0.5);
+    expect(find.text('已传 1.0 MB / 2.0 MB（50%）'), findsOneWidget);
+
+    // transferredBytes 优先于估算；progress 缺失（0）时进度条 indeterminate。
+    final bytesBar = tester.widget<LinearProgressIndicator>(
+      find.byKey(const Key('transfer-progress-t-bytes')),
+    );
+    expect(bytesBar.value, isNull);
+    expect(find.text('已传 1.5 MB / 3.0 MB（50%）'), findsOneWidget);
+
+    // completed/failed 行不显示进度条。
+    expect(find.byKey(const Key('transfer-progress-t-fail')), findsNothing);
+    expect(find.byKey(const Key('transfer-progress-t-done')), findsNothing);
+  });
+
+  testWidgets('pending task without size/progress shows indeterminate bar and placeholder text',
+      (tester) async {
+    await _pumpPage(
+      tester,
+      _FakeTransferApi(tasks: [
+        TransferTask(id: 't-pend', direction: 'Send', status: 'pending'),
+      ]),
+    );
+    // indeterminate 进度条动画永不停止，不能 pumpAndSettle。
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final bar = tester.widget<LinearProgressIndicator>(
+      find.byKey(const Key('transfer-progress-t-pend')),
+    );
+    expect(bar.value, isNull);
+    expect(find.text('已传 0.0 KB'), findsOneWidget);
   });
 
   testWidgets('upload shows determinate progress bar and byte text', (tester) async {
@@ -437,10 +503,14 @@ void main() {
     ]);
     api.failCancelWithLanError = true;
     await _pumpPage(tester, api);
-    await tester.pumpAndSettle();
+    // 进行中任务行带 indeterminate 进度条，不能 pumpAndSettle。
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
 
     await tester.tap(find.byTooltip('取消'));
-    await tester.pumpAndSettle();
+    // 进行中任务行带 indeterminate 进度条，不能 pumpAndSettle。
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
     expect(api.cancelCalls, ['t-act']);
     expect(find.byKey(const Key('transfer-error-t-act')), findsOneWidget);
     expect(find.textContaining('取消失败'), findsOneWidget);

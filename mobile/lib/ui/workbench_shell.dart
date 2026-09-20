@@ -29,6 +29,35 @@ IconData _icon(IconDataForPanel kind) {
   }
 }
 
+/// Drawer 子树探针：DrawerController 在 dismissed 状态不构建子树，因此本 State
+/// 每次抽屉打开都会重新 initState，作为「抽屉已打开」的一次性信号。
+class _DrawerOpenedProbe extends StatefulWidget {
+  const _DrawerOpenedProbe({required this.child, this.onOpened});
+
+  final Widget child;
+
+  /// 抽屉打开后的回调（post-frame 触发，回调内可安全 setState）。
+  final VoidCallback? onOpened;
+
+  @override
+  State<_DrawerOpenedProbe> createState() => _DrawerOpenedProbeState();
+}
+
+class _DrawerOpenedProbeState extends State<_DrawerOpenedProbe> {
+  @override
+  void initState() {
+    super.initState();
+    final onOpened = widget.onOpened;
+    if (onOpened != null) {
+      // 等本帧结束再回调，避免在 build/布局期间触发宿主 setState。
+      WidgetsBinding.instance.addPostFrameCallback((_) => onOpened());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
 /// Dual-mode workbench chrome matching `/mobile`. Never embeds the SPA.
 class WorkbenchShell extends StatelessWidget {
   const WorkbenchShell({
@@ -41,6 +70,7 @@ class WorkbenchShell extends StatelessWidget {
     this.subtitle,
     this.worktreeStrip,
     this.onBackToProjects,
+    this.onDrawerOpened,
     this.badges = const {},
     this.automationEnabled = true,
     this.browserEnabled = true,
@@ -55,6 +85,9 @@ class WorkbenchShell extends StatelessWidget {
   final String? subtitle;
   final Widget? worktreeStrip;
   final VoidCallback? onBackToProjects;
+
+  /// 抽屉每次打开时回调（experimentalFeatures 拉取失败后的静默重试钩子）。
+  final VoidCallback? onDrawerOpened;
 
   /// 面板徽章计数（如「待处理」未读数）；null 或 <=0 不显示。
   final Map<WorkbenchPanel, int> badges;
@@ -90,40 +123,51 @@ class WorkbenchShell extends StatelessWidget {
       ),
       drawer: Drawer(
         child: SafeArea(
-          child: ListView(
-            children: [
-              if (mode == WorkbenchNavMode.project && onBackToProjects != null)
-                ListTile(
-                  key: const Key('nav-back-projects'),
-                  leading: const Icon(Icons.arrow_back),
-                  title: const Text('项目'),
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    onBackToProjects!();
-                  },
-                ),
-              for (final group in groups) ...[
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                  child: Text(
-                    workbenchNavGroupLabel(group.id),
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
-                ),
-                for (final item in withBadges(group.panels, badges))
+          child: _DrawerOpenedProbe(
+            onOpened: onDrawerOpened,
+            child: ListView(
+              children: [
+                if (mode == WorkbenchNavMode.project && onBackToProjects != null)
                   ListTile(
-                    key: Key('nav-${item.panel.name}'),
-                    selected: item.panel == panel,
-                    leading: Icon(_icon(iconForPanel(item.panel))),
-                    title: Text(panelLabel(item.panel)),
-                    trailing: _badge(context, item),
+                    key: const Key('nav-back-projects'),
+                    leading: const Icon(Icons.arrow_back),
+                    title: const Text('项目'),
                     onTap: () {
                       Navigator.of(context).pop();
-                      onSelect(item.panel);
+                      onBackToProjects!();
                     },
                   ),
+                for (final group in groups) ...[
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                    child: Text(
+                      workbenchNavGroupLabel(group.id),
+                      style: Theme.of(context).textTheme.labelSmall,
+                    ),
+                  ),
+                  for (final item in withBadges(group.panels, badges))
+                    ListTile(
+                      key: Key('nav-${item.panel.name}'),
+                      selected: item.panel == panel,
+                      leading: Icon(_icon(iconForPanel(item.panel))),
+                      title: Text(panelLabel(item.panel)),
+                      trailing: _badge(context, item),
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        onSelect(item.panel);
+                      },
+                    ),
+                ],
+                // 全局模式组尾放「断开并返回地址簿」：项目模式不放，避免操作中误触。
+                if (mode == WorkbenchNavMode.global)
+                  ListTile(
+                    key: const Key('nav-disconnect'),
+                    leading: const Icon(Icons.link_off),
+                    title: const Text('断开并返回地址簿'),
+                    onTap: () => _disconnect(context),
+                  ),
               ],
-            ],
+            ),
           ),
         ),
       ),
@@ -135,6 +179,17 @@ class WorkbenchShell extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// Business Logic: 全局模式 Drawer 组尾的「断开并返回地址簿」要把用户送回上一页
+  /// （通常是地址簿），且必须走既有路由 pop 路径，让宿主页 PopScope 照常保存
+  /// lastLocation，不得绕过。
+  /// Code Logic: 第一次 pop 关闭 Drawer（DrawerController 打开时压入的
+  /// LocalHistoryEntry），第二次 pop 退出工作台路由本身。
+  void _disconnect(BuildContext context) {
+    final navigator = Navigator.of(context);
+    navigator.pop();
+    navigator.pop();
   }
 
   /// Business Logic: 「待处理」未读数要在 Drawer 里一眼可见，0 不能显示空徽章。

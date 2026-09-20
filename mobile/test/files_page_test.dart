@@ -20,6 +20,16 @@ class _RecordingFilesClient extends FilesClient {
   Object? saveError;
   int saveCalls = 0;
 
+  /// 非 null 时 listDir 抛出该错误（错误态/重试用）。
+  Object? listError;
+
+  /// listDir 结果注入；为空时用默认单文件列表（空态/元信息用）。
+  List<Map<String, dynamic>>? nodes;
+  int listCalls = 0;
+
+  /// 非 null 时 open 抛出该错误（打开失败提示用）。
+  Object? openError;
+
   @override
   Future<List<Map<String, dynamic>>> listDir({
     required String projectId,
@@ -27,6 +37,15 @@ class _RecordingFilesClient extends FilesClient {
     String? path,
   }) async {
     worktreeIds.add(worktreeId);
+    listCalls += 1;
+    final error = listError;
+    if (error != null) {
+      throw error;
+    }
+    final custom = nodes;
+    if (custom != null) {
+      return custom;
+    }
     return [
       {'name': 'README.md', 'kind': 'file', 'path': 'README.md'},
     ];
@@ -37,14 +56,19 @@ class _RecordingFilesClient extends FilesClient {
     required String projectId,
     required String path,
     String? worktreeId,
-  }) async =>
-      openedPayload ??
-      {
-        'metadata': {'name': 'README.md', 'path': path},
-        'text': {'content': 'hello', 'hash': 'h1'},
-        // 建模真实后端：files/open 恒返回 capabilities.canEdit。
-        'capabilities': {'canEdit': true},
-      };
+  }) async {
+    final error = openError;
+    if (error != null) {
+      throw error;
+    }
+    return openedPayload ??
+        {
+          'metadata': {'name': 'README.md', 'path': path},
+          'text': {'content': 'hello', 'hash': 'h1'},
+          // 建模真实后端：files/open 恒返回 capabilities.canEdit。
+          'capabilities': {'canEdit': true},
+        };
+  }
 
   @override
   Future<Map<String, dynamic>> saveText({
@@ -280,5 +304,80 @@ void main() {
 
     expect(find.byKey(const Key('files-readonly-note')), findsOneWidget);
     expect(find.byKey(const Key('files-save')), findsNothing);
+  });
+
+  testWidgets('打开文件失败：SnackBar 提示原因并停留在列表页', (tester) async {
+    final client = _RecordingFilesClient()
+      ..openError = LanHttpException(500, 'file gone');
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('README.md'));
+    await tester.pumpAndSettle();
+
+    // 失败提示上屏且带原因。
+    expect(find.textContaining('打开文件失败'), findsOneWidget);
+    expect(find.textContaining('file gone'), findsOneWidget);
+    // 停留在列表页：未进入预览页。
+    expect(find.byType(FilePreviewPage), findsNothing);
+    expect(find.text('README.md'), findsOneWidget);
+  });
+
+  testWidgets('目录加载失败：错误卡 + 重试按钮 + 错误态下拉刷新', (tester) async {
+    final client = _RecordingFilesClient()..listError = Exception('list 失败');
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    await tester.pumpAndSettle();
+
+    // 错误卡语义：明确「加载失败」+ 原因 + 重试入口。
+    expect(find.byKey(const Key('files-error-card')), findsOneWidget);
+    expect(find.text('加载失败'), findsOneWidget);
+    expect(find.textContaining('list 失败'), findsOneWidget);
+
+    // 错误态同样可下拉刷新：修复后下拉即恢复列表。
+    client.listError = null;
+    await tester.drag(find.byType(ListView), const Offset(0, 300));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('files-error-card')), findsNothing);
+    expect(find.text('README.md'), findsOneWidget);
+
+    // 重试按钮路径：再次失败后点重试恢复列表。
+    client.listError = Exception('again');
+    await tester.drag(find.byType(ListView), const Offset(0, 300));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('files-error-card')), findsOneWidget);
+    client.listError = null;
+    await tester.tap(find.byKey(const Key('files-error-retry')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('files-error-card')), findsNothing);
+    expect(find.text('README.md'), findsOneWidget);
+  });
+
+  testWidgets('空目录显示空目录文案', (tester) async {
+    final client = _RecordingFilesClient()..nodes = [];
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    await tester.pumpAndSettle();
+
+    expect(find.text('空目录'), findsOneWidget);
+    // 空态同样可下拉刷新。
+    final callsBefore = client.listCalls;
+    await tester.drag(find.byType(ListView), const Offset(0, 300));
+    await tester.pumpAndSettle();
+    expect(client.listCalls, greaterThan(callsBefore));
+  });
+
+  testWidgets('列表行显示目录/大小元信息，size 缺失显示文件', (tester) async {
+    final client = _RecordingFilesClient()
+      ..nodes = [
+        {'name': 'assets', 'kind': 'dir', 'path': 'assets'},
+        {'name': 'logo.png', 'kind': 'file', 'path': 'logo.png', 'size': 1536},
+        {'name': 'unknown.bin', 'kind': 'file', 'path': 'unknown.bin'},
+      ];
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    await tester.pumpAndSettle();
+
+    // 目录显示「目录」；文件显示 B/KB/MB 大小；size 缺失只显示类型「文件」。
+    expect(find.text('目录'), findsOneWidget);
+    expect(find.text('1.5 KB'), findsOneWidget);
+    expect(find.text('文件'), findsOneWidget);
   });
 }

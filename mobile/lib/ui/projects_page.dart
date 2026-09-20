@@ -14,6 +14,7 @@ class ProjectsPage extends StatefulWidget {
     required this.http,
     required this.onOpen,
     this.onProjectRemoved,
+    this.confirmRemove,
     this.client,
     this.transferApi,
   });
@@ -25,6 +26,9 @@ class ProjectsPage extends StatefulWidget {
   /// 删除项目成功后回调（接缝契约：参数为已删除项目 id）；
   /// 壳层据此在删除的是激活项目时清空工作台上下文。
   final void Function(String projectId)? onProjectRemoved;
+
+  /// 删除前置钩子：返回 false 中止删除（壳层用于激活项目的文件改动预检）。
+  final Future<bool> Function(ProjectSummary project)? confirmRemove;
 
   /// 测试注入的项目接口；为空时按当前主机构造。
   final ProjectsClient? client;
@@ -108,10 +112,21 @@ class _ProjectsPageState extends State<ProjectsPage> {
     }
   }
 
-  /// 先弹确认框，确认后才从最近列表移除；移除中按钮禁用防重复提交。
+  /// Business Logic: 删除前先过可选的 confirmRemove 前置钩子（壳层用于激活项目的
+  /// 文件改动预检，返回 false 时静默中止、不弹确认框），再经确认框确认后才移除；
+  /// 移除中按钮禁用防重复提交。钩子为 null 时行为与无钩子时完全一致。
+  /// Code Logic: removingIds 防重入 → await confirmRemove（false 中止）→ 确认框 →
+  /// client.remove → onProjectRemoved 回调 → reload。
   Future<void> _remove(ProjectSummary project) async {
     if (_removingIds.contains(project.id)) {
       return;
+    }
+    final confirmRemove = widget.confirmRemove;
+    if (confirmRemove != null) {
+      final allowed = await confirmRemove(project);
+      if (!allowed || !mounted) {
+        return;
+      }
     }
     final confirmed = await showDialog<bool>(
       context: context,
@@ -203,6 +218,22 @@ class _ProjectsPageState extends State<ProjectsPage> {
     );
   }
 
+  /// Business Logic: 项目行 kind 徽章文案对齐 web MobileProjectPanel：
+  /// remote 显示「远端」、local 显示「本机项目」，其余 kind 原样展示；缺失不渲染徽章。
+  /// Code Logic: 纯映射，返回 null 表示该行不渲染徽章。
+  String? _kindLabel(String? kind) {
+    if (kind == null) {
+      return null;
+    }
+    if (kind == 'remote') {
+      return '远端';
+    }
+    if (kind == 'local') {
+      return '本机项目';
+    }
+    return kind;
+  }
+
   @override
   Widget build(BuildContext context) {
     final fleet = _fleet;
@@ -262,10 +293,60 @@ class _ProjectsPageState extends State<ProjectsPage> {
                             itemBuilder: (context, index) {
                               final project = _items[index];
                               final removing = _removingIds.contains(project.id);
+                              final theme = Theme.of(context);
+                              final kindLabel = _kindLabel(project.kind);
+                              final isRemote = project.kind == 'remote';
+                              final deviceName = project.deviceName?.trim() ?? '';
                               return ListTile(
                                 leading: const Icon(Icons.folder),
-                                title: Text(project.name),
-                                subtitle: Text(project.path ?? project.kind ?? project.id),
+                                title: Row(
+                                  children: [
+                                    Expanded(child: Text(project.name)),
+                                    if (kindLabel != null)
+                                      Container(
+                                        key: Key('project-kind-badge-${project.id}'),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 8,
+                                          vertical: 2,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          // remote 用 accent 容器色高亮，local 用中性色。
+                                          color: isRemote
+                                              ? theme.colorScheme.secondaryContainer
+                                              : theme
+                                                  .colorScheme.surfaceContainerHighest,
+                                          borderRadius:
+                                              BorderRadius.circular(999),
+                                        ),
+                                        child: Text(
+                                          kindLabel,
+                                          style: theme.textTheme.labelSmall
+                                              ?.copyWith(
+                                            color: isRemote
+                                                ? theme.colorScheme
+                                                    .onSecondaryContainer
+                                                : theme.colorScheme.onSurface,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                                subtitle: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(project.path ?? project.kind ?? project.id),
+                                    // remote 项目行展示设备名（web mobileListMeta 同源）；
+                                    // 字段缺失或为空时整行不渲染。
+                                    if (isRemote && deviceName.isNotEmpty)
+                                      Text(
+                                        deviceName,
+                                        key: Key(
+                                          'project-device-name-${project.id}',
+                                        ),
+                                        style: theme.textTheme.bodySmall,
+                                      ),
+                                  ],
+                                ),
                                 onTap: () => widget.onOpen(project),
                                 trailing: IconButton(
                                   key: Key('project-remove-${project.id}'),
@@ -273,10 +354,12 @@ class _ProjectsPageState extends State<ProjectsPage> {
                                       ? const SizedBox(
                                           width: 16,
                                           height: 16,
-                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                          child: CircularProgressIndicator(
+                                              strokeWidth: 2),
                                         )
                                       : const Icon(Icons.delete_outline),
-                                  onPressed: removing ? null : () => _remove(project),
+                                  onPressed:
+                                      removing ? null : () => _remove(project),
                                 ),
                               );
                             },

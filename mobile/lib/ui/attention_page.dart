@@ -5,6 +5,7 @@ import '../attention/client.dart';
 import '../attention/filter.dart';
 import '../core/lan_http.dart';
 import '../projects/client.dart';
+import '../transfer/polling.dart';
 
 class AttentionPage extends StatefulWidget {
   const AttentionPage({
@@ -56,6 +57,19 @@ class _AttentionPageState extends State<AttentionPage> {
   final Set<String> _pendingIds = {};
   bool _markAllBusy = false;
 
+  /// 是否有刷新请求在途（single-flight 门闩，防止轮询/手动刷新重入）。
+  bool _refreshInFlight = false;
+
+  /// 请求序号守卫：每次刷新自增并捕获，响应回来时序号不一致则丢弃（防过期覆盖）。
+  int _refreshSeq = 0;
+
+  /// 头部「刷新」按钮 busy 态：刷新进行中禁用并显示「刷新中…」。
+  bool _refreshing = false;
+
+  /// 可见时轮询：对齐 web useVisibilityPolling——App 处于 resumed 时每 10s
+  /// 静默拉一次快照，hidden/inactive 暂停，回前台立即补拉。
+  late final VisibilityPoller _poller;
+
   /// 日过滤与时间展示的基准时刻，每次拉取快照时刷新。
   DateTime _now = DateTime.now();
 
@@ -77,45 +91,81 @@ class _AttentionPageState extends State<AttentionPage> {
   @override
   void initState() {
     super.initState();
+    // 可见时轮询：10s 周期对齐 web；initState 已首拉一次，不再立即重复执行，
+    // 回前台的立即补拉由 poller 生命周期回调承担。
+    _poller = VisibilityPoller(
+      interval: const Duration(seconds: 10),
+      task: _pollRefresh,
+    );
     _reload();
+    _poller.start(runImmediately: false);
   }
 
-  /// Business Logic: 拉取完整快照（下拉刷新/首载用）；已有快照时刷新失败只标 stale，
+  @override
+  void dispose() {
+    _poller.dispose();
+    super.dispose();
+  }
+
+  /// Business Logic: 下拉刷新/首载/重试共用的刷新入口；已有快照时刷新失败只标 stale，
   /// 不得用整屏错误覆盖旧数据（对齐 web useAttention 语义）。
-  /// Code Logic: 空列表失败 → 错误屏；非空失败 → stale banner + 保留旧列表；
-  /// 成功 → 更新快照、成功时间并清 stale。
-  Future<void> _reload() async {
-    final silent = _items.isNotEmpty;
+  /// Code Logic: 按是否已有快照推导 silent（有快照静默、无快照进 loading），委托 _refresh。
+  Future<void> _reload() => _refresh(silent: _items.isNotEmpty);
+
+  /// Business Logic: 前台轮询需无感更新快照，让侧栏未读徽章不滞后于 web；
+  /// 失败不打扰用户（有快照走 stale 横幅，无快照维持错误屏现状）。
+  /// Code Logic: 轮询路径恒为静默，委托 _refresh。
+  Future<void> _pollRefresh() => _refresh(silent: true);
+
+  /// Business Logic: 拉取完整快照（首载/下拉/头部刷新按钮/轮询/重试共用同一刷新路径）；
+  /// 已有快照时刷新失败只标 stale，不得用整屏错误覆盖旧数据（对齐 web useAttention）。
+  /// Code Logic: single-flight 防重入 + 请求序号守卫丢弃过期响应；silent 不进 loading；
+  /// 空列表失败 → 错误屏；非空失败 → stale banner + 保留旧列表；成功 → 更新快照、
+  /// 记录成功时间并清 stale。
+  Future<void> _refresh({required bool silent}) async {
+    if (_refreshInFlight) {
+      return;
+    }
+    _refreshInFlight = true;
+    final seq = ++_refreshSeq;
     if (mounted) {
       setState(() {
         if (!silent) {
           _loading = true;
+          _error = null;
         }
-        _error = null;
+        _refreshing = true;
       });
     }
     try {
       final items = await _client.listVisible();
-      if (mounted) {
+      if (!mounted || seq != _refreshSeq) {
+        return;
+      }
+      setState(() {
+        _items = items;
+        _now = DateTime.now();
+        _stale = false;
+        _lastSucceededAt = _now.toIso8601String();
+        _loading = false;
+      });
+      widget.onItemsChanged?.call(items);
+    } catch (error) {
+      if (!mounted || seq != _refreshSeq) {
+        return;
+      }
+      if (_items.isEmpty) {
         setState(() {
-          _items = items;
-          _now = DateTime.now();
-          _stale = false;
-          _lastSucceededAt = _now.toIso8601String();
+          _error = error.toString();
           _loading = false;
         });
-        widget.onItemsChanged?.call(items);
+      } else {
+        setState(() => _stale = true);
       }
-    } catch (error) {
-      if (mounted) {
-        if (_items.isEmpty) {
-          setState(() {
-            _error = error.toString();
-            _loading = false;
-          });
-        } else {
-          setState(() => _stale = true);
-        }
+    } finally {
+      _refreshInFlight = false;
+      if (mounted && seq == _refreshSeq) {
+        setState(() => _refreshing = false);
       }
     }
   }
@@ -294,7 +344,25 @@ class _AttentionPageState extends State<AttentionPage> {
       return const Center(child: CircularProgressIndicator());
     }
     if (_error != null) {
-      return Center(child: Text(_error!));
+      // 初始加载失败（无快照）的错误屏：保持错误文案，并提供「重试」走同一刷新路径
+      // （对齐 web 错误态 reload 按钮）。
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Text(_error!, textAlign: TextAlign.center),
+            ),
+            const SizedBox(height: 8),
+            TextButton(
+              key: const Key('attention-retry'),
+              onPressed: _reload,
+              child: const Text('重试'),
+            ),
+          ],
+        ),
+      );
     }
     if (_items.isEmpty) {
       return RefreshIndicator(
@@ -319,15 +387,23 @@ class _AttentionPageState extends State<AttentionPage> {
         padding: const EdgeInsets.symmetric(vertical: 4),
         children: [
           if (_stale) _staleBanner(),
-          Align(
-            alignment: Alignment.centerRight,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: TextButton(
-                key: const Key('attention-mark-all-read'),
-                onPressed: unreadTotal == 0 || _markAllBusy ? null : _markAllRead,
-                child: Text(_markAllBusy ? '标记中…' : '全部已读'),
-              ),
+          // 头部操作行：刷新 + 全部已读（对齐 web 面板头部 reload / markAllRead）。
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  key: const Key('attention-refresh'),
+                  onPressed: _refreshing ? null : _reload,
+                  child: Text(_refreshing ? '刷新中…' : '刷新'),
+                ),
+                TextButton(
+                  key: const Key('attention-mark-all-read'),
+                  onPressed: unreadTotal == 0 || _markAllBusy ? null : _markAllRead,
+                  child: Text(_markAllBusy ? '标记中…' : '全部已读'),
+                ),
+              ],
             ),
           ),
           if (partition.earlier.isNotEmpty)

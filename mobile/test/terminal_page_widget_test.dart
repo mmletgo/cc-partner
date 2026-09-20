@@ -1,3 +1,8 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:cc_partner_mobile/address_book/book.dart';
 import 'package:cc_partner_mobile/address_book/models.dart';
 import 'package:cc_partner_mobile/core/lan_http.dart';
@@ -5,6 +10,7 @@ import 'package:cc_partner_mobile/git/client.dart';
 import 'package:cc_partner_mobile/prompts/client.dart';
 import 'package:cc_partner_mobile/projects/client.dart';
 import 'package:cc_partner_mobile/sessions/client.dart';
+import 'package:cc_partner_mobile/terminal/controller.dart';
 import 'package:cc_partner_mobile/ui/terminal_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -24,13 +30,13 @@ SessionSummary _s(
       paneCount: paneCount,
     );
 
-AddressBook _book() {
+AddressBook _book([String baseUrl = 'http://127.0.0.1:1']) {
   final book = AddressBook(store: MemoryAddressBookStore());
   book.servers.add(ServerRecord(
     id: 'pc',
     host: '127.0.0.1',
     port: 1,
-    baseUrl: 'http://127.0.0.1:1',
+    baseUrl: baseUrl,
   ));
   book.activeServerId = 'pc';
   return book;
@@ -91,6 +97,170 @@ class _FakeSessions extends SessionsClient {
   Future<ClosePaneResult> closePane(String sessionId) async {
     closePaneCalls += 1;
     return ClosePaneResult(sessionId: sessionId, closedWindow: closePaneClosesWindow);
+  }
+}
+
+/// boot 失败可切换的 fake：listError 非 null 时 list 抛错，模拟 boot 失败。
+class _FailingListSessions extends _FakeSessions {
+  _FailingListSessions(super.sessions);
+
+  Object? listError = Exception('boot 失败');
+
+  @override
+  Future<List<SessionSummary>> list(String projectId) async {
+    final error = listError;
+    if (error != null) {
+      throw error;
+    }
+    return sessions;
+  }
+}
+
+/// 初始 replay 挂起的 fake：用 Completer 控制 replay 完成时机，用于门闩测试。
+class _GatedReplaySessions extends _FakeSessions {
+  _GatedReplaySessions(super.sessions);
+
+  final Completer<Map<String, dynamic>> initialReplay =
+      Completer<Map<String, dynamic>>();
+
+  @override
+  Future<Map<String, dynamic>> replay(String sessionId,
+      {bool refreshHistory = false}) {
+    replayIds.add(sessionId);
+    return initialReplay.future;
+  }
+}
+
+/// 测试内存 Socket：无真实 IO，`add` 计数用于断言「是否向外发送过字节」。
+class _FakeSocket extends Stream<Uint8List> implements Socket {
+  final StreamController<Uint8List> _incoming = StreamController<Uint8List>();
+  final Completer<void> _done = Completer<void>();
+  int writeCount = 0;
+
+  /// 模拟对端关闭：结束入站流，驱动 WebSocket 的 onDone。
+  void closePeer() {
+    _incoming.close();
+  }
+
+  @override
+  StreamSubscription<Uint8List> listen(
+    void Function(Uint8List data)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) {
+    return _incoming.stream.listen(
+      onData,
+      onError: onError,
+      onDone: onDone,
+      cancelOnError: cancelOnError ?? false,
+    );
+  }
+
+  @override
+  void add(List<int> bytes) {
+    writeCount += 1;
+  }
+
+  @override
+  Future<void> addStream(Stream<List<int>> stream) async {
+    await for (final _ in stream) {
+      writeCount += 1;
+    }
+  }
+
+  @override
+  Future<dynamic> close() async {
+    // 同时结束入站流：让 _WebSocketImpl 的 close 握手完整走完，
+    // 取消其 5s 强制关闭 Timer，避免测试结束时残留 pending Timer。
+    await _incoming.close();
+    if (!_done.isCompleted) {
+      _done.complete();
+    }
+  }
+
+  @override
+  Future<Socket> get done => _done.future.then((_) => this);
+
+  @override
+  void addError(Object error, [StackTrace? stackTrace]) {}
+
+  @override
+  Encoding get encoding => utf8;
+
+  @override
+  set encoding(Encoding value) {}
+
+  @override
+  Future<void> flush() async {}
+
+  @override
+  void write(Object? object) {}
+
+  @override
+  void writeAll(Iterable<Object?> objects, [String separator = '']) {}
+
+  @override
+  void writeCharCode(int charCode) {}
+
+  @override
+  void writeln([Object? object = '']) {}
+
+  @override
+  void destroy() {
+    if (!_done.isCompleted) {
+      _done.complete();
+    }
+  }
+
+  @override
+  bool setOption(SocketOption option, bool enabled) => true;
+
+  @override
+  Uint8List getRawOption(RawSocketOption option) => Uint8List(0);
+
+  @override
+  void setRawOption(RawSocketOption option) {}
+
+  @override
+  InternetAddress get address => InternetAddress.loopbackIPv4;
+
+  @override
+  InternetAddress get remoteAddress => InternetAddress.loopbackIPv4;
+
+  @override
+  int get port => 0;
+
+  @override
+  int get remotePort => 0;
+}
+
+/// openWebSocket 直接交付预建 Socket（包装为 WebSocket）或抛错的 http stub，绕开真实网络。
+class _StubWebSocketHttp extends LanHttpClient {
+  _StubWebSocketHttp(this.factory) : super();
+
+  /// 返回 null 表示连接失败（模拟连接被拒），否则交付已升级的内存 Socket。
+  final Socket? Function() factory;
+  int connectCalls = 0;
+
+  @override
+  Future<WebSocket> openWebSocket(
+    String baseUrl,
+    String path, {
+    Iterable<String>? protocols,
+  }) {
+    connectCalls += 1;
+    final socket = factory();
+    if (socket == null) {
+      return Future<WebSocket>.error(Exception('input ws unavailable'));
+    }
+    return Future<WebSocket>.value(
+      WebSocket.fromUpgradedSocket(
+        socket,
+        protocol: TerminalController.inputSubprotocol,
+        serverSide: false,
+      ),
+    );
   }
 }
 
@@ -210,6 +380,8 @@ Future<void> _pump(
   required SessionsClient sessions,
   PromptsClient? prompts,
   GitClient? git,
+  LanHttpClient? http,
+  String? baseUrl,
   ValueChanged<bool>? onFullscreenChanged,
   VoidCallback? onWorktreesMutated,
   Map<String, dynamic>? worktreeInfo,
@@ -221,8 +393,8 @@ Future<void> _pump(
       // 复用旧 State（旧 State 的 _git 注入实例会过期，导致断言打到旧 fake 上）。
       body: TerminalPage(
         key: ValueKey('terminal-under-test-$worktreeInfo'),
-        book: _book(),
-        http: LanHttpClient(),
+        book: _book(baseUrl ?? 'http://127.0.0.1:1'),
+        http: http ?? LanHttpClient(),
         project: _project,
         worktreeId: 'w1',
         worktreeInfo: worktreeInfo,
@@ -600,5 +772,113 @@ void main() {
     expect(find.text('已发送'), findsOneWidget);
     expect(find.text('Prompt 优化'), findsNothing);
     await tester.pump(const Duration(milliseconds: 3200));
+  });
+
+  testWidgets('boot 失败：错误页含文案与重试按钮，重试仍失败可再试，成功后正常进入', (tester) async {
+    final sessions = _FailingListSessions([_s('s0')]);
+    await _pump(tester, sessions: sessions);
+
+    expect(find.textContaining('boot 失败'), findsOneWidget);
+    expect(find.byKey(const Key('terminal-boot-retry')), findsOneWidget);
+    expect(find.byType(InputChip), findsNothing);
+
+    // 重试仍失败：错误页保留，重试入口仍在。
+    await tester.tap(find.byKey(const Key('terminal-boot-retry')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const Key('terminal-boot-retry')), findsOneWidget);
+
+    // 修复后重试：重新执行 boot（list → 激活 → replay），错误页消失。
+    sessions.listError = null;
+    await tester.tap(find.byKey(const Key('terminal-boot-retry')));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+
+    expect(find.textContaining('boot 失败'), findsNothing);
+    expect(find.byKey(const Key('terminal-boot-retry')), findsNothing);
+    expect(find.byType(InputChip), findsOneWidget);
+    expect(sessions.replayIds, ['s0']);
+  });
+
+  testWidgets('replay 门闩：完成前输入行/发送/extra keys 全部无效，完成后恢复并经 WS 发出', (tester) async {
+    final socket = _FakeSocket();
+    final http = _StubWebSocketHttp(() => socket);
+    final sessions = _GatedReplaySessions([_s('s0')]);
+    await _pump(tester, sessions: sessions, http: http);
+
+    // 初始 replay 挂起：门闩关闭且输入 WS 尚未建立 → 输入行与发送按钮禁用。
+    expect(sessions.replayIds, ['s0']);
+    expect(http.connectCalls, 0);
+    var field = tester.widget<TextField>(find.byKey(const Key('terminal-input-field')));
+    expect(field.enabled, false);
+    var send = tester.widget<IconButton>(find.byKey(const Key('terminal-input-send')));
+    expect(send.onPressed, isNull);
+
+    // 门闩期间 extra keys 也应无效（onSend → _send 被门闩丢弃）。
+    final writesWhileGated = socket.writeCount;
+    await tester.tap(find.text('Esc'));
+    await tester.pump();
+    expect(socket.writeCount, writesWhileGated);
+
+    // replay 完成（成功）→ 放行门闩 → 建立输入 WS → 输入恢复可用。
+    sessions.initialReplay.complete({'sessionId': 's0', 'buffer': '', 'lastSeq': 0});
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(http.connectCalls, 1);
+    field = tester.widget<TextField>(find.byKey(const Key('terminal-input-field')));
+    expect(field.enabled, true);
+    send = tester.widget<IconButton>(find.byKey(const Key('terminal-input-send')));
+    expect(send.onPressed, isNotNull);
+
+    // 输入行回车经 WS 发出；空输入（裸回车）不发送。
+    await tester.enterText(find.byKey(const Key('terminal-input-field')), 'ls');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(socket.writeCount, greaterThan(writesWhileGated));
+    final writesAfterInput = socket.writeCount;
+
+    await tester.enterText(find.byKey(const Key('terminal-input-field')), '');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(socket.writeCount, writesAfterInput);
+  });
+
+  testWidgets('replay 失败：门闩同样放行（对齐 web catch 分支也置 replayReady）', (tester) async {
+    final socket = _FakeSocket();
+    final http = _StubWebSocketHttp(() => socket);
+    final sessions = _GatedReplaySessions([_s('s0')]);
+    await _pump(tester, sessions: sessions, http: http);
+
+    sessions.initialReplay.completeError(Exception('replay 失败'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final field = tester.widget<TextField>(find.byKey(const Key('terminal-input-field')));
+    expect(field.enabled, true);
+    expect(http.connectCalls, 1);
+  });
+
+  testWidgets('输入 WS 断开：输入行禁用（状态行文案保持既有说明）', (tester) async {
+    final socket = _FakeSocket();
+    final http = _StubWebSocketHttp(() => socket);
+    final sessions = _GatedReplaySessions([_s('s0')]);
+    await _pump(tester, sessions: sessions, http: http);
+
+    sessions.initialReplay.complete({'sessionId': 's0', 'buffer': '', 'lastSeq': 0});
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    var field = tester.widget<TextField>(find.byKey(const Key('terminal-input-field')));
+    expect(field.enabled, true);
+
+    // 对端关闭 → 输入 WS onDone → 输入行禁用。
+    socket.closePeer();
+    await tester.pump();
+    await tester.pump();
+    field = tester.widget<TextField>(find.byKey(const Key('terminal-input-field')));
+    expect(field.enabled, false);
+    final send = tester.widget<IconButton>(find.byKey(const Key('terminal-input-send')));
+    expect(send.onPressed, isNull);
   });
 }

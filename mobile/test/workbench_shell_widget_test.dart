@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cc_partner_mobile/address_book/book.dart';
@@ -87,6 +88,149 @@ class _RoutingHttp extends LanHttpClient {
     }
     _notFound();
   }
+}
+
+/// 面板常驻挂载 / Drawer 重试 / 徽章轮询测试用的假 HTTP：
+/// 按 path 路由 workbench 相关端点并计数关键调用（sessions boot、files listDir、
+/// attention 拉取、experimentalFeatures 配置）；openWebSocket 返回永不完成的
+/// Future，模拟局域网建连悬挂，避免测试内发起真实 IO 或产生重连 Timer。
+class _PanelHttp extends LanHttpClient {
+  int configCalls = 0;
+  int attentionCalls = 0;
+  int sessionsListCalls = 0;
+  int replayCalls = 0;
+  int listDirCalls = 0;
+
+  /// true 时 /api/orchestrator/config 抛错（experimentalFeatures 拉取失败）。
+  bool failConfig = false;
+
+  @override
+  Future<Map<String, dynamic>> getJson(String baseUrl, String path) async {
+    if (path == '/api/orchestrator/config') {
+      configCalls += 1;
+      if (failConfig) {
+        throw LanHttpException(500, 'config unavailable');
+      }
+      // experimentalFeatures 全开：成功时 Drawer 应恢复 automation/browser 入口。
+      return {
+        'experimentalFeatures': {'automation': true, 'browser': true},
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> getDynamic(String baseUrl, String path) async {
+    if (path == '/api/mobile/attention/v2' || path == '/api/mobile/attention') {
+      attentionCalls += 1;
+      return {'items': <Map<String, dynamic>>[]};
+    }
+    if (path == '/api/mobile/workbench/projects/list') {
+      return {
+        'projects': [
+          {'id': 'p1', 'name': 'demo', 'path': '/repo', 'kind': 'local'},
+        ],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    if (path == '/api/mobile/workbench/sessions/list') {
+      sessionsListCalls += 1;
+      return [
+        {'id': 's1', 'projectId': 'p1', 'name': 's1', 'status': 'running'},
+      ];
+    }
+    if (path == '/api/mobile/workbench/files/list-dir') {
+      listDirCalls += 1;
+      final dirPath = body['path'] as String?;
+      if (dirPath == null || dirPath.isEmpty) {
+        return [
+          {'name': 'src', 'kind': 'dir', 'path': 'src'},
+        ];
+      }
+      return [
+        {'name': 'main.rs', 'kind': 'file', 'path': 'src/main.rs'},
+      ];
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String baseUrl,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return {
+        'ok': true,
+        'worktrees': [
+          {
+            'id': 'wt-main',
+            'name': 'main',
+            'branch': 'main',
+            'isMain': true,
+            'path': '/repo',
+          },
+        ],
+      };
+    }
+    if (path == '/api/mobile/workbench/sessions/replay') {
+      replayCalls += 1;
+      return {'sessionId': body['sessionId'], 'snapshot': 'boot-ok', 'lastSeq': 0};
+    }
+    if (path == '/api/mobile/workbench/sessions/focus' ||
+        path == '/api/mobile/workbench/sessions/zoom-pane') {
+      return <String, dynamic>{};
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<WebSocket> openWebSocket(
+    String baseUrl,
+    String path, {
+    Iterable<String>? protocols,
+  }) {
+    return Completer<WebSocket>().future;
+  }
+}
+
+/// 构造带一个离线 server 的地址簿（面板级测试共用）。
+Future<AddressBook> _panelBook() async {
+  final book = AddressBook(store: MemoryAddressBookStore());
+  await book.addFromInput(
+    '10.0.0.8:62116',
+    probe: (_) async => throw Exception('offline'),
+    forceIfUnreachable: true,
+  );
+  return book;
+}
+
+/// 挂载 WorkbenchHome 并等初始化请求全部落地。
+Future<void> _pumpHome(WidgetTester tester, _PanelHttp http) async {
+  final book = await _panelBook();
+  await tester.pumpWidget(
+    MaterialApp(home: WorkbenchHome(book: book, http: http)),
+  );
+  await tester.pumpAndSettle();
+}
+
+/// 打开项目「demo」进入 project 模式（终端面板）。
+Future<void> _openDemoProject(WidgetTester tester) async {
+  await tester.tap(find.text('demo'));
+  await tester.pumpAndSettle();
+}
+
+/// 经 Drawer 切换到目标面板（走真实导航路径）。
+Future<void> _gotoPanelViaDrawer(WidgetTester tester, String panelName) async {
+  await tester.tap(find.byTooltip('Open navigation menu'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(Key('nav-$panelName')));
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -331,5 +475,156 @@ void main() {
     expect(find.textContaining('移除失败'), findsNothing);
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
+  });
+
+  testWidgets('面板常驻挂载：files 切走再切回保留目录栈且不重新拉取', (tester) async {
+    final http = _PanelHttp();
+    await _pumpHome(tester, http);
+    await _openDemoProject(tester);
+    expect(http.sessionsListCalls, 1);
+    expect(http.replayCalls, 1);
+
+    // 进文件面板并进入 src 子目录（files 首次激活后常驻挂载）。
+    await _gotoPanelViaDrawer(tester, 'files');
+    expect(find.text('src'), findsOneWidget);
+    await tester.tap(find.text('src'));
+    await tester.pumpAndSettle();
+    expect(find.text('main.rs'), findsOneWidget);
+    expect(find.text('上级目录'), findsOneWidget);
+    expect(http.listDirCalls, 2);
+
+    // 切终端再切回：文件页 State 保留（目录栈不重置、不重新拉取）——
+    // 草稿上下文不再因切面板销毁重建。
+    await _gotoPanelViaDrawer(tester, 'terminal');
+    await _gotoPanelViaDrawer(tester, 'files');
+    expect(find.text('main.rs'), findsOneWidget);
+    expect(find.text('上级目录'), findsOneWidget);
+    expect(http.listDirCalls, 2, reason: 'files 面板常驻挂载不应重新拉取目录');
+    // 终端在文件面板停留期间也未被销毁重建。
+    expect(http.sessionsListCalls, 1);
+    expect(http.replayCalls, 1);
+  });
+
+  testWidgets('面板常驻挂载：terminal 切走再切回不重新 boot（replay 只调一次）', (tester) async {
+    final http = _PanelHttp();
+    await _pumpHome(tester, http);
+    await _openDemoProject(tester);
+    expect(http.sessionsListCalls, 1, reason: '打开项目时终端 boot 一次');
+    expect(http.replayCalls, 1);
+
+    // 切到传输再切回终端：终端页 State 常驻，不重走 boot/replay。
+    await _gotoPanelViaDrawer(tester, 'transfer');
+    await _gotoPanelViaDrawer(tester, 'terminal');
+    expect(http.sessionsListCalls, 1, reason: '终端面板常驻挂载不应重新 boot');
+    expect(http.replayCalls, 1, reason: '终端面板常驻挂载不应重新 replay');
+  });
+
+  testWidgets('global Drawer 提供「断开并返回地址簿」，pop 走既有路由回上一页', (tester) async {
+    final http = _PanelHttp();
+    final book = await _panelBook();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => WorkbenchHome(book: book, http: http),
+              ),
+            ),
+            child: const Text('open-workbench'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open-workbench'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Open navigation menu'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('nav-disconnect')), findsOneWidget);
+    expect(find.text('断开并返回地址簿'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('nav-disconnect')));
+    await tester.pumpAndSettle();
+    // 工作台路由被 pop 回入口页（宿主页 PopScope 保存 lastLocation 的既有路径）。
+    expect(find.text('open-workbench'), findsOneWidget);
+    expect(find.byKey(const Key('workbench-shell')), findsNothing);
+  });
+
+  testWidgets('project 模式 Drawer 不放「断开并返回地址簿」入口', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WorkbenchShell(
+          mode: WorkbenchNavMode.project,
+          panel: WorkbenchPanel.terminal,
+          projectLabel: 'demo',
+          onSelect: (_) {},
+          onBackToProjects: () {},
+          child: const Text('project-body'),
+        ),
+      ),
+    );
+    await tester.tap(find.byTooltip('Open navigation menu'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('nav-disconnect')), findsNothing);
+  });
+
+  testWidgets('experimentalFeatures 拉取失败后打开 Drawer 静默重试并恢复入口', (tester) async {
+    final http = _PanelHttp()..failConfig = true;
+    await _pumpHome(tester, http);
+    expect(http.configCalls, 1);
+
+    // 打开项目进入 project 模式（automation/browser 入口在项目级「工作」组）。
+    await _openDemoProject(tester);
+
+    // 第一次打开 Drawer：上次失败 → 静默重试，仍失败则入口不出现。
+    await tester.tap(find.byTooltip('Open navigation menu'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('nav-automation')), findsNothing);
+    expect(find.byKey(const Key('nav-browser')), findsNothing);
+    expect(http.configCalls, 2);
+
+    // 关闭 Drawer（点当前终端项），修复配置接口。
+    await tester.tap(find.byKey(const Key('nav-terminal')));
+    await tester.pumpAndSettle();
+    http.failConfig = false;
+
+    // 第二次打开 Drawer：静默重试成功 → automation/browser 入口恢复。
+    await tester.tap(find.byTooltip('Open navigation menu'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('nav-automation')), findsOneWidget);
+    expect(find.byKey(const Key('nav-browser')), findsOneWidget);
+    expect(http.configCalls, 3, reason: '成功后 Drawer 打开不再重复请求');
+  });
+
+  testWidgets('attention 徽章 10s 轮询：前台每周期拉取，待处理面板与退后台暂停', (tester) async {
+    final http = _PanelHttp();
+    await _pumpHome(tester, http);
+    final baseline = http.attentionCalls; // 含 initState 首拉
+
+    // projects 面板：壳层每 10s 恰好拉一次。
+    await tester.pump(const Duration(seconds: 10));
+    expect(http.attentionCalls, baseline + 1);
+    await tester.pump(const Duration(seconds: 10));
+    expect(http.attentionCalls, baseline + 2);
+
+    // 停在待处理面板：页面自身 VisibilityPoller 每 10s 回写（含首拉），
+    // 30s 内恰好 +3——壳层轮询必须暂停，否则会是 +6。
+    await _gotoPanelViaDrawer(tester, 'attention');
+    final onAttention = http.attentionCalls;
+    await tester.pump(const Duration(seconds: 10));
+    await tester.pump(const Duration(seconds: 10));
+    await tester.pump(const Duration(seconds: 10));
+    expect(http.attentionCalls, onAttention + 3, reason: '只有页面轮询在工作，壳层应已暂停');
+
+    // 退后台：壳层与页面轮询全部停表。
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    final pausedBase = http.attentionCalls;
+    await tester.pump(const Duration(seconds: 30));
+    expect(http.attentionCalls, pausedBase);
+
+    // 回前台：页面 runNow 立即补拉一次（壳层周期 Timer 10s 后才首次触发）。
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(http.attentionCalls, pausedBase + 1);
   });
 }

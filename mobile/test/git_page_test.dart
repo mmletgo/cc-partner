@@ -513,4 +513,130 @@ void main() {
     expect(find.text('Git hook 失败'), findsNothing);
     await flushSnackbars(tester);
   });
+
+  testWidgets('hook 失败卡解析 stdout/stderr 并可展开/收起，不再打印原始 JSON', (tester) async {
+    final git = seed();
+    git.mutationScript = (kind) {
+      git.mutationCalls.add(kind);
+      return {
+        'kind': 'failedHook',
+        'clientOperationId': 'op-hook',
+        'hookFailure': {
+          'stage': 'preCommit',
+          'stdout': 'lint failed',
+          'stderr': 'exit 1',
+          'exitCode': 1,
+        },
+      };
+    };
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('git-action-commit')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '提交').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Git hook 失败'), findsOneWidget);
+    expect(find.textContaining('hookFailure'), findsNothing);
+    expect(find.textContaining('lint failed'), findsNothing);
+    // 默认收起；展开后 stdout/stderr 换行拼接展示。
+    await tester.tap(find.text('展开钩子输出'));
+    await tester.pumpAndSettle();
+    expect(find.text('lint failed\nexit 1'), findsOneWidget);
+    // 收起后输出隐藏。
+    await tester.tap(find.text('收起钩子输出'));
+    await tester.pumpAndSettle();
+    expect(find.text('lint failed\nexit 1'), findsNothing);
+    // 修复按钮仍在。
+    expect(find.text('hook-repair'), findsOneWidget);
+  });
+
+  testWidgets('hook 失败卡空输出给占位文案', (tester) async {
+    final git = seed();
+    git.mutationScript = (kind) {
+      git.mutationCalls.add(kind);
+      return {
+        'kind': 'failedHook',
+        'clientOperationId': 'op-hook',
+        'hookFailure': <String, dynamic>{},
+      };
+    };
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('git-action-push')));
+    await tester.pumpAndSettle();
+    expect(find.text('Git hook 失败'), findsOneWidget);
+
+    await tester.tap(find.text('展开钩子输出'));
+    await tester.pumpAndSettle();
+    expect(find.text('（未捕获到输出）'), findsOneWidget);
+  });
+
+  testWidgets('同步 push unknown：锁定并保持未知横幅，重新对账确认成功后解锁', (tester) async {
+    final git = seed()
+      ..allProjects = [
+        {'id': 'p1', 'deviceId': 'dev-a', 'gitRemoteFingerprint': 'fp-1'},
+        {'id': 'p2', 'deviceId': 'dev-b', 'deviceName': '书房', 'gitRemoteFingerprint': 'fp-1'},
+      ];
+    git.mutationScript = (kind) {
+      git.mutationCalls.add(kind);
+      return {'kind': 'unknown', 'clientOperationId': 'server-sync-op'};
+    };
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('git-action-sync')));
+    await tester.pumpAndSettle();
+
+    // 自动对账（ledger 缺失）仍 unknown：横幅出现、动作锁定、不继续兄弟 pull、不重放 push。
+    expect(find.byKey(const Key('git-unknown-banner')), findsOneWidget);
+    expect(git.mutationCalls, ['push']);
+    expect(
+      tester.widget<FilledButton>(find.byKey(const Key('git-action-commit'))).onPressed,
+      isNull,
+    );
+    expect(
+      tester.widget<OutlinedButton>(find.byKey(const Key('git-action-sync'))).onPressed,
+      isNull,
+    );
+
+    // ledger 落终态 succeeded → 「重新对账」确认成功解锁；对账不重放 mutation。
+    git.ledgerScript = (_) => {'state': 'succeeded', 'intent': {'kind': 'push'}};
+    await tester.tap(find.byKey(const Key('git-retry-reconcile')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('git-unknown-banner')), findsNothing);
+    expect(git.mutationCalls, ['push']);
+    expect(
+      tester.widget<FilledButton>(find.byKey(const Key('git-action-commit'))).onPressed,
+      isNotNull,
+    );
+    expect(
+      tester.widget<OutlinedButton>(find.byKey(const Key('git-action-sync'))).onPressed,
+      isNotNull,
+    );
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('同步 push 传输异常进入 unknown 相位，不当作确定失败', (tester) async {
+    final git = seed()
+      ..allProjects = [
+        {'id': 'p1', 'deviceId': 'dev-a', 'gitRemoteFingerprint': 'fp-1'},
+        {'id': 'p2', 'deviceId': 'dev-b', 'deviceName': '书房', 'gitRemoteFingerprint': 'fp-1'},
+      ];
+    git.mutationScript = (kind) {
+      git.mutationCalls.add(kind);
+      throw const SocketException('network unreachable');
+    };
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('git-action-sync')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('git-unknown-banner')), findsOneWidget);
+    expect(git.mutationCalls, ['push']);
+    expect(find.textContaining('同步主分支失败'), findsNothing);
+  });
 }

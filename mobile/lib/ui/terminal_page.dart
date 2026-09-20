@@ -172,6 +172,10 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   Timer? _inputReconnectTimer;
   bool _inputDown = false;
 
+  // replay 输入门闩：初始进入与每次切换会话后的首次 replay 完成（成功或失败）前保持关闭，
+  // 对齐 web shouldForwardMobileTerminalInput = replayReady && gate（门闩期间输入丢弃不排队）。
+  bool _inputGateOpen = false;
+
   // sticky Ctrl/Alt：3 秒无后续输入自动解除。
   final StickyModifierHold _stickyHold = StickyModifierHold();
   Timer? _stickyTimer;
@@ -226,7 +230,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// 业务逻辑：手机回前台后半开连接无法探测，输入通道必须立即重建、事件流立即重连一次。
   ///
   /// Code Logic：输入直接重连（重连 Timer 若在等待则被取消）；events 若在退避等待中
-  /// 则立即唤醒并重置退避，若仍在连接中则强制断开交给循环走重连分支。
+  /// 则立即唤醒并重置退避，若仍在连接中则强制断开交给循环走重连分支；随后静默刷新
+  /// 一次会话列表（后台期间状态点/pane 数可能已变化，刷新失败静默）。由回前台强制的
+  /// events 重连成功后还会在首帧处再静默刷一次（与退避重连共用该钩子），两次均为幂等读。
   /// xterm 4.0.0 的 RenderTerminal 自带 stick-to-bottom（滚轮位置在底部时写输出自动钉底），
   /// 回前台未在浏览历史时视口天然跟随最新输出，无需额外 pin。
   void _handleResumed() {
@@ -241,9 +247,20 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     } else {
       _eventsClient?.close(force: true);
     }
+    // 回前台后静默刷新会话列表；刷新失败静默（_refreshSessions 自吞异常）。
+    unawaited(_refreshSessions());
   }
 
+  /// 业务逻辑：boot 是页面可重入的初始化入口（initState 首启与错误页「重试」共用）：
+  /// 拉会话列表 → 选/建首选会话 → 激活；任一步失败展示错误页并保留重试入口。
+  ///
+  /// Code Logic：先清掉上一次的 _error（initState 首次调用时为空，跳过 setState），
+  /// 随后按既有顺序 list → pickPreferredSession（缺失则 create）→ _activateSession；
+  /// 异常统一落 _error，由 build 渲染错误页与重试按钮。
   Future<void> _boot() async {
+    if (_error != null && mounted && !_disposed) {
+      setState(() => _error = null);
+    }
     try {
       final sessions = await _sessions.list(widget.project.id);
       if (!mounted || _disposed) {
@@ -294,6 +311,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       _hydratingSession = null;
       _hydrationIntent = 0;
       _fullscreen = false;
+      // 首次 replay 完成前关闭输入门闩，避免输入先于历史快照执行。
+      _inputGateOpen = false;
     });
     if (wasFullscreen) {
       widget.onFullscreenChanged?.call(false);
@@ -309,12 +328,39 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       if (snapshot.isNotEmpty) {
         _terminal.write(snapshot);
       }
+      _openInputGate();
     } catch (_) {
       // 快照拉取失败时仍以实时流继续，gap 帧会触发再次重放。
+      // 失败同样放行输入门闩（对齐 web replay 失败分支也置 replayReady=true）。
+      _openInputGate();
     }
     await _openInput();
     _startEventsLoop();
     await _refreshSessions();
+  }
+
+  /// 业务逻辑：初始进入与切换会话后的首次 replay 完成（成功或失败）后必须放行输入，
+  /// 否则输入行会永远停留在门闩禁用态（对齐 web then/catch 两个分支都置 replayReady=true）。
+  ///
+  /// Code Logic：页面已销毁或门闩已放行时直接返回；否则置 true 并刷新 UI，
+  /// 让输入行/发送按钮/extra keys（经 _send 门控）恢复可用。
+  void _openInputGate() {
+    if (!mounted || _disposed || _inputGateOpen) {
+      return;
+    }
+    setState(() => _inputGateOpen = true);
+  }
+
+  /// 输入行可用性：会话已激活、replay 门闩已放行且输入 WS 处于 ready（open）。
+  ///
+  /// Code Logic：三者缺一即禁用（对齐 web inputEnabled = sessionId && stream ready，
+  /// 加上 replayReady 门闩）；_socket 每次状态翻转处都有 setState，UI 会跟随刷新。
+  bool get _inputRowEnabled {
+    final socket = _socket;
+    return _sessionId != null &&
+        _inputGateOpen &&
+        socket != null &&
+        socket.readyState == WebSocket.open;
   }
 
   /// 刷新会话列表；失败静默（列表刷新失败不影响已完成的切换）。
@@ -781,11 +827,17 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           continue;
         }
         if (firstFrame) {
+          // 同会话内已有过首连（_connectedOnce）说明本轮是断线/回前台后的重连成功：
+          // 静默刷新一次会话列表，更新状态点与 pane 数；初始连接不刷（boot/切会话已刷）。
+          final isReconnect = _connectedOnce;
           firstFrame = false;
           _connectedOnce = true;
           _eventsDown = false;
           _eventsBackoffAttempt = 0;
           _refreshStatus();
+          if (isReconnect) {
+            unawaited(_refreshSessions());
+          }
         }
         final type = frame['type'] as String? ?? '';
         final frameOwner = frame['ownerInstanceId'] as String?;
@@ -973,7 +1025,15 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     _send(data);
   }
 
+  /// 统一发送出口：xterm onOutput、输入行、extra keys、SGR wheel 都经此进入输入 WS。
+  ///
+  /// Code Logic：空帧直接丢弃；replay 门闩未放行（初始进入/切会话后首次 replay 未完成）
+  /// 丢弃不排队（对齐 web shouldForwardMobileTerminalInput = replayReady && gate）；
+  /// 无会话或输入 WS 非 open 时静默丢弃；gap 待重放期间沿用 controller 策略丢弃。
   void _send(String data) {
+    if (data.isEmpty || !_inputGateOpen) {
+      return;
+    }
     final sessionId = _sessionId;
     final socket = _socket;
     if (sessionId == null || socket == null || socket.readyState != WebSocket.open) {
@@ -1815,7 +1875,28 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   @override
   Widget build(BuildContext context) {
     if (_error != null) {
-      return Center(child: Text(_error!));
+      // boot 失败错误页：保留错误文案并给出重试入口（重试复用可重入的 _boot）。
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Text(
+                _error!,
+                textAlign: TextAlign.center,
+              ),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              key: const Key('terminal-boot-retry'),
+              onPressed: () => unawaited(_boot()),
+              icon: const Icon(Icons.refresh),
+              label: const Text('重试'),
+            ),
+          ],
+        ),
+      );
     }
     final theme = Theme.of(context);
     final fullscreen = _fullscreen && _sessionId != null;
@@ -1915,19 +1996,35 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
             children: [
               Expanded(
                 child: TextField(
+                  key: const Key('terminal-input-field'),
                   controller: _input,
+                  // replay 门闩未放行或输入 WS 非 ready（connecting/blocked/closed）时禁用；
+                  // ready 恢复后经既有 setState 路径自动恢复可用。
+                  enabled: _inputRowEnabled,
                   decoration: const InputDecoration(hintText: '输入后回车发送'),
                   onSubmitted: (value) {
+                    if (value.isEmpty) {
+                      // 空输入不发送（不向 PTY 发裸回车）。
+                      return;
+                    }
                     _send('$value\r');
                     _input.clear();
                   },
                 ),
               ),
               IconButton(
-                onPressed: () {
-                  _send('${_input.text}\r');
-                  _input.clear();
-                },
+                key: const Key('terminal-input-send'),
+                onPressed: _inputRowEnabled
+                    ? () {
+                        final text = _input.text;
+                        if (text.isEmpty) {
+                          // 空输入不发送。
+                          return;
+                        }
+                        _send('$text\r');
+                        _input.clear();
+                      }
+                    : null,
                 icon: const Icon(Icons.send),
               ),
             ],

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cc_partner_mobile/address_book/book.dart';
 import 'package:cc_partner_mobile/attention/client.dart';
 import 'package:cc_partner_mobile/attention/filter.dart';
@@ -25,14 +27,24 @@ class _FakeAttentionClient extends AttentionClient {
   final List<List<String>> unreadCalls = [];
   int allReadCalls = 0;
 
+  /// listVisible 调用次数：断言下拉/头部按钮/轮询各自触发了刷新。
+  int listCalls = 0;
+
   /// 置为 true 后下一次 listVisible 抛错（模拟刷新失败 → stale）。
   bool failNextList = false;
 
+  /// 非空时 listVisible 挂起直到 complete，用于捕获「刷新进行中」的中间态。
+  Completer<List<AttentionItem>>? holdList;
+
   @override
   Future<List<AttentionItem>> listVisible() async {
+    listCalls++;
     if (failNextList) {
       failNextList = false;
-      throw Exception('snapshot 拉取失败');
+      throw Exception('快照拉取失败');
+    }
+    if (holdList != null) {
+      await holdList!.future;
     }
     return List.of(_items);
   }
@@ -297,6 +309,83 @@ void main() {
     expect(find.textContaining('状态可能已过期'), findsOneWidget);
     // 旧条目保留，没有被错误屏覆盖。
     expect(find.text('标题 unread-1'), findsOneWidget);
+  });
+
+  testWidgets('header refresh button reloads via the same refresh path and disables while busy',
+      (tester) async {
+    final client = _FakeAttentionClient([
+      _item('unread-1'),
+    ]);
+    await pumpPage(tester, client: client);
+    expect(client.listCalls, 1);
+    final refreshButton = find.byKey(const Key('attention-refresh'));
+    expect(tester.widget<TextButton>(refreshButton).onPressed, isNotNull);
+
+    // 挂起刷新，捕获「刷新中」中间态：按钮禁用。
+    client.holdList = Completer<List<AttentionItem>>();
+    await tester.tap(refreshButton);
+    await tester.pump();
+    expect(client.listCalls, 2);
+    expect(tester.widget<TextButton>(refreshButton).onPressed, isNull);
+    expect(find.text('刷新中…'), findsOneWidget);
+
+    // 放行后恢复可用，文案还原（complete 的值不被使用，listVisible 会返回当前条目）。
+    client.holdList!.complete(const <AttentionItem>[]);
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextButton>(refreshButton).onPressed, isNotNull);
+    expect(find.text('刷新'), findsOneWidget);
+  });
+
+  testWidgets('initial load failure shows error with retry that reloads successfully',
+      (tester) async {
+    final client = _FakeAttentionClient([
+      _item('unread-1'),
+    ]);
+    client.failNextList = true;
+    await pumpPage(tester, client: client);
+    // 错误屏保持既有文案，并给出重试按钮。
+    expect(find.textContaining('快照拉取失败'), findsOneWidget);
+    expect(find.byKey(const Key('attention-retry')), findsOneWidget);
+    expect(find.byKey(const Key('attention-stale-banner')), findsNothing);
+
+    // 重试成功 → 恢复列表，错误态消失。
+    await tester.tap(find.byKey(const Key('attention-retry')));
+    await tester.pumpAndSettle();
+    expect(find.text('标题 unread-1'), findsOneWidget);
+    expect(find.textContaining('快照拉取失败'), findsNothing);
+    expect(client.listCalls, 2);
+  });
+
+  testWidgets('polls every 10s while resumed, pauses when hidden, refreshes on resume edge',
+      (tester) async {
+    final client = _FakeAttentionClient([
+      _item('unread-1'),
+    ]);
+    await pumpPage(tester, client: client);
+    expect(client.listCalls, 1);
+
+    // resumed：满 10s 触发一次静默轮询，未满周期不触发。
+    await tester.pump(const Duration(seconds: 10));
+    expect(client.listCalls, 2);
+    await tester.pump(const Duration(seconds: 5));
+    expect(client.listCalls, 2);
+    await tester.pump(const Duration(seconds: 5));
+    expect(client.listCalls, 3);
+
+    // hidden：暂停轮询。
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    await tester.pump(const Duration(seconds: 10));
+    expect(client.listCalls, 3);
+
+    // resumed 边沿：立即补拉一次并重启周期表。
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(client.listCalls, 4);
+    await tester.pump(const Duration(seconds: 10));
+    expect(client.listCalls, 5);
+
+    // 还原生命周期，避免影响同文件后续用例。
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   });
 
   testWidgets('toggle button marks read locally without full reload', (tester) async {

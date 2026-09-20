@@ -118,15 +118,19 @@ class _FakeTransferApi extends TransferApi {
       ];
 }
 
-/// listRecent 可控失败的假客户端：错误态/重试/空态用。
+/// listRecent 可控失败的假客户端：错误态/重试/空态/自定义行用。
 class _FlakyListProjectsClient extends ProjectsClient {
-  _FlakyListProjectsClient({this.empty = false}) : super(LanHttpClient(), 'http://127.0.0.1:1');
+  _FlakyListProjectsClient({this.empty = false, this.items})
+      : super(LanHttpClient(), 'http://127.0.0.1:1');
 
   /// 非 null 时 listRecent 抛错；置回 null 后返回项目列表。
   Object? listError;
 
   /// 置为 true 时返回空列表（空态用）。
   final bool empty;
+
+  /// 非 null 时优先返回该列表（kind 徽章/设备名用）。
+  final List<ProjectSummary>? items;
   int listCalls = 0;
 
   @override
@@ -138,6 +142,10 @@ class _FlakyListProjectsClient extends ProjectsClient {
     }
     if (empty) {
       return const [];
+    }
+    final custom = items;
+    if (custom != null) {
+      return custom;
     }
     return [
       const ProjectSummary(id: 'p1', name: 'demo', kind: 'local', path: '/Users/demo'),
@@ -155,6 +163,7 @@ Future<void> _pumpPage(
   required _FakeProjectsClient client,
   ValueChanged<ProjectSummary>? onOpen,
   void Function(String projectId)? onProjectRemoved,
+  Future<bool> Function(ProjectSummary project)? confirmRemove,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -164,6 +173,7 @@ Future<void> _pumpPage(
           http: LanHttpClient(),
           onOpen: onOpen ?? (_) {},
           onProjectRemoved: onProjectRemoved,
+          confirmRemove: confirmRemove,
           client: client,
           transferApi: _FakeTransferApi(),
         ),
@@ -456,5 +466,114 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('还没有项目文件夹'), findsOneWidget);
+  });
+
+  testWidgets('confirmRemove 返回 false：静默中止，不弹确认框也不调用 remove',
+      (tester) async {
+    final client = _FakeProjectsClient();
+    final hooked = <ProjectSummary>[];
+    await _pumpPage(
+      tester,
+      client: client,
+      confirmRemove: (project) async {
+        hooked.add(project);
+        return false;
+      },
+    );
+
+    await tester.tap(find.byKey(const Key('project-remove-p1')));
+    await tester.pumpAndSettle();
+
+    // 钩子以完整项目为参被调用；返回 false 后不弹确认框、不删除。
+    expect(hooked.single.id, 'p1');
+    expect(find.byKey(const Key('remove-confirm')), findsNothing);
+    expect(client.removedIds, isEmpty);
+  });
+
+  testWidgets('confirmRemove 返回 true：继续弹确认框，确认后删除', (tester) async {
+    final client = _FakeProjectsClient();
+    final removed = <String>[];
+    await _pumpPage(
+      tester,
+      client: client,
+      onProjectRemoved: removed.add,
+      confirmRemove: (project) async => true,
+    );
+
+    await tester.tap(find.byKey(const Key('project-remove-p1')));
+    await tester.pumpAndSettle();
+    // 钩子放行后照常弹确认框。
+    expect(find.byKey(const Key('remove-confirm')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('remove-confirm-accept')));
+    await tester.pumpAndSettle();
+
+    expect(client.removedIds, ['p1']);
+    expect(removed, ['p1']);
+  });
+
+  testWidgets('项目行显示 kind 徽章与 remote 设备名', (tester) async {
+    final client = _FlakyListProjectsClient(items: [
+      const ProjectSummary(
+        id: 'p-remote',
+        name: 'lan-proj',
+        kind: 'remote',
+        path: '/srv/lan',
+        deviceName: 'Laptop',
+      ),
+      const ProjectSummary(
+        id: 'p-local',
+        name: 'local-proj',
+        kind: 'local',
+        path: '/Users/demo',
+      ),
+      // 有 path：副标题显示 path，避免与 kind 徽章文本重复。
+      const ProjectSummary(
+          id: 'p-other', name: 'other-proj', kind: 'bridge', path: '/mnt/bridge'),
+      const ProjectSummary(
+        id: 'p-remote-nd',
+        name: 'lan-nd',
+        kind: 'remote',
+        path: '/srv/nd',
+      ),
+    ]);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ProjectsPage(
+            book: _book(),
+            http: LanHttpClient(),
+            onOpen: (_) {},
+            client: client,
+            transferApi: _FakeTransferApi(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // remote 行：徽章「远端」+ 设备名（p-remote 与 p-remote-nd 两行均为 remote）。
+    expect(find.byKey(const Key('project-kind-badge-p-remote')), findsOneWidget);
+    expect(find.text('远端'), findsNWidgets(2));
+    expect(
+      find.byKey(const Key('project-device-name-p-remote')),
+      findsOneWidget,
+    );
+    expect(find.text('Laptop'), findsOneWidget);
+
+    // local 行：徽章「本机项目」，无设备名。
+    expect(find.byKey(const Key('project-kind-badge-p-local')), findsOneWidget);
+    expect(find.text('本机项目'), findsOneWidget);
+    expect(
+      find.byKey(const Key('project-device-name-p-local')),
+      findsNothing,
+    );
+
+    // 其它 kind 原样文本；remote 缺 deviceName 时不显示设备名。
+    expect(find.byKey(const Key('project-kind-badge-p-other')), findsOneWidget);
+    expect(find.text('bridge'), findsOneWidget);
+    expect(
+      find.byKey(const Key('project-device-name-p-remote-nd')),
+      findsNothing,
+    );
   });
 }
