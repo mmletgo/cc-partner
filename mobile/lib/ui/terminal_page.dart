@@ -656,13 +656,19 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   }
 
   /// 输入链路状态变化：刷新状态行/输入禁用态；封锁原因上屏错误条
-  /// （对齐 web input stream error → setPanelError）。
+  /// （对齐 web input stream error → setPanelError）；链路回到 ready 时清除
+  /// 历史 blocked 错误条，避免恢复后仍显示「终端输入连接失败」（对齐 web
+  /// ready → setPanelError(null)）。
   void _onInputLinkChanged(TerminalInputLinkStatus status) {
     if (!mounted || _disposed) {
       return;
     }
     if (status.state == TerminalInputLinkState.blocked && status.message != null) {
       _setPanelError(status.message!);
+      return;
+    }
+    if (status.state == TerminalInputLinkState.ready) {
+      _setPanelError(null);
       return;
     }
     _refreshStatus();

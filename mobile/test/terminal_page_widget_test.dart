@@ -592,6 +592,7 @@ Future<void> _pump(
   Future<bool> Function(String worktreeId)? confirmLeaveDirty,
   ValueChanged<SessionSummary?>? onActiveSessionChanged,
   LanHttpClient Function()? eventsHttpClientFactory,
+  bool backgroundTimersDisabled = true,
 }) async {
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
@@ -614,7 +615,7 @@ Future<void> _pump(
         promptsClient: prompts,
         gitClient: git,
         eventsHttpClientFactory: eventsHttpClientFactory,
-        backgroundTimersDisabled: true,
+        backgroundTimersDisabled: backgroundTimersDisabled,
       ),
     ),
   ));
@@ -1222,6 +1223,43 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pump();
     expect(socket.writeCount, writesAfterInput);
+  });
+
+  testWidgets('输入链路恢复 ready 后清除历史 blocked 错误条', (tester) async {
+    final socket1 = _FakeSocket();
+    final socket2 = _FakeSocket();
+    final sockets = [socket1, socket2];
+    final http = _StubWebSocketHttp(
+      () => sockets.isNotEmpty ? sockets.removeAt(0) : socket2,
+    );
+    final sessions = _FakeSessions([_s('s0')]);
+    await _pump(
+      tester,
+      sessions: sessions,
+      http: http,
+      // 输入 WS 断线自动重连依赖退避 Timer，本用例需开启真实后台定时器；
+      // events 流注入独立失败通道避免抢占输入 socket 队列（重连等待 Timer
+      // 由页面 dispose 取消，不会残留）。
+      eventsHttpClientFactory: () => _StubWebSocketHttp(() => null),
+      backgroundTimersDisabled: false,
+    );
+    socket1.emitReady();
+    await tester.pump();
+    await tester.pump();
+
+    // 服务端 error 帧 → 封锁通道并把原因上屏错误条。
+    socket1.emitServerText('{"type":"error","message":"后端拒绝输入"}');
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('后端拒绝输入'), findsOneWidget);
+
+    // 服务端断开 → 1s 退避重建 → 新链路 ready 握手 → 错误条随恢复清除
+    // （对齐 web ready → setPanelError(null)）。
+    socket1.closePeer();
+    await tester.pump(const Duration(milliseconds: 1100));
+    socket2.emitReady();
+    await tester.pumpAndSettle();
+    expect(find.text('后端拒绝输入'), findsNothing);
   });
 
   testWidgets('replay 失败：门闩同样放行，ready 握手后输入可用', (tester) async {
