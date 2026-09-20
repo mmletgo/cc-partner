@@ -42,6 +42,8 @@ class _RecordingFilesClient extends FilesClient {
       {
         'metadata': {'name': 'README.md', 'path': path},
         'text': {'content': 'hello', 'hash': 'h1'},
+        // 建模真实后端：files/open 恒返回 capabilities.canEdit。
+        'capabilities': {'canEdit': true},
       };
 
   @override
@@ -254,5 +256,29 @@ void main() {
     expect(find.text('该文件不支持在手机上编辑，仅可查看。'), findsOneWidget);
     expect(find.byKey(const Key('files-save')), findsNothing);
     expect(find.byType(SegmentedButton<String>), findsNothing);
+  });
+
+  testWidgets('canEdit 缺字段按 web falsy 语义只读（fail-closed）', (tester) async {
+    final book = AddressBook(store: MemoryAddressBookStore());
+    await book.addFromInput(
+      '127.0.0.1:62116',
+      probe: (_) async => throw Exception('skip'),
+      forceIfUnreachable: true,
+    );
+    final client = _RecordingFilesClient(
+      // 不带 capabilities：对齐 web canEditOpenedFile = text && capabilities.canEdit。
+      openedPayload: {
+        'metadata': {'name': 'README.md', 'path': 'README.md'},
+        'text': {'content': 'hello', 'hash': 'h1'},
+      },
+    );
+    await tester.pumpWidget(_FilesHarness(book: book, client: client));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('README.md'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('files-readonly-note')), findsOneWidget);
+    expect(find.byKey(const Key('files-save')), findsNothing);
   });
 }

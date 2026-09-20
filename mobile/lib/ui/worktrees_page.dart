@@ -46,6 +46,7 @@ class WorktreesPage extends StatefulWidget {
     required this.onSelect,
     this.gitClient,
     this.onCreateSession,
+    this.confirmLeaveDirty,
   });
 
   final AddressBook book;
@@ -59,6 +60,10 @@ class WorktreesPage extends StatefulWidget {
 
   /// 测试可注入的终端窗口创建器；缺省用 SessionsClient.create（自动开绑定窗口）。
   final Future<SessionSummary> Function(String projectId, String worktreeId)? onCreateSession;
+
+  /// 删除激活 worktree 前的脏文件预检（由壳层注入 _confirmLeaveDirty，与 GitPage
+  /// 同款固定接缝契约——页面拿不到 FileWorkspaceController）；取消时终止删除。
+  final Future<bool> Function(String worktreeId)? confirmLeaveDirty;
 
   @override
   State<WorktreesPage> createState() => _WorktreesPageState();
@@ -253,6 +258,16 @@ class _WorktreesPageState extends State<WorktreesPage> {
       return;
     }
     final name = worktreeDisplayName(tree);
+    // 对齐 web runMobileWorktreeRemovalFlow：删除激活 worktree 前先做只读脏文件预检，
+    // 取消则不调后端；选择丢弃会由壳层清 dirty 快照，未保存草稿不再随删除静默丢失。
+    if (id == widget.activeId &&
+        widget.confirmLeaveDirty != null &&
+        !await widget.confirmLeaveDirty!(id)) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(

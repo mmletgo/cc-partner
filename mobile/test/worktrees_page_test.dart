@@ -142,6 +142,7 @@ void main() {
     ValueChanged<Map<String, dynamic>>? onSelect,
     Future<SessionSummary> Function(String projectId, String worktreeId)? onCreateSession,
     String? activeId = 'wt-main',
+    Future<bool> Function(String worktreeId)? confirmLeaveDirty,
   }) {
     return MaterialApp(
       home: Scaffold(
@@ -153,6 +154,7 @@ void main() {
           onSelect: onSelect ?? (_) {},
           gitClient: git,
           onCreateSession: onCreateSession,
+          confirmLeaveDirty: confirmLeaveDirty,
         ),
       ),
     );
@@ -256,6 +258,76 @@ void main() {
     expect(git.removedIds, ['wt-1']);
     expect(find.byKey(const Key('worktree-item-wt-1')), findsNothing);
     expect(find.textContaining('已移除 worktree「feat」'), findsOneWidget);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('删除激活 worktree 前脏文件预检：取消则不弹删除确认也不调后端', (tester) async {
+    final git = seed();
+    final preflightIds = <String>[];
+    await tester.pumpWidget(wrap(
+      await book(),
+      git,
+      activeId: 'wt-1',
+      confirmLeaveDirty: (worktreeId) async {
+        preflightIds.add(worktreeId);
+        return false;
+      },
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
+    await tester.pumpAndSettle();
+
+    // 只读预检先行且取消：删除确认不出现、后端未收到请求。
+    expect(preflightIds, ['wt-1']);
+    expect(git.removeCount, 0);
+    expect(find.widgetWithText(FilledButton, '移除'), findsNothing);
+    expect(find.byKey(const Key('worktree-item-wt-1')), findsOneWidget);
+  });
+
+  testWidgets('删除激活 worktree 前脏文件预检：丢弃后进入删除确认并成功移除', (tester) async {
+    final git = seed();
+    await tester.pumpWidget(wrap(
+      await book(),
+      git,
+      activeId: 'wt-1',
+      confirmLeaveDirty: (_) async => true,
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '移除'));
+    await tester.pumpAndSettle();
+
+    expect(git.removeCount, 1);
+    expect(git.removedIds, ['wt-1']);
+    expect(find.byKey(const Key('worktree-item-wt-1')), findsNothing);
+    expect(find.textContaining('已移除 worktree「feat」'), findsOneWidget);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('删除非激活 worktree 不触发脏文件预检', (tester) async {
+    final git = seed();
+    var preflightCalls = 0;
+    await tester.pumpWidget(wrap(
+      await book(),
+      git,
+      confirmLeaveDirty: (_) async {
+        preflightCalls += 1;
+        return true;
+      },
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '移除'));
+    await tester.pumpAndSettle();
+
+    // 预检只针对激活 worktree（对齐 web requiresActivePreflight）。
+    expect(preflightCalls, 0);
+    expect(git.removeCount, 1);
     await flushSnackbars(tester);
   });
 

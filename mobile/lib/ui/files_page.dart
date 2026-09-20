@@ -186,8 +186,9 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
   late String _text;
   late String _hash;
 
-  /// open 响应的 canEdit 门控：文本文件且后端允许编辑才能改；
-  /// 缺 capabilities 字段按旧后端宽容处理为可编辑。
+  /// open 响应的 canEdit 门控：文本文件且后端明确允许编辑才能改；
+  /// 缺 capabilities/canEdit 字段按 web falsy 语义处理为只读（fail-closed，
+  /// 对齐 web canEditOpenedFile = text && capabilities.canEdit）。
   late final bool _canEdit;
   String _markdownMode = 'render';
   late SqlitePreviewState _sqlite;
@@ -209,7 +210,7 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
     }
     final capabilities = widget.opened['capabilities'];
     final backendCanEdit =
-        capabilities is! Map || capabilities['canEdit'] != false;
+        capabilities is Map && capabilities['canEdit'] == true;
     _canEdit = text is Map && backendCanEdit;
     _editor = TextEditingController(text: _text);
     final sqlite = widget.opened['sqlite'];

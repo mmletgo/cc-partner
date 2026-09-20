@@ -293,6 +293,14 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     if (project == null) {
       return;
     }
+    // 对齐 web runMobileWorktreeRemovalFlow：删除激活 worktree 前先做只读脏文件预检，
+    // 取消则不调后端；选择丢弃会清 dirty 快照，未保存草稿不再随删除静默丢失。
+    if (id == _worktreeId && !await _confirmLeaveDirty(id)) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -621,6 +629,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           onSelect: (tree) {
             unawaited(_selectWorktree(tree, goTerminal: true));
           },
+          confirmLeaveDirty: (worktreeId) => _confirmLeaveDirty(worktreeId),
         );
       case WorkbenchPanel.automation:
         return AutomationPage(
