@@ -325,18 +325,24 @@ class _FilePreviewPageState extends State<FilePreviewPage> {
 
   /// Business Logic: 保存失败（含 baseHash 乐观锁冲突）必须 inline 上屏且文件保持
   /// dirty，否则用户以为已保存而丢失改动；成功才清 dirty 并提示。
-  /// Code Logic: 调 client.saveText；成功 markClean + SnackBar + 返回 true；
-  /// 失败按 409 冲突给「文件已在磁盘上变化」语义文案，其余展示原始错误，返回 false。
+  /// Code Logic: 调 client.saveText；成功用返回的新 baseHash 回写乐观锁基线
+  /// （对齐 web：同一次预览会话内「编辑→保存→再编辑→再保存」不因旧基线误报 409），
+  /// 然后 markClean + SnackBar + 返回 true；失败按 409 冲突给「文件已在磁盘上变化」
+  /// 语义文案，其余展示原始错误，返回 false。
   Future<bool> _save() async {
     setState(() => _saveError = null);
     try {
-      await widget.client.saveText(
+      final result = await widget.client.saveText(
         projectId: widget.projectId,
         path: widget.path,
         content: _text,
         baseHash: _hash,
         worktreeId: widget.worktreeId,
       );
+      final nextHash = result['baseHash'];
+      if (nextHash is String && nextHash.isNotEmpty) {
+        setState(() => _hash = nextHash);
+      }
       widget.workspace.markClean();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已保存')));

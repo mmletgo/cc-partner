@@ -45,9 +45,17 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     with WidgetsBindingObserver {
   WorkbenchPanel _panel = WorkbenchPanel.projects;
 
-  /// 首次激活后常驻挂载的面板集合（对齐 web /mobile：files/transfer/terminal 等
-  /// 首次激活后 hidden 常驻，保 Files 草稿快照、终端 xterm 实例与输入流、传输进度
-  /// 不因切面板销毁重建）。LinkedHashSet 保持插入序，渲染时按序输出 Offstage 列表。
+  /// 首次激活后常驻挂载的面板集合（对齐 web /mobile：仅 files/transfer/terminal
+  /// 首次激活后 hidden 常驻，保 Files 草稿上下文、终端 xterm 实例与输入流、传输进度
+  /// 不因切面板销毁重建；其余面板对齐 web「切走即卸载、进入即重挂重拉」语义）。
+  static const Set<WorkbenchPanel> _persistedPanels = {
+    WorkbenchPanel.files,
+    WorkbenchPanel.transfer,
+    WorkbenchPanel.terminal,
+  };
+
+  /// 面板首访集合：常驻面板据此保持 Offstage 挂载；非常驻面板仅作导航记录，
+  /// 由门控关闭/项目切换时统一清理。LinkedHashSet 保持插入序。
   final Set<WorkbenchPanel> _visitedPanels = {WorkbenchPanel.projects};
 
   /// 离开终端面板时是否正处于全屏（回到终端时恢复，避免 strip 在其它面板被误隐藏）。
@@ -356,14 +364,25 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
 
   /// Business Logic: worktrees 页/切换条选中新 worktree 后的统一入口：
   /// dirty 确认 → 写入 worktreeId；goTerminal 决定是否自动进入终端面板
-  /// （对齐 web：点击 worktree 卡片切换后自动进入终端）。
-  /// Code Logic: dirty guard 不过则放弃；同树只更新选中，跨树刷新列表并回落 active。
+  /// （对齐 web：点击 worktree 卡片切换后自动进入终端）。strip 删除/创建等
+  /// worktree 操作在途时拒绝切换（对齐 web worktreeOperationBusy 互斥），
+  /// 避免与在途刷新/删除竞态。
+  /// Code Logic: strip mutation 非 idle 或删除在途则提示并放弃；dirty guard
+  /// 不过则放弃；同树只更新选中，跨树刷新列表并回落 active。
   Future<void> _selectWorktree(
     Map<String, dynamic> tree, {
     bool goTerminal = false,
   }) async {
     final id = tree['id'] as String? ?? '';
     if (id.isEmpty) {
+      return;
+    }
+    if (_removingTree || _stripMutation.actionLocked) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('正在处理 worktree 操作，请稍候')),
+        );
+      }
       return;
     }
     if (!await _confirmLeaveDirty(id)) {
@@ -642,25 +661,30 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     setState(() => _gotoPanel(gated));
   }
 
-  /// Business Logic: 切面板不应销毁重建页面 State——Files 未保存草稿、终端 xterm
-  /// 实例与输入流、传输进度 UI 都要求首次激活后常驻挂载（对齐 web /mobile 的
-  /// hidden 常驻策略）。
-  /// Code Logic: 对每个 visited 面板渲染 Offstage(offstage: panel != _panel)，
-  /// Stack fit: expand 保证可见面板占满剩余空间、布局与原单面板一致；Offstage 子树
-  /// 参与 layout 但不绘制、不命中。每个 Offstage 带 ValueKey，保证 visited 集合
-  /// 中间元素被移除后其余面板的 State 仍按 key 配对复用。项目绑定面板在无项目
-  /// 上下文时跳过渲染（防 _project! 解引用崩溃）。
+  /// Business Logic: 切面板不应销毁常驻面板的 State——Files 草稿上下文、终端 xterm
+  /// 实例与输入流、传输进度 UI 要求首次激活后 hidden 常驻（对齐 web /mobile 仅
+  /// files/transfer/terminal 常驻的策略）；其余面板切走即卸载、进入即重挂重拉，
+  /// 保证 Git/worktrees/自动化/浏览器等每次进入都是权威新鲜数据。
+  /// Code Logic: 常驻面板渲染 Offstage(offstage: panel != _panel)，Stack fit: expand
+  /// 保证可见面板占满剩余空间、布局与原单面板一致；Offstage 子树参与 layout 但不
+  /// 绘制、不命中。每个 Offstage 带 ValueKey，保证 visited 集合中间元素被移除后其余
+  /// 面板的 State 仍按 key 配对复用。非常驻面板仅在激活时作为普通子节点渲染（无
+  /// Offstage 包裹，切走即销毁）。项目绑定面板在无项目上下文时跳过渲染（防 _project!
+  /// 解引用崩溃）。
   Widget _panelStack() {
     return Stack(
       fit: StackFit.expand,
       children: [
         for (final panel in _visitedPanels)
           if (!isProjectBoundPanel(panel) || _project != null)
-            Offstage(
-              key: ValueKey(panel),
-              offstage: panel != _panel,
-              child: _buildPanelBody(panel),
-            ),
+            if (_persistedPanels.contains(panel))
+              Offstage(
+                key: ValueKey(panel),
+                offstage: panel != _panel,
+                child: _buildPanelBody(panel),
+              )
+            else if (panel == _panel)
+              _buildPanelBody(panel),
       ],
     );
   }

@@ -20,6 +20,9 @@ class _RecordingFilesClient extends FilesClient {
   Object? saveError;
   int saveCalls = 0;
 
+  /// 每次保存收到的 baseHash（乐观锁基线回写断言用）。
+  final saveBaseHashes = <String>[];
+
   /// 非 null 时 listDir 抛出该错误（错误态/重试用）。
   Object? listError;
 
@@ -79,6 +82,7 @@ class _RecordingFilesClient extends FilesClient {
     String? worktreeId,
   }) async {
     saveCalls += 1;
+    saveBaseHashes.add(baseHash);
     final error = saveError;
     if (error != null) {
       throw error;
@@ -238,6 +242,43 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('files-save-error')), findsNothing);
     expect(find.text('已保存'), findsOneWidget);
+    expect(workspace.snapshot.dirty, isFalse);
+  });
+
+  testWidgets('保存成功回写新 baseHash 基线，同会话再次保存携带新基线不误报 409',
+      (tester) async {
+    final workspace = FileWorkspaceController();
+    final client = _RecordingFilesClient(
+      openedPayload: {
+        'metadata': {'name': 'README.md', 'path': 'README.md'},
+        'text': {'content': 'hello', 'hash': 'h1'},
+        'capabilities': {'canEdit': true},
+      },
+    );
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client, workspace: workspace));
+    await tester.pumpAndSettle();
+
+    // 第一次保存携带打开时的基线 h1，成功后基线回写为返回的 h2。
+    await tester.tap(find.text('README.md'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('源码'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'changed');
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('files-save')));
+    await tester.pumpAndSettle();
+    expect(find.text('已保存'), findsOneWidget);
+    expect(client.saveBaseHashes, ['h1']);
+
+    // 同一预览会话内再编辑再保存：必须携带新基线 h2（对齐 web baseHash 回写），
+    // 不因旧基线触发乐观锁 409。
+    await tester.enterText(find.byType(TextField), 'changed again');
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('files-save')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('files-save-error')), findsNothing);
+    expect(find.text('已保存'), findsWidgets);
+    expect(client.saveBaseHashes, ['h1', 'h2']);
     expect(workspace.snapshot.dirty, isFalse);
   });
 

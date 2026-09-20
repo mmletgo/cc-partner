@@ -100,6 +100,7 @@ class _PanelHttp extends LanHttpClient {
   int sessionsListCalls = 0;
   int replayCalls = 0;
   int listDirCalls = 0;
+  int worktreesListCalls = 0;
 
   /// true 时 /api/orchestrator/config 抛错（experimentalFeatures 拉取失败）。
   bool failConfig = false;
@@ -165,6 +166,7 @@ class _PanelHttp extends LanHttpClient {
     Map<String, dynamic> body,
   ) async {
     if (path == '/api/mobile/workbench/worktrees/list') {
+      worktreesListCalls += 1;
       return {
         'ok': true,
         'worktrees': [
@@ -517,6 +519,27 @@ void main() {
     await _gotoPanelViaDrawer(tester, 'terminal');
     expect(http.sessionsListCalls, 1, reason: '终端面板常驻挂载不应重新 boot');
     expect(http.replayCalls, 1, reason: '终端面板常驻挂载不应重新 replay');
+  });
+
+  testWidgets('非常驻面板：git 切走再切回重新挂载并重新拉取（对齐 web 卸载重挂）', (tester) async {
+    final http = _PanelHttp();
+    await _pumpHome(tester, http);
+    await _openDemoProject(tester);
+    // 打开项目时壳层拉一次 worktrees；进入 Git 页 initState 再拉一次。
+    await _gotoPanelViaDrawer(tester, 'git');
+    await tester.pumpAndSettle();
+    final callsAfterFirstEnter = http.worktreesListCalls;
+    expect(callsAfterFirstEnter, 2, reason: 'Git 页 initState 应重新拉取 worktrees');
+
+    // 切到传输（Git 页卸载）再切回：重新 initState 拉取，保证进入即权威新鲜。
+    await _gotoPanelViaDrawer(tester, 'transfer');
+    await _gotoPanelViaDrawer(tester, 'git');
+    await tester.pumpAndSettle();
+    expect(
+      http.worktreesListCalls,
+      greaterThan(callsAfterFirstEnter),
+      reason: 'git 非常驻面板：切走卸载，切回重新挂载并重拉',
+    );
   });
 
   testWidgets('global Drawer 提供「断开并返回地址簿」，pop 走既有路由回上一页', (tester) async {
