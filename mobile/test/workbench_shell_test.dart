@@ -1,4 +1,5 @@
 import 'package:cc_partner_mobile/address_book/models.dart';
+import 'package:cc_partner_mobile/ui/workbench_shell.dart';
 import 'package:cc_partner_mobile/workbench/shell.dart';
 import 'package:test/test.dart';
 
@@ -46,7 +47,7 @@ void main() {
     ]);
   });
 
-  test('project nav is 终端 / 浏览器 / 文件 / Git / worktrees / 自动化 plus shortcuts', () {
+  test('project nav is 终端 / 预览 / 文件 / Git / Worktrees / 自动化 plus shortcuts', () {
     final groups = getWorkbenchNavGroups(WorkbenchNavMode.project);
     expect(groups.map((g) => g.id).toList(), ['work', 'shortcuts']);
     expect(groups.first.panels, [
@@ -59,10 +60,10 @@ void main() {
     ]);
     expect(groups.first.panels.map(panelLabel).toList(), [
       '终端',
-      '浏览器',
+      '预览',
       '文件',
       'Git',
-      'worktrees',
+      'Worktrees',
       '自动化',
     ]);
     expect(groups.last.panels, [
@@ -100,12 +101,12 @@ void main() {
     expect(shouldShowWorktreeStrip(WorkbenchPanel.attention), isFalse);
   });
 
-  test('nav group ids render Chinese labels', () {
+  test('nav group ids render Chinese labels aligned with web zh navGroups', () {
     expect(workbenchNavGroupLabel('projects'), '项目');
-    expect(workbenchNavGroupLabel('inbox'), '待处理');
+    expect(workbenchNavGroupLabel('inbox'), '收件箱');
     expect(workbenchNavGroupLabel('tools'), '工具');
     expect(workbenchNavGroupLabel('system'), '系统');
-    expect(workbenchNavGroupLabel('work'), '工作');
+    expect(workbenchNavGroupLabel('work'), '工作台');
     expect(workbenchNavGroupLabel('shortcuts'), '快捷');
     expect(workbenchNavGroupLabel('unknown-group'), 'unknown-group');
   });
@@ -250,5 +251,64 @@ void main() {
     expect(restore!.panel, WorkbenchPanel.automation);
     expect(restore.worktreeId, 'wt-1');
     expect(restore.sessionId, 'tmux-1');
+  });
+
+  test('connection: success goes online, failure keeps cachedSince and error', () {
+    final online = WorkbenchConnectionState.online(
+      lastSucceededAt: DateTime(2026, 9, 20, 10, 30),
+    );
+    // 失败：保留上次成功时间做「缓存于」提示，并携带最近错误。
+    final offline = markWorkbenchConnectionFailure('boom', online);
+    expect(offline.kind, WorkbenchConnectionKind.offline);
+    expect(offline.lastError, 'boom');
+    expect(offline.cachedSince, DateTime(2026, 9, 20, 10, 30));
+
+    // 连续失败保留更早的缓存起点；首次失败（prev 为 null）无缓存提示。
+    final again = markWorkbenchConnectionFailure('boom2', offline);
+    expect(again.cachedSince, DateTime(2026, 9, 20, 10, 30));
+    expect(markWorkbenchConnectionFailure('first', null).cachedSince, isNull);
+  });
+
+  test('connection: recovery edge fires only from offline/reconnecting to online', () {
+    final online = WorkbenchConnectionState.online(
+      lastSucceededAt: DateTime(2026, 9, 20, 10, 30),
+    );
+    final offline = markWorkbenchConnectionFailure('boom', online);
+    final recovered = WorkbenchConnectionState.online(
+      lastSucceededAt: DateTime(2026, 9, 20, 11, 0),
+    );
+    expect(shouldRefreshWorkbenchOnReconnect(offline, recovered), isTrue);
+    expect(shouldRefreshWorkbenchOnReconnect(null, recovered), isFalse,
+        reason: '首次成功不是恢复边沿');
+    expect(shouldRefreshWorkbenchOnReconnect(online, recovered), isFalse,
+        reason: '已在线时再次成功不触发刷新');
+    expect(
+      shouldRefreshWorkbenchOnReconnect(
+        online,
+        markWorkbenchConnectionFailure('down', online),
+      ),
+      isFalse,
+    );
+  });
+
+  test('connection: cached time and pill labels match web zh copy', () {
+    final online = WorkbenchConnectionState.online(
+      lastSucceededAt: DateTime(2026, 9, 20, 10, 30),
+    );
+    expect(workbenchConnectionCachedAt(online), isNull,
+        reason: 'online 不显示缓存时间');
+    expect(workbenchConnectionLabel(online), '已连接');
+
+    final offline = markWorkbenchConnectionFailure('boom', online);
+    expect(workbenchConnectionCachedAt(offline), DateTime(2026, 9, 20, 10, 30));
+    expect(workbenchConnectionLabel(offline), '离线');
+    expect(workbenchConnectionLabel(null), isNull);
+    expect(
+      workbenchConnectionLabel(
+        WorkbenchConnectionState.reconnecting(cachedSince: online.lastSucceededAt),
+      ),
+      '重新连接中…',
+    );
+    expect(formatWorkbenchCachedTime(DateTime(2026, 1, 1, 9, 5)), '09:05');
   });
 }

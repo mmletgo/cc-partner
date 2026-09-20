@@ -6,14 +6,19 @@ import '../sessions/client.dart';
 /// worktree 状态三色（对齐 web worktreeStatusTone：neutral/warning/danger）。
 enum WorktreeStripTone { clean, dirty, conflict }
 
-/// Business Logic: 切换条上的圆点要让用户一眼分辨工作区是否干净/有改动/冲突。
-/// Code Logic: conflicts>0 → conflict；非 clean → dirty；否则 clean（与 web 同口径）。
+/// Business Logic: 切换条上的圆点要让用户一眼分辨工作区是否干净/有改动/领先落后/冲突。
+/// Code Logic: conflicts>0 → conflict；!clean 或 changed/ahead/behind>0 → dirty
+/// （对齐 web workbenchWorktrees.worktreeStatusTone 的 warning 判定，补齐 ahead/behind）；
+/// 否则 clean（与 web 同口径）。
 WorktreeStripTone worktreeStripToneOf(Map<String, dynamic> tree) {
   final status = WorktreeGitStatus.of(tree);
   if (status.conflicts > 0) {
     return WorktreeStripTone.conflict;
   }
-  if (!status.clean || status.changed > 0) {
+  if (!status.clean ||
+      status.changed > 0 ||
+      status.ahead > 0 ||
+      status.behind > 0) {
     return WorktreeStripTone.dirty;
   }
   return WorktreeStripTone.clean;
@@ -32,9 +37,20 @@ Color worktreeStripToneColor(ThemeData theme, WorktreeStripTone tone) {
   }
 }
 
+/// Business Logic: 切换条删除确认要与 web MobileWorktreeTabs removeConfirmDialog.body
+/// 同口径：明确告知会同时关闭该 worktree 的终端窗口且不可撤销（与 worktrees 列表卡
+/// 「请先确认不再需要该工作区」的轻口径区分）。
+/// Code Logic: 纯函数拼接确认文案，供壳层确认框与测试共用同一来源。
+String worktreeStripRemoveConfirmText(String name) =>
+    '确定移除 worktree“$name”？该操作会同时关闭其终端窗口，且不可撤销。';
+
 /// worktree 创建流程结果（共享 helper 的返回值）。
 class WorktreeCreationResult {
-  const WorktreeCreationResult({this.created, this.createError, this.sessionError});
+  const WorktreeCreationResult({
+    this.created,
+    this.createError,
+    this.sessionError,
+  });
 
   /// 创建成功的 worktree DTO（envelope value，供 shell 切换 active）。
   final Map<String, dynamic>? created;
@@ -55,7 +71,8 @@ Future<WorktreeCreationResult> createWorktreeWithTerminalSession({
   required SessionsClient sessions,
   required String projectId,
   required String branchName,
-  Future<SessionSummary> Function(String projectId, String worktreeId)? onCreateSession,
+  Future<SessionSummary> Function(String projectId, String worktreeId)?
+  onCreateSession,
 }) async {
   Map<String, dynamic> created;
   try {
@@ -87,6 +104,8 @@ Future<WorktreeCreationResult> createWorktreeWithTerminalSession({
 /// 条上要能直接新建 worktree（prefix/suffix inline 表单），mutation 结果未知时
 /// 条上方出错误条并提供「重新对账」入口。
 /// Code Logic: 纵向 Column = 可选错误条 + 水平 chip 列表（含尾部创建槽）；
+/// chip 列表外包 FocusTraversalGroup（WidgetOrderTraversalPolicy，对齐 web
+/// MobileWorktreeTabs 的 ArrowLeft/Right/Home/End 方向键遍历语义）；
 /// 列表为空时渲染「暂无 worktree」占位（对齐 web worktrees.empty）；
 /// onRemove 非空且非主 chip 时渲染尾部 X；onCreate 非空时渲染「+ 新建」创建槽。
 class WorktreeStrip extends StatelessWidget {
@@ -134,60 +153,80 @@ class WorktreeStrip extends StatelessWidget {
         if (mutationError != null) _errorBanner(theme, mutationError!),
         SizedBox(
           height: 44,
-          child: ListView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            children: [
-              // 空列表占位（对齐 web MobileWorktreeTabs 的 worktrees.empty）：
-              // 只剩创建槽时给出「暂无 worktree」提示，避免条上空白让人以为加载中。
-              if (worktrees.isEmpty)
-                Padding(
-                  key: const Key('worktree-strip-empty'),
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                  child: Text(
-                    '暂无 worktree',
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-                  ),
-                ),
-              for (final tree in worktrees)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      ChoiceChip(
-                        key: Key('worktree-${tree['id']}'),
-                        label: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _dot(theme, tree),
-                            const SizedBox(width: 6),
-                            Text(worktreeDisplayName(tree)),
-                            const SizedBox(width: 4),
-                            Text(
-                              tree['isMain'] == true ? '主' : 'worktree',
-                              style: theme.textTheme.labelSmall
-                                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-                            ),
-                          ],
-                        ),
-                        selected: tree['id'] == activeId,
-                        onSelected: (_) => onSelect(tree),
+          // chips 水平列表独立成遍历组：外接键盘方向键在 chip 间顺序移动，
+          // 不与页面其余焦点混排（对齐 web MobileWorktreeTabs nav 的键盘循环）。
+          child: FocusTraversalGroup(
+            policy: WidgetOrderTraversalPolicy(),
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              children: [
+                // 空列表占位（对齐 web MobileWorktreeTabs 的 worktrees.empty）：
+                // 只剩创建槽时给出「暂无 worktree」提示，避免条上空白让人以为加载中。
+                if (worktrees.isEmpty)
+                  Padding(
+                    key: const Key('worktree-strip-empty'),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 12,
+                    ),
+                    child: Text(
+                      '暂无 worktree',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
                       ),
-                      if (onRemove != null && tree['isMain'] != true) ...[
-                        const SizedBox(width: 2),
-                        _removeButton(context, theme, tree),
-                      ],
-                    ],
+                    ),
                   ),
-                ),
-              if (onCreate != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-                  child: _WorktreeCreateSlot(onCreate: onCreate!, busy: busy || creating),
-                ),
-            ],
+                for (final tree in worktrees)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 6,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ChoiceChip(
+                          key: Key('worktree-${tree['id']}'),
+                          label: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _dot(theme, tree),
+                              const SizedBox(width: 6),
+                              Text(worktreeDisplayName(tree)),
+                              const SizedBox(width: 4),
+                              Text(
+                                // 对齐 web MobileWorktreeTabs chip 元信息：主工作区 / worktree。
+                                tree['isMain'] == true ? '主工作区' : 'worktree',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ],
+                          ),
+                          selected: tree['id'] == activeId,
+                          onSelected: (_) => onSelect(tree),
+                        ),
+                        if (onRemove != null && tree['isMain'] != true) ...[
+                          const SizedBox(width: 2),
+                          _removeButton(context, theme, tree),
+                        ],
+                      ],
+                    ),
+                  ),
+                if (onCreate != null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 6,
+                    ),
+                    child: _WorktreeCreateSlot(
+                      onCreate: onCreate!,
+                      busy: busy || creating,
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ],
@@ -239,7 +278,11 @@ class WorktreeStrip extends StatelessWidget {
 
   /// Business Logic: 非主 worktree 要能就地清理，busy 时禁用防止重复删除。
   /// Code Logic: 24px 紧凑 IconButton，key 带 worktree id 供测试与读屏定位。
-  Widget _removeButton(BuildContext context, ThemeData theme, Map<String, dynamic> tree) {
+  Widget _removeButton(
+    BuildContext context,
+    ThemeData theme,
+    Map<String, dynamic> tree,
+  ) {
     final id = tree['id'] as String? ?? '';
     return SizedBox(
       width: 24,
@@ -355,14 +398,18 @@ class _WorktreeCreateSlotState extends State<_WorktreeCreateSlot> {
               enabled: !widget.busy,
               onChanged: (_) => setState(() {}),
               style: theme.textTheme.bodySmall,
-              decoration: const InputDecoration(hintText: 'my-task', isDense: true),
+              decoration: const InputDecoration(
+                hintText: 'my-task',
+                isDense: true,
+              ),
             ),
           ),
           const SizedBox(width: 4),
           TextButton(
             key: const Key('worktree-create-confirm'),
-            onPressed:
-                widget.busy || _suffix.text.trim().isEmpty ? null : _confirm,
+            onPressed: widget.busy || _suffix.text.trim().isEmpty
+                ? null
+                : _confirm,
             child: Text(widget.busy ? '创建中' : '确认'),
           ),
           TextButton(

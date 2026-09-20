@@ -31,8 +31,9 @@ class _FakeTransferApi extends TransferApi {
   bool failFirstListTasks = false;
   bool failFirstListDevices = false;
 
-  /// 之后所有 listTasks 抛错：验证轮询失败保留旧数据、不上屏重试按钮。
+  /// 之后所有 listTasks/listDevices 抛错：验证刷新失败保留旧数据且错误行上屏。
   bool failAllListTasks = false;
+  bool failAllListDevices = false;
   int listDevicesCalls = 0;
 
   /// 第 N 次 get-operation 起返回 succeeded；调大可模拟一直 pending。
@@ -57,7 +58,7 @@ class _FakeTransferApi extends TransferApi {
   @override
   Future<List<Map<String, dynamic>>> listDevices() async {
     listDevicesCalls += 1;
-    if (failFirstListDevices && listDevicesCalls == 1) {
+    if (failAllListDevices || (failFirstListDevices && listDevicesCalls == 1)) {
       throw LanHttpException(503, 'boom');
     }
     return [
@@ -591,20 +592,194 @@ void main() {
     expect(find.byKey(const Key('transfer-devices-retry')), findsNothing);
   });
 
-  testWidgets('poll failure keeps previous data and hides retry buttons', (tester) async {
+  testWidgets('poll failure keeps previous data and shows error row with retry', (
+    tester,
+  ) async {
     final api = _FakeTransferApi(tasks: [
       TransferTask(id: 't-1', direction: 'Send', status: 'completed', fileName: 'a.txt'),
     ]);
     await _pumpPage(tester, api);
     await tester.pumpAndSettle();
 
-    // 轮询失败路径：保留旧列表，不上屏错误与重试按钮（只有首载失败才出现）。
+    // 轮询失败路径：保留旧列表，同时上屏错误行 + 重试按钮（有数据也上屏，对齐 web）。
     api.failAllListTasks = true;
     await tester.pump(const Duration(seconds: 3));
     await tester.pump();
     expect(find.byKey(const Key('transfer-task-t-1')), findsOneWidget);
+    expect(find.byKey(const Key('transfer-tasks-error')), findsOneWidget);
+    expect(find.byKey(const Key('transfer-tasks-retry')), findsOneWidget);
+
+    // fake 修复后点重试 → 错误行清除，任务列表照常渲染。
+    api.failAllListTasks = false;
+    await tester.tap(find.byKey(const Key('transfer-tasks-retry')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('transfer-task-t-1')), findsOneWidget);
     expect(find.byKey(const Key('transfer-tasks-error')), findsNothing);
     expect(find.byKey(const Key('transfer-tasks-retry')), findsNothing);
+  });
+
+  testWidgets('device poll failure keeps old devices and shows error row with retry', (
+    tester,
+  ) async {
+    final api = _FakeTransferApi();
+    await _pumpPage(tester, api);
+    await tester.pumpAndSettle();
+    expect(find.text('This PC · 主机'), findsOneWidget);
+
+    // 设备轮询失败：旧下拉保留，错误行 + 重试上屏。
+    api.failAllListDevices = true;
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
+    expect(find.text('This PC · 主机'), findsOneWidget);
+    expect(find.byKey(const Key('transfer-devices-error')), findsOneWidget);
+    expect(find.byKey(const Key('transfer-devices-retry')), findsOneWidget);
+
+    // 修复后重试恢复。
+    api.failAllListDevices = false;
+    await tester.tap(find.byKey(const Key('transfer-devices-retry')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('transfer-devices-error')), findsNothing);
+    expect(find.byKey(const Key('transfer-devices-retry')), findsNothing);
+  });
+
+  testWidgets('task rows show peer device name and failed reason', (tester) async {
+    await _pumpPage(
+      tester,
+      _FakeTransferApi(tasks: [
+        TransferTask(
+          id: 't-f1',
+          direction: 'Send',
+          status: 'failed',
+          fileName: 'clip.bin',
+          peer: 'pc-1',
+          peerDeviceName: 'Hans Mac',
+          failureMessage: 'peer went offline',
+        ),
+        TransferTask(
+          id: 't-in',
+          direction: 'Send',
+          status: 'completed',
+          fileName: 'inbox.bin',
+          peer: mobileInboxDeviceId,
+        ),
+      ]),
+    );
+    await tester.pumpAndSettle();
+
+    // 对端设备名行 + 失败原因行（failure.message 优先）。
+    expect(find.byKey(const Key('transfer-peer-t-f1')), findsOneWidget);
+    expect(find.text('Hans Mac'), findsOneWidget);
+    expect(find.byKey(const Key('transfer-failure-t-f1')), findsOneWidget);
+    expect(find.text('peer went offline'), findsOneWidget);
+    // 收件箱方向显示「手机」标签。
+    expect(find.text('手机'), findsOneWidget);
+  });
+
+  testWidgets('reconciling task hides every row action and shows confirming text', (
+    tester,
+  ) async {
+    final api = _FakeRecoveryDevicesApi(
+      tasks: [
+        TransferTask(
+          id: 't-fail',
+          direction: 'Send',
+          status: 'failed',
+          fileName: 'clip.bin',
+          peer: 'peer',
+          transferredBytes: 2048,
+        ),
+      ],
+      peerCapabilities: ['transfer.resume.v1'],
+    );
+    api.failResumeWithNetworkError = true;
+    await _pumpPage(tester, api);
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('继续传输'));
+    await tester.idle();
+    // resume 网络异常 → 进入 get-operation 对账（先 pump 冲刷 setState 帧）。
+    await tester.pump();
+    expect(find.byKey(const Key('transfer-resume-t-fail')), findsNothing);
+    expect(find.byKey(const Key('transfer-retry-t-fail')), findsNothing);
+    expect(find.byTooltip('取消'), findsNothing);
+    expect(find.byTooltip('下载'), findsNothing);
+    expect(find.textContaining('正在确认结果'), findsOneWidget);
+    // 对账中任务归「需注意」分组。
+    expect(find.text('需注意'), findsOneWidget);
+    expect(find.text('进行中'), findsNothing);
+
+    // 1.5s 后第二次 get-operation 返回 succeeded → 对账结束动作恢复。
+    await tester.pump(const Duration(milliseconds: 1600));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('transfer-resume-t-fail')), findsOneWidget);
+    expect(find.textContaining('正在确认结果'), findsNothing);
+  });
+
+  testWidgets('upload card shows file name, target device and chunk hint', (tester) async {
+    FilePicker.platform = _FakeFilePicker();
+    addTearDown(() => FilePicker.platform = _FakeFilePicker());
+    final api = _GatedUploadApi();
+    await _pumpPage(tester, api);
+    await tester.pumpAndSettle();
+
+    // 发送区常驻分块提示文案（对齐 web zh chunkHint 原文）。
+    expect(find.byKey(const Key('transfer-chunk-hint')), findsOneWidget);
+    expect(find.text('支持任意大小 · 自动分块 1MB · 断点可续传 · SHA256 校验'), findsOneWidget);
+
+    await tester.tap(find.text('选择文件并立即发送'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // 本地上传卡：文件名 + 目标设备名（默认主机）。
+    expect(find.text('正在发送「clip.bin」…'), findsOneWidget);
+    final deviceText = tester.widget<Text>(
+      find.byKey(const Key('transfer-upload-device')),
+    );
+    expect(deviceText.data, 'This PC · 主机');
+
+    api.gate.complete();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('transfer-upload-card')), findsNothing);
+  });
+
+  testWidgets('device dropdown shows loading placeholder until devices arrive', (
+    tester,
+  ) async {
+    final api = _GatedDevicesApi();
+    await _pumpPage(tester, api);
+    await tester.pump();
+
+    // 首载中：下拉占位「加载中…」且禁用。
+    expect(find.byKey(const Key('transfer-target')), findsOneWidget);
+    expect(find.text('加载中…'), findsWidgets);
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(
+        find.byKey(const Key('transfer-target')),
+      ).onChanged,
+      isNull,
+    );
+
+    api.gate.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('This PC · 主机'), findsOneWidget);
+    expect(find.text('加载中…'), findsNothing);
+  });
+
+  testWidgets('device dropdown shows a no-device placeholder for an empty list', (
+    tester,
+  ) async {
+    await _pumpPage(tester, _EmptyDevicesApi());
+    await tester.pumpAndSettle();
+
+    // 空设备列表：占位「未发现设备」且禁用（不再隐藏下拉）。
+    expect(find.byKey(const Key('transfer-target')), findsOneWidget);
+    expect(find.text('未发现设备'), findsWidgets);
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(
+        find.byKey(const Key('transfer-target')),
+      ).onChanged,
+      isNull,
+    );
   });
 
   pollerTests();
@@ -628,6 +803,26 @@ class _FakeRecoveryDevicesApi extends _FakeTransferApi {
         },
         {'id': 'host', 'isSelf': true, 'name': 'This PC'},
       ];
+}
+
+/// 设备首拉停在门闩上的假 API：验证下拉「加载中…」占位。
+class _GatedDevicesApi extends _FakeTransferApi {
+  final Completer<void> gate = Completer<void>();
+
+  @override
+  Future<List<Map<String, dynamic>>> listDevices() async {
+    await gate.future;
+    return [
+      {'id': 'peer', 'isSelf': false, 'name': 'Other'},
+      {'id': 'host', 'isSelf': true, 'name': 'This PC'},
+    ];
+  }
+}
+
+/// 永远返回空设备列表的假 API：验证「未发现设备」占位。
+class _EmptyDevicesApi extends _FakeTransferApi {
+  @override
+  Future<List<Map<String, dynamic>>> listDevices() async => <Map<String, dynamic>>[];
 }
 
 /// 假 Timer：记录取消状态与 tick，供手动驱动轮询节奏。

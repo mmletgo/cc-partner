@@ -197,7 +197,20 @@ class _ProviderPageState extends State<ProviderPage> {
                           _cliMissingBanner(context),
                         if (_apps.isEmpty) _noProvidersHint(context),
                         for (final app in _apps) ...[
-                          Text(app.app, style: Theme.of(context).textTheme.titleMedium),
+                          // 分组标题用产品名（对齐 web providerManager:apps.*），
+                          // 未知 app 回退原枚举值。
+                          Text(
+                            providerAppLabel(app.app),
+                            key: Key('provider-app-${app.app}'),
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          // 副标题「当前：X」：currentProviderId 能解析到条目才渲染。
+                          if (app.currentProviderName != null)
+                            Text(
+                              '当前：${app.currentProviderName}',
+                              key: Key('provider-current-${app.app}'),
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
                           for (final provider in app.providers)
                             ListTile(
                               title: Text(provider.name),

@@ -23,6 +23,39 @@ class _FakeProjectsClient extends ProjectsClient {
   Map<String, dynamic>? fleetSnapshotPayload;
   int fleetCalls = 0;
 
+  /// pathInfo 预检控制：kind/readable 可配，failPathInfo 置 true 时抛错。
+  bool failPathInfo = false;
+  String infoKind = 'dir';
+  bool infoReadable = true;
+  int pathInfoCalls = 0;
+  String? lastInfoPath;
+  String? lastInfoDeviceId;
+
+  @override
+  Future<ProjectPathInfo> localPathInfo(String path) async {
+    pathInfoCalls += 1;
+    lastInfoPath = path;
+    lastInfoDeviceId = null;
+    if (failPathInfo) {
+      throw Exception('info 失败');
+    }
+    return ProjectPathInfo(path: path, kind: infoKind, readable: infoReadable);
+  }
+
+  @override
+  Future<ProjectPathInfo> remotePathInfo({
+    required String deviceId,
+    required String path,
+  }) async {
+    pathInfoCalls += 1;
+    lastInfoPath = path;
+    lastInfoDeviceId = deviceId;
+    if (failPathInfo) {
+      throw Exception('info 失败');
+    }
+    return ProjectPathInfo(path: path, kind: infoKind, readable: infoReadable);
+  }
+
   @override
   Future<List<ProjectSummary>> listRecent() async => [
         const ProjectSummary(id: 'p1', name: 'demo', kind: 'local', path: '/Users/demo'),
@@ -108,14 +141,20 @@ class _FakeProjectsClient extends ProjectsClient {
   }
 }
 
+/// 设备列表可配置的假 TransferApi：默认直连在线 peer + 本机（选择器会过滤本机）。
 class _FakeTransferApi extends TransferApi {
-  _FakeTransferApi() : super(LanHttpClient(), 'http://127.0.0.1:1');
+  _FakeTransferApi([List<Map<String, dynamic>>? devices])
+      : devices = devices ??
+            [
+              {'id': 'peer-1', 'name': 'Laptop', 'isSelf': false, 'status': 'online'},
+              {'id': 'host-1', 'name': 'Desktop', 'isSelf': true, 'status': 'online'},
+            ],
+        super(LanHttpClient(), 'http://127.0.0.1:1');
+
+  final List<Map<String, dynamic>> devices;
 
   @override
-  Future<List<Map<String, dynamic>>> listDevices() async => [
-        {'id': 'peer-1', 'name': 'Laptop', 'isSelf': false},
-        {'id': 'host-1', 'name': 'Desktop', 'isSelf': true},
-      ];
+  Future<List<Map<String, dynamic>>> listDevices() async => devices;
 }
 
 /// listRecent 可控失败的假客户端：错误态/重试/空态/自定义行用。
@@ -164,6 +203,8 @@ Future<void> _pumpPage(
   ValueChanged<ProjectSummary>? onOpen,
   void Function(String projectId)? onProjectRemoved,
   Future<bool> Function(ProjectSummary project)? confirmRemove,
+  String? activeProjectId,
+  TransferApi? transferApi,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -174,8 +215,9 @@ Future<void> _pumpPage(
           onOpen: onOpen ?? (_) {},
           onProjectRemoved: onProjectRemoved,
           confirmRemove: confirmRemove,
+          activeProjectId: activeProjectId,
           client: client,
-          transferApi: _FakeTransferApi(),
+          transferApi: transferApi ?? _FakeTransferApi(),
         ),
       ),
     ),
@@ -388,34 +430,172 @@ void main() {
     expect(find.byKey(const Key('picker-entry-proj-a')), findsOneWidget);
   });
 
-  testWidgets('局域网：先选设备（主机置顶）再浏览并经远端打开', (tester) async {
+  testWidgets('局域网：设备列表过滤离线/自身并去重影子，选中后浏览经远端打开',
+      (tester) async {
     final client = _FakeProjectsClient();
     ProjectSummary? opened;
-    await _pumpPage(tester, client: client, onOpen: (project) => opened = project);
+    // 设备口径：直连在线 peer + 同 id 影子重复条目（去重）+ 离线 peer（过滤）+
+    // 本机（过滤）+ 仅影子可见的在线 peer（保留，带「经 NAS 中转」）。
+    final transfer = _FakeTransferApi([
+      {'id': 'peer-1', 'name': 'Laptop', 'isSelf': false, 'status': 'online', 'address': '192.168.1.2'},
+      {
+        'id': 'peer-1',
+        'name': 'Laptop',
+        'isSelf': false,
+        'status': 'online',
+        'viaDeviceId': 'nas',
+        'viaDeviceName': 'NAS',
+      },
+      {'id': 'peer-2', 'name': 'Down', 'isSelf': false, 'status': 'offline'},
+      {'id': 'host-1', 'name': 'Desktop', 'isSelf': true, 'status': 'online'},
+      {
+        'id': 'peer-3',
+        'name': 'Home Server',
+        'isSelf': false,
+        'status': 'online',
+        'viaDeviceId': 'nas',
+        'viaDeviceName': 'NAS',
+      },
+    ]);
+    await _pumpPage(tester, client: client, onOpen: (project) => opened = project, transferApi: transfer);
 
     await tester.tap(find.byKey(const Key('project-add-lan')));
     await tester.pumpAndSettle();
     // 必须先选设备才能浏览：还没有「打开此目录」。
     expect(find.byKey(const Key('picker-open')), findsNothing);
-    expect(find.text('Desktop · 主机'), findsOneWidget);
-    // 主机置顶。
-    final hostY = tester.getTopLeft(find.byKey(const Key('picker-device-host-1'))).dy;
-    final peerY = tester.getTopLeft(find.byKey(const Key('picker-device-peer-1'))).dy;
-    expect(hostY, lessThan(peerY));
+    // 本机与离线设备不可选；同设备直连+影子只出现一次。
+    expect(find.text('Desktop · 主机'), findsNothing);
+    expect(find.byKey(const Key('picker-device-peer-2')), findsNothing);
+    expect(find.byKey(const Key('picker-device-peer-1')), findsOneWidget);
+    // 仅影子可见的设备带「经 NAS 中转」徽标；直连设备没有。
+    expect(find.byKey(const Key('picker-device-via-peer-3')), findsOneWidget);
+    expect(find.text('经 NAS 中转'), findsOneWidget);
+    expect(find.byKey(const Key('picker-device-via-peer-1')), findsNothing);
+    // 直连排在前、影子在后。
+    final directY = tester.getTopLeft(find.byKey(const Key('picker-device-peer-1'))).dy;
+    final shadowY = tester.getTopLeft(find.byKey(const Key('picker-device-peer-3'))).dy;
+    expect(directY, lessThan(shadowY));
 
-    await tester.tap(find.byKey(const Key('picker-device-host-1')));
+    await tester.tap(find.byKey(const Key('picker-device-peer-1')));
     await tester.pumpAndSettle();
     expect(_pathText(tester).data, '/srv');
     await tester.tap(find.byKey(const Key('picker-entry-proj-b')));
     await tester.pumpAndSettle();
     expect(_pathText(tester).data, '/srv/proj-b');
+    // 打开前对远端路径做了 info 预检。
+    expect(client.lastInfoDeviceId, 'peer-1');
+    expect(client.lastInfoPath, '/srv/proj-b');
 
     await tester.tap(find.byKey(const Key('picker-open')));
     await tester.pumpAndSettle();
-    expect(client.openedRemoteDeviceId, 'host-1');
+    expect(client.openedRemoteDeviceId, 'peer-1');
     expect(client.openedRemotePath, '/srv/proj-b');
     expect(opened?.id, 'p-lan');
     expect(find.byKey(const Key('picker-open')), findsNothing);
+  });
+
+  testWidgets('局域网新建文件夹：对端缺 mkdir 能力时隐藏按钮', (tester) async {
+    // 无 capabilities 的对端（旧 peer）。
+    final client = _FakeProjectsClient();
+    await _pumpPage(
+      tester,
+      client: client,
+      transferApi: _FakeTransferApi([
+        {'id': 'peer-1', 'name': 'Laptop', 'isSelf': false, 'status': 'online'},
+      ]),
+    );
+    await tester.tap(find.byKey(const Key('project-add-lan')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('picker-device-peer-1')));
+    await tester.pumpAndSettle();
+    expect(_pathText(tester).data, '/srv');
+    // 缺 workbench.fs.create-dir.v1：「新建文件夹」整体隐藏、不回落。
+    expect(find.byKey(const Key('picker-create')), findsNothing);
+    // 「打开此目录」不受 mkdir 能力影响，预检通过后可用。
+    expect(
+      tester.widget<FilledButton>(find.byKey(const Key('picker-open'))).onPressed,
+      isNotNull,
+    );
+  });
+
+  testWidgets('局域网新建文件夹：capabilities 含 create-dir.v1 时按钮可用', (tester) async {
+    final capable = _FakeProjectsClient();
+    await _pumpPage(
+      tester,
+      client: capable,
+      transferApi: _FakeTransferApi([
+        {
+          'id': 'peer-1',
+          'name': 'Laptop',
+          'isSelf': false,
+          'status': 'online',
+          'capabilities': ['transfer.resume.v1', 'workbench.fs.create-dir.v1'],
+        },
+      ]),
+    );
+    await tester.tap(find.byKey(const Key('project-add-lan')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('picker-device-peer-1')));
+    await tester.pumpAndSettle();
+    final createButton = tester.widget<OutlinedButton>(
+      find.byKey(const Key('picker-create')),
+    );
+    expect(createButton.onPressed, isNotNull);
+  });
+
+  testWidgets('打开此目录预检：info 失败时禁用，预检通过才允许打开', (tester) async {
+    final client = _FakeProjectsClient()..failPathInfo = true;
+    ProjectSummary? opened;
+    await _pumpPage(tester, client: client, onOpen: (project) => opened = project);
+
+    await tester.tap(find.byKey(const Key('project-add-local')));
+    await tester.pumpAndSettle();
+    // 进入子目录后预检失败：「打开此目录」禁用，点按不会触发 open。
+    final openButton = find.byKey(const Key('picker-open'));
+    expect(
+      tester.widget<FilledButton>(openButton).onPressed,
+      isNull,
+    );
+    await tester.tap(openButton);
+    await tester.pumpAndSettle();
+    expect(client.openedPath, isNull);
+    expect(opened, isNull);
+
+    // 预检恢复（重新进入子目录触发新预检）后可以打开。
+    client.failPathInfo = false;
+    await tester.tap(find.byKey(const Key('picker-entry-proj-a')));
+    await tester.pumpAndSettle();
+    expect(_pathText(tester).data, '/Users/demo/proj-a');
+    expect(
+      tester.widget<FilledButton>(openButton).onPressed,
+      isNotNull,
+    );
+    await tester.tap(openButton);
+    await tester.pumpAndSettle();
+    expect(client.openedPath, '/Users/demo/proj-a');
+    expect(opened?.id, 'p-open');
+  });
+
+  testWidgets('打开此目录预检：info 为文件时禁用', (tester) async {
+    final client = _FakeProjectsClient()..infoKind = 'file';
+    await _pumpPage(tester, client: client);
+    await tester.tap(find.byKey(const Key('project-add-local')));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<FilledButton>(find.byKey(const Key('picker-open'))).onPressed,
+      isNull,
+    );
+  });
+
+  testWidgets('打开此目录预检：info 不可读时禁用', (tester) async {
+    final client = _FakeProjectsClient()..infoReadable = false;
+    await _pumpPage(tester, client: client);
+    await tester.tap(find.byKey(const Key('project-add-local')));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<FilledButton>(find.byKey(const Key('picker-open'))).onPressed,
+      isNull,
+    );
   });
 
   testWidgets('列表加载失败：错误卡 + 重试按钮 + 重试成功后回到列表', (tester) async {
@@ -468,29 +648,58 @@ void main() {
     expect(find.text('还没有项目文件夹'), findsOneWidget);
   });
 
-  testWidgets('confirmRemove 返回 false：静默中止，不弹确认框也不调用 remove',
-      (tester) async {
+  testWidgets('删除顺序：先弹确认框，取消不触发 dirty 预检也不调后端', (tester) async {
     final client = _FakeProjectsClient();
-    final hooked = <ProjectSummary>[];
+    final hookCalls = <ProjectSummary>[];
     await _pumpPage(
       tester,
       client: client,
       confirmRemove: (project) async {
-        hooked.add(project);
+        hookCalls.add(project);
+        return true;
+      },
+    );
+
+    // 确认框先出现，此时 dirty 预检尚未触发（对齐 web：点「移除」才预检）。
+    await tester.tap(find.byKey(const Key('project-remove-p1')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('remove-confirm')), findsOneWidget);
+    expect(hookCalls, isEmpty);
+    expect(client.removedIds, isEmpty);
+
+    // 取消：不触发预检、不删除、不回调。
+    await tester.tap(find.byKey(const Key('remove-confirm-cancel')));
+    await tester.pumpAndSettle();
+    expect(hookCalls, isEmpty);
+    expect(client.removedIds, isEmpty);
+  });
+
+  testWidgets('确认后先做 dirty 预检：返回 false 静默中止，不调 remove', (tester) async {
+    final client = _FakeProjectsClient();
+    final removed = <String>[];
+    final hookCalls = <ProjectSummary>[];
+    await _pumpPage(
+      tester,
+      client: client,
+      onProjectRemoved: removed.add,
+      confirmRemove: (project) async {
+        hookCalls.add(project);
         return false;
       },
     );
 
     await tester.tap(find.byKey(const Key('project-remove-p1')));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('remove-confirm-accept')));
+    await tester.pumpAndSettle();
 
-    // 钩子以完整项目为参被调用；返回 false 后不弹确认框、不删除。
-    expect(hooked.single.id, 'p1');
-    expect(find.byKey(const Key('remove-confirm')), findsNothing);
+    // 预检以完整项目为参且在确认后被调用；返回 false 不调后端、不回调壳层。
+    expect(hookCalls.single.id, 'p1');
     expect(client.removedIds, isEmpty);
+    expect(removed, isEmpty);
   });
 
-  testWidgets('confirmRemove 返回 true：继续弹确认框，确认后删除', (tester) async {
+  testWidgets('confirmRemove 返回 true：预检通过后删除并回调', (tester) async {
     final client = _FakeProjectsClient();
     final removed = <String>[];
     await _pumpPage(
@@ -502,8 +711,6 @@ void main() {
 
     await tester.tap(find.byKey(const Key('project-remove-p1')));
     await tester.pumpAndSettle();
-    // 钩子放行后照常弹确认框。
-    expect(find.byKey(const Key('remove-confirm')), findsOneWidget);
     await tester.tap(find.byKey(const Key('remove-confirm-accept')));
     await tester.pumpAndSettle();
 
@@ -630,5 +837,90 @@ void main() {
     await tester.tap(find.text('ok-proj'));
     await tester.pumpAndSettle();
     expect(opened?.id, 'p-ok');
+  });
+
+  testWidgets('下拉刷新同步重拉 fleet 摘要', (tester) async {
+    final client = _FakeProjectsClient();
+    await _pumpPage(tester, client: client);
+    // 首载失败：摘要行隐藏。
+    expect(client.fleetCalls, 1);
+    expect(find.byKey(const Key('projects-fleet-summary')), findsNothing);
+
+    // 下拉刷新：fleet 与项目列表一起重拉，摘要行出现。
+    client.fleetSnapshotPayload = {
+      'devices': [
+        {
+          'deviceId': 'd1',
+          'reachability': 'offline',
+          'projects': [
+            {
+              'agentCounts': {'needsInput': 2},
+            },
+          ],
+        },
+      ],
+    };
+    await tester.fling(find.byType(ListView), const Offset(0, 400), 1200);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pumpAndSettle();
+    expect(client.fleetCalls, 2);
+    expect(find.byKey(const Key('projects-fleet-summary')), findsOneWidget);
+    expect(find.text('局域网 Agent Fleet · 2 需处理 · 设备离线 (1)'), findsOneWidget);
+  });
+
+  testWidgets('activeProjectId 命中行高亮并带 selected 语义', (tester) async {
+    final client = _FlakyListProjectsClient(items: [
+      const ProjectSummary(id: 'p1', name: 'demo', kind: 'local', path: '/Users/demo'),
+      const ProjectSummary(id: 'p2', name: 'other', kind: 'local', path: '/Users/other'),
+    ]);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ProjectsPage(
+            book: _book(),
+            http: LanHttpClient(),
+            onOpen: (_) {},
+            activeProjectId: 'p1',
+            client: client,
+            transferApi: _FakeTransferApi(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 命中行：Semantics(selected: true) + 视觉高亮（tileColor）。
+    final activeSemantics = tester.widget<Semantics>(
+      find.byKey(const Key('project-row-active-p1')),
+    );
+    expect(activeSemantics.properties.selected, isTrue);
+    final activeTile = tester.widget<ListTile>(
+      find.byKey(const Key('project-row-p1')),
+    );
+    expect(activeTile.tileColor, isNotNull);
+    // 未命中行：无 selected 语义、无高亮。
+    expect(find.byKey(const Key('project-row-active-p2')), findsNothing);
+    final idleTile = tester.widget<ListTile>(
+      find.byKey(const Key('project-row-p2')),
+    );
+    expect(idleTile.tileColor, isNull);
+
+    // activeProjectId 为 null（默认）：无高亮行（现有调用点不受影响）。
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ProjectsPage(
+            book: _book(),
+            http: LanHttpClient(),
+            onOpen: (_) {},
+            client: client,
+            transferApi: _FakeTransferApi(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('project-row-active-p1')), findsNothing);
   });
 }

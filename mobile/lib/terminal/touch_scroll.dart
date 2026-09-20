@@ -105,6 +105,59 @@ TouchScrollUpdate updateTouchScroll(
   );
 }
 
+/// 一次触点换算出的 SGR wheel 1-based 字符格坐标。
+class TerminalWheelCell {
+  const TerminalWheelCell({required this.col, required this.row});
+
+  final int col;
+  final int row;
+
+  @override
+  bool operator ==(Object other) =>
+      other is TerminalWheelCell && other.col == col && other.row == row;
+
+  @override
+  int get hashCode => Object.hash(col, row);
+}
+
+/// 业务逻辑：SGR wheel 报告按触点落格编码，贴近桌面滚轮落点语义，而不是恒发 1,1
+/// （web MobileTerminalXtermSlot 触控换算：cellW=rect.width/max(cols,1)，col=clamp(floor(dx/cellW)+1)）。
+///
+/// Code Logic：[localDx]/[localDy] 为触点相对视口左上角的偏移；按视口与 cols/rows 均分字符格，
+/// floor 后 +1 并 clamp 到 1..cells；视口尺寸非法、cols/rows 非正或触点越界时回退 1（web 失败
+/// 回落 1,1）。结果可直接作为 [encodeSgrWheelReports] 的 col/row 参数。
+TerminalWheelCell sgrWheelCellFromTouch({
+  required double localDx,
+  required double localDy,
+  required double viewportWidth,
+  required double viewportHeight,
+  required int cols,
+  required int rows,
+}) {
+  int axis(double local, double viewport, int cells) {
+    if (!viewport.isFinite || viewport <= 0 || cells <= 0 || !local.isFinite) {
+      return 1;
+    }
+    final cellSize = viewport / cells;
+    if (!cellSize.isFinite || cellSize <= 0) {
+      return 1;
+    }
+    final index = (local / cellSize).floor() + 1;
+    if (index < 1) {
+      return 1;
+    }
+    if (index > cells) {
+      return cells;
+    }
+    return index;
+  }
+
+  return TerminalWheelCell(
+    col: axis(localDx, viewportWidth, cols),
+    row: axis(localDy, viewportHeight, rows),
+  );
+}
+
 /// 业务逻辑：Claude Code 等 TUI 靠「鼠标滚轮」滚 transcript，拖动必须编码成与
 /// xterm mouse tracking 相同的 SGR wheel 报告，而不是方向键（方向键是列表导航）。
 ///

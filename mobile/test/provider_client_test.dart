@@ -10,6 +10,47 @@ void main() {
     expect(ProviderClient(LanHttpClient(), 'http://127.0.0.1:1').allowsPhoneCliInstall, isFalse);
   });
 
+  test('providerAppLabel maps the cc-switch app table and falls back to raw', () {
+    // 已知枚举 → 产品名（与 web providerManager:apps.* 与后端 AgentApp 一一对应）。
+    expect(providerAppLabel('claude'), 'Claude Code');
+    expect(providerAppLabel('codex'), 'Codex');
+    expect(providerAppLabel('gemini'), 'Gemini CLI');
+    expect(providerAppLabel('opencode'), 'OpenCode');
+    expect(providerAppLabel('hermes'), 'Hermes');
+    expect(providerAppLabel('openclaw'), 'OpenClaw');
+    // 未知 app 回退原值。
+    expect(providerAppLabel('someNewApp'), 'someNewApp');
+    expect(providerAppLabel(''), '');
+  });
+
+  test('currentProviderName resolves the subtitle target or returns null', () {
+    const app = ProviderApp(
+      app: 'claude',
+      currentProviderId: 'p-b',
+      providers: [
+        ProviderEntry(id: 'p-a', name: 'A', isCurrent: true),
+        ProviderEntry(id: 'p-b', name: 'B', isCurrent: false),
+      ],
+    );
+    // current 是什么显示什么（对齐 web：按 currentProviderId 解析，而非 isCurrent 行）。
+    expect(app.currentProviderName, 'B');
+    // currentProviderId 缺失或解析不到：null（副标题不渲染）。
+    expect(
+      const ProviderApp(app: 'claude', providers: [
+        ProviderEntry(id: 'p-a', name: 'A', isCurrent: true),
+      ]).currentProviderName,
+      isNull,
+    );
+    expect(
+      const ProviderApp(
+        app: 'claude',
+        currentProviderId: 'p-missing',
+        providers: [ProviderEntry(id: 'p-a', name: 'A', isCurrent: true)],
+      ).currentProviderName,
+      isNull,
+    );
+  });
+
   test('cliFromSummary parses cli.available tolerantly', () {
     final client = ProviderClient(LanHttpClient(), 'http://127.0.0.1:1');
     // cli.available=false：CLI 缺失，切换必须禁用。

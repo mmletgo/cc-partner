@@ -11,19 +11,6 @@ import '../terminal/git_actions.dart';
 import '../transfer/api.dart';
 import 'worktree_strip.dart';
 
-/// Business Logic: worktrees 页与切换条共用「干净/有改动/冲突」三态文案（对齐 web status）。
-/// Code Logic: conflicts 优先，其次 changed，最后干净；status 缺失时按干净展示（宽容解析）。
-String worktreeStatusLabel(Map<String, dynamic> tree) {
-  final status = WorktreeGitStatus.of(tree);
-  if (status.conflicts > 0) {
-    return '${status.conflicts} 处冲突';
-  }
-  if (!status.clean || status.changed > 0) {
-    return '${status.changed} 处改动';
-  }
-  return '干净';
-}
-
 /// Business Logic: 卡片要展示与远端的同步差距（对齐 web ahead/behind badge）。
 /// Code Logic: 拼接「领先 N / 落后 N」。
 String worktreeSyncLabel(Map<String, dynamic> tree) {
@@ -59,7 +46,8 @@ class WorktreesPage extends StatefulWidget {
   final GitClient? gitClient;
 
   /// 测试可注入的终端窗口创建器；缺省用 SessionsClient.create（自动开绑定窗口）。
-  final Future<SessionSummary> Function(String projectId, String worktreeId)? onCreateSession;
+  final Future<SessionSummary> Function(String projectId, String worktreeId)?
+  onCreateSession;
 
   /// 删除激活 worktree 前的脏文件预检（由壳层注入 _confirmLeaveDirty，与 GitPage
   /// 同款固定接缝契约——页面拿不到 FileWorkspaceController）；取消时终止删除。
@@ -87,7 +75,8 @@ class _WorktreesPageState extends State<WorktreesPage> {
   @override
   void initState() {
     super.initState();
-    _client = widget.gitClient ?? GitClient(widget.http, widget.book.active!.baseUrl);
+    _client =
+        widget.gitClient ?? GitClient(widget.http, widget.book.active!.baseUrl);
     _reload();
   }
 
@@ -112,7 +101,10 @@ class _WorktreesPageState extends State<WorktreesPage> {
   /// 静默刷新列表（含 Git 状态）；下拉刷新与创建/删除后复用。
   Future<void> _refresh() async {
     try {
-      final body = await _client.listWorktrees(widget.project.id, includeGitStatus: true);
+      final body = await _client.listWorktrees(
+        widget.project.id,
+        includeGitStatus: true,
+      );
       final mapped = asObjectList(body, wrapKey: 'worktrees');
       if (mounted) {
         setState(() {
@@ -131,7 +123,9 @@ class _WorktreesPageState extends State<WorktreesPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        duration: transient ? const Duration(milliseconds: 2500) : const Duration(seconds: 4),
+        duration: transient
+            ? const Duration(milliseconds: 2500)
+            : const Duration(seconds: 4),
       ),
     );
   }
@@ -272,9 +266,14 @@ class _WorktreesPageState extends State<WorktreesPage> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('移除 worktree'),
-        content: Text('确定移除 worktree「$name」吗？未推送的提交可能丢失。'),
+        // 对齐 web MobileWorktreePanel removeConfirm（worktrees 列表卡口径，
+        // 与切换条的「关闭终端窗口」重口径区分）。
+        content: Text('确定移除 worktree“$name”？请先确认不再需要该工作区。'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
           FilledButton(
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(context).colorScheme.error,
@@ -342,7 +341,9 @@ class _WorktreesPageState extends State<WorktreesPage> {
 
   /// Business Logic: worktrees 页卡片要能直接发起合并（对齐 web MobileWorktreePanel 卡片动作）；
   /// merge 会删除源 worktree 或收集分支，unknown 时同样走同 id 对账，禁止新 id 盲重放。
-  /// Code Logic: 共享文案确认框 → tracker.begin(merge) → merge envelope →
+  /// Code Logic: 共享文案确认框 → 源树是激活树时先做只读 dirty 预检（对齐 web
+  /// runMobileWorktreeMergeFlow：后端会先删源树，预检必须在前端先行，取消则不调后端）→
+  /// tracker.begin(merge) → merge envelope →
   ///   succeeded → 合并成功 + 刷新 + 源树是 active 时 onSelect(主树) 交 shell 兜底切换；
   ///   unknown → 共享对账；传输异常 → unknown 横幅；确定失败 → 解锁 + SnackBar。
   Future<void> _merge(Map<String, dynamic> tree) async {
@@ -359,12 +360,27 @@ class _WorktreesPageState extends State<WorktreesPage> {
         title: const Text('合并到主工作区'),
         content: Text(worktreeMergeConfirmText(tree)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('合并')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('合并'),
+          ),
         ],
       ),
     );
     if (confirmed != true) {
+      return;
+    }
+    // 只读 dirty 预检与删除同款接缝（confirmLeaveDirty 由壳层注入）；取消时不调后端。
+    if (id == widget.activeId &&
+        widget.confirmLeaveDirty != null &&
+        !await widget.confirmLeaveDirty!(id)) {
+      return;
+    }
+    if (!mounted) {
       return;
     }
     final operationId = _tracker.begin(
@@ -433,7 +449,8 @@ class _WorktreesPageState extends State<WorktreesPage> {
     if (mergedId.isEmpty || mergedId != widget.activeId) {
       return;
     }
-    final next = pickMainWorktree(_trees) ?? (_trees.isEmpty ? null : _trees.first);
+    final next =
+        pickMainWorktree(_trees) ?? (_trees.isEmpty ? null : _trees.first);
     final nextId = next?['id'] as String?;
     if (next != null && nextId != null && nextId.isNotEmpty) {
       widget.onSelect(next);
@@ -451,10 +468,7 @@ class _WorktreesPageState extends State<WorktreesPage> {
         children: [
           if (_busy) const LinearProgressIndicator(),
           if (_tracker.phase == GitMutationPhase.reconciling)
-            const Padding(
-              padding: EdgeInsets.all(8),
-              child: Text('核对结果中…'),
-            ),
+            const Padding(padding: EdgeInsets.all(8), child: Text('核对结果中…')),
           if (_loading)
             const Padding(
               padding: EdgeInsets.all(48),
@@ -465,9 +479,13 @@ class _WorktreesPageState extends State<WorktreesPage> {
               ListTile(
                 leading: const Icon(Icons.error_outline),
                 title: Text(_error!),
-                trailing: TextButton(onPressed: _reload, child: const Text('重试')),
+                trailing: TextButton(
+                  onPressed: _reload,
+                  child: const Text('重试'),
+                ),
               ),
-            if (_tracker.phase == GitMutationPhase.unknown && _mutationError != null)
+            if (_tracker.phase == GitMutationPhase.unknown &&
+                _mutationError != null)
               Card(
                 key: const Key('worktrees-unknown-banner'),
                 color: theme.colorScheme.errorContainer,
@@ -515,7 +533,9 @@ class _WorktreesPageState extends State<WorktreesPage> {
                   ),
                   const SizedBox(width: 8),
                   FilledButton(
-                    onPressed: _busy || _suffix.text.trim().isEmpty ? null : _create,
+                    onPressed: _busy || _suffix.text.trim().isEmpty
+                        ? null
+                        : _create,
                     child: _busy
                         ? const SizedBox(
                             width: 16,
@@ -561,8 +581,8 @@ class _WorktreesPageState extends State<WorktreesPage> {
                 color: status.conflicts > 0
                     ? theme.colorScheme.error
                     : (!status.clean || status.changed > 0)
-                        ? theme.colorScheme.tertiary
-                        : theme.colorScheme.primary,
+                    ? theme.colorScheme.tertiary
+                    : theme.colorScheme.primary,
               ),
             ),
             Expanded(
@@ -571,11 +591,7 @@ class _WorktreesPageState extends State<WorktreesPage> {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            _badge(
-              theme,
-              isMain ? '主工作区' : 'worktree',
-              emphasized: isMain,
-            ),
+            _badge(theme, isMain ? '主工作区' : 'worktree', emphasized: isMain),
           ],
         ),
         subtitle: Column(
@@ -587,8 +603,9 @@ class _WorktreesPageState extends State<WorktreesPage> {
                 tree['path'] as String,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall
-                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
               ),
             const SizedBox(height: 4),
             Wrap(

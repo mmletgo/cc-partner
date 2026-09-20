@@ -227,6 +227,34 @@ String attentionGroupLabel(String category) {
 String attentionFreshnessLabel(String? freshness) =>
     freshness == 'cached' ? '远端缓存' : '实时';
 
+/// Business Logic: Inbox 条目 meta 行的来源动作文案必须是可见中文，不能直接拼
+/// 英文枚举 sourceKind；映射对齐 web `attention:action.*`（getAttentionActionI18nKey）。
+/// Code Logic: sourceKind → 动作文案的固定映射（与 web zh/attention.json 全量一致）；
+/// 未知/缺省 sourceKind 回退原值，保证新增来源不丢信息。
+String attentionSourceKindActionLabel(String? sourceKind) {
+  switch (sourceKind) {
+    case 'orchestratorHumanReview':
+      return '前往复核';
+    case 'orchestratorBlocked':
+      return '查看阻塞原因';
+    case 'remoteOutboxFailed':
+      return '查看失败项';
+    case 'workbenchDependency':
+      return '打开设置';
+    case 'agentNeedsInput':
+    case 'agentFailed':
+      return '打开终端';
+    case 'experimentNeedsDecision':
+      return '查看实验';
+    case 'agentHubConflict':
+    case 'agentHubProjectionBlocked':
+      return '打开 Agent Hub';
+    default:
+      // 未知来源回退原值（空串返回空串，meta 行由调用方决定省略）。
+      return sourceKind ?? '';
+  }
+}
+
 /// Navigation target only — the app never executes Deliver/Retry/install from Inbox.
 class AttentionNavigation {
   const AttentionNavigation({

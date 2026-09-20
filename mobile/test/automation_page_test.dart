@@ -30,6 +30,12 @@ class _FakeAutomationClient extends AutomationClient {
     {'id': 'e1', 'title': 'ab test', 'state': 'running', 'status': 'running'},
   ];
 
+  /// 挂起主列表请求，用于验证列表加载中的按钮禁用态。
+  Completer<void>? viewsGate;
+
+  /// 挂起 runtime 快照请求，用于验证徽章「刷新中」。
+  Completer<void>? snapshotGate;
+
   // ---- 记录 ----
   String? lastReorderBlockId;
   List<String>? lastReorderIds;
@@ -81,6 +87,7 @@ class _FakeAutomationClient extends AutomationClient {
         'workflowState': 'inProgress',
         'runState': 'running',
         'attemptPhase': 'streaming',
+        'attempt': 2,
         'lastRuntimeMessage': 'streaming tokens',
         'claudeSessionId': 'claude-9',
         'transcriptPath': '/tmp/t2.jsonl',
@@ -118,6 +125,7 @@ class _FakeAutomationClient extends AutomationClient {
   @override
   Future<List<Map<String, dynamic>>> listViews(String projectId) async {
     calls.add('listViews');
+    if (viewsGate != null) await viewsGate!.future;
     if (viewsOverride != null) return viewsOverride!(projectId);
     return [
       {'origin': 'local', 'task': _localTask},
@@ -142,6 +150,7 @@ class _FakeAutomationClient extends AutomationClient {
   @override
   Future<Map<String, dynamic>> runtimeSnapshot(String projectId) async {
     calls.add('snapshot');
+    if (snapshotGate != null) await snapshotGate!.future;
     if (snapshotError != null) throw snapshotError!;
     if (snapshotOverride != null) return snapshotOverride!(projectId);
     return {'projectId': projectId, 'remoteStatus': 'local', 'slotsUsed': 0};
@@ -382,9 +391,16 @@ void main() {
     expect(find.text('远端 Office PC'), findsOneWidget);
     expect(find.text('In Progress'), findsWidgets);
 
-    // runtime 状态卡与离线 outbox 区。
+    // runtime 状态卡。
     expect(find.text('运行时状态'), findsOneWidget);
-    expect(find.text('本机'), findsWidgets);
+
+    // 离线 outbox 区在卡片增高后位于首屏之外：滚动到可见后再断言。
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('automation-outbox-o1')),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('automation-outbox-o1')), findsOneWidget);
     expect(find.text('queued remote'), findsOneWidget);
     expect(find.text('发送失败'), findsOneWidget);
@@ -559,6 +575,8 @@ void main() {
     await tester.enterText(find.byKey(const Key('create-title')), 'step three');
     await tester.enterText(find.byKey(const Key('create-goal')), 'g3');
     await tester.enterText(find.byKey(const Key('create-acceptance')), 'a3');
+    // 重建一帧让追加按钮的有效性门控生效。
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('append-submit')));
     await tester.pumpAndSettle();
 
@@ -948,15 +966,23 @@ void main() {
   ) async {
     final client = _FakeAutomationClient();
     await _pumpPage(tester, client, focusOutboxId: 'o1');
-    final card = tester.widget<Card>(
-      find.byKey(const Key('automation-outbox-o1')),
-    );
-    expect(card.color, isNotNull);
-    // 未聚焦的任务卡保持默认底色。
+    // 未聚焦的任务卡保持默认底色（outbox 在首屏外，先断言首屏内任务卡）。
     final plain = tester.widget<Card>(
       find.byKey(const Key('automation-task-t1')),
     );
     expect(plain.color, isNull);
+
+    // 聚焦命中的 outbox 行滚动到可见后断言高亮。
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('automation-outbox-o1')),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    final card = tester.widget<Card>(
+      find.byKey(const Key('automation-outbox-o1')),
+    );
+    expect(card.color, isNotNull);
   });
 
   testWidgets('task row expands detail with evidence timeline', (tester) async {
@@ -1063,6 +1089,8 @@ void main() {
     await tester.enterText(find.byKey(const Key('create-title')), 't');
     await tester.enterText(find.byKey(const Key('create-goal')), 'g');
     await tester.enterText(find.byKey(const Key('create-acceptance')), 'a');
+    // 重建一帧让提交按钮的有效性门控生效。
+    await tester.pump();
     await tester.tap(find.byKey(const Key('create-submit')));
     await tester.pump();
 
@@ -1131,5 +1159,314 @@ void main() {
     await tester.pumpAndSettle();
     expect(client.calls, contains('retry:o1'));
     expect(find.text('已重新加入发送队列'), findsOneWidget);
+  });
+
+  testWidgets('reopening the create dialog keeps the draft', (tester) async {
+    final client = _FakeAutomationClient();
+    await _pumpPage(tester, client);
+
+    await tester.tap(find.byKey(const Key('automation-create')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('create-title')), 'draft title');
+    await tester.enterText(find.byKey(const Key('create-goal')), 'draft goal');
+    await tester.enterText(
+      find.byKey(const Key('create-acceptance')),
+      'draft acceptance',
+    );
+    await tester.enterText(find.byKey(const Key('create-prompt')), 'draft prompt');
+    await tester.pumpAndSettle();
+    // 误关对话框（取消）：草稿不应被清掉。
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('automation-create')));
+    await tester.pumpAndSettle();
+    expect(find.text('draft title'), findsOneWidget);
+    expect(find.text('draft goal'), findsOneWidget);
+    expect(find.text('draft acceptance'), findsOneWidget);
+    expect(find.text('draft prompt'), findsOneWidget);
+  });
+
+  testWidgets('append entry clears the three task fields and gates submit', (
+    tester,
+  ) async {
+    final client = _FakeAutomationClient();
+    client.viewsOverride =
+        (projectId) => [
+              client._blockMember('b1a', 0),
+              client._blockMember('b1b', 1),
+            ];
+    await _pumpPage(tester, client);
+
+    // 先在创建对话框留下草稿再关闭。
+    await tester.tap(find.byKey(const Key('automation-create')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('create-title')), 'stale draft');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    // 追加入口打开：三字段被清空（对齐 web handleOpenAppend）。
+    await tester.tap(find.byKey(const Key('automation-block-blk1')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('block-append-blk1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('block-append-blk1')));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const Key('create-title')))
+          .controller
+          ?.text,
+      isEmpty,
+    );
+    // 字段为空：追加按钮禁用。
+    expect(
+      tester.widget<FilledButton>(find.byKey(const Key('append-submit'))).onPressed,
+      isNull,
+    );
+
+    await tester.enterText(find.byKey(const Key('create-title')), 'step three');
+    await tester.enterText(find.byKey(const Key('create-goal')), 'g3');
+    await tester.enterText(find.byKey(const Key('create-acceptance')), 'a3');
+    await tester.pump();
+    expect(
+      tester.widget<FilledButton>(find.byKey(const Key('append-submit'))).onPressed,
+      isNotNull,
+    );
+  });
+
+  testWidgets('submitting a task clears the draft for the next dialog', (
+    tester,
+  ) async {
+    final client = _FakeAutomationClient();
+    await _pumpPage(tester, client);
+
+    await tester.tap(find.byKey(const Key('automation-create')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('create-title')), 'cover browser');
+    await tester.enterText(find.byKey(const Key('create-goal')), 'ship it');
+    await tester.enterText(
+      find.byKey(const Key('create-acceptance')),
+      'tests pass',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('create-submit')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('create-submit')), findsNothing);
+
+    // 重开对话框：上一次成功提交的草稿已整体清空。
+    await tester.tap(find.byKey(const Key('automation-create')));
+    await tester.pumpAndSettle();
+    for (final key in const [
+      'create-title',
+      'create-goal',
+      'create-acceptance',
+      'create-prompt',
+    ]) {
+      expect(
+        tester.widget<TextField>(find.byKey(Key(key))).controller?.text,
+        isEmpty,
+        reason: '$key 应在提交成功后清空',
+      );
+    }
+  });
+
+  testWidgets('switching project clears the create draft', (tester) async {
+    final client = _FakeAutomationClient();
+    await _pumpPage(tester, client);
+    await tester.tap(find.byKey(const Key('automation-create')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('create-title')),
+      'cross project draft',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    // 切换项目：草稿整体清空，不得跨项目串台。
+    await _pumpPage(
+      tester,
+      _FakeAutomationClient(),
+      project: const ProjectSummary(
+        id: 'p2',
+        name: 'demo2',
+        kind: 'local',
+        path: '/repo/demo2',
+      ),
+    );
+    await tester.tap(find.byKey(const Key('automation-create')));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const Key('create-title')))
+          .controller
+          ?.text,
+      isEmpty,
+    );
+  });
+
+  testWidgets('submit stays disabled until required fields complete', (
+    tester,
+  ) async {
+    final client = _FakeAutomationClient();
+    await _pumpPage(tester, client);
+
+    await tester.tap(find.byKey(const Key('automation-create')));
+    await tester.pumpAndSettle();
+    FilledButton submit() =>
+        tester.widget<FilledButton>(find.byKey(const Key('create-submit')));
+    OutlinedButton aiButton() =>
+        tester.widget<OutlinedButton>(find.byKey(const Key('create-ai')));
+    // 空表单：提交与 AI 完善都禁用。
+    expect(submit().onPressed, isNull);
+    expect(aiButton().onPressed, isNull);
+
+    await tester.enterText(find.byKey(const Key('create-title')), 't');
+    await tester.pump();
+    expect(submit().onPressed, isNull);
+    await tester.enterText(find.byKey(const Key('create-goal')), 'g');
+    await tester.pump();
+    expect(submit().onPressed, isNull);
+
+    // 三字段齐备：提交可用；AI 完善仍只看 prompt。
+    await tester.enterText(find.byKey(const Key('create-acceptance')), 'a');
+    await tester.pump();
+    expect(submit().onPressed, isNotNull);
+    expect(aiButton().onPressed, isNull);
+    await tester.enterText(find.byKey(const Key('create-prompt')), '一句需求');
+    await tester.pump();
+    expect(aiButton().onPressed, isNotNull);
+  });
+
+  testWidgets('block submit stays disabled until title and members complete', (
+    tester,
+  ) async {
+    final client = _FakeAutomationClient();
+    await _pumpPage(tester, client);
+
+    await tester.tap(find.byKey(const Key('automation-create')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('任务块'));
+    await tester.pumpAndSettle();
+    FilledButton submit() =>
+        tester.widget<FilledButton>(find.byKey(const Key('create-submit')));
+    expect(submit().onPressed, isNull);
+
+    await tester.enterText(find.byKey(const Key('block-title')), 'Login block');
+    await tester.enterText(find.byKey(const Key('block-member-title-0')), 's1');
+    await tester.enterText(find.byKey(const Key('block-member-goal-0')), 'g1');
+    await tester.enterText(
+      find.byKey(const Key('block-member-acceptance-0')),
+      'a1',
+    );
+    await tester.pump();
+    // 成员 2 未填齐：仍禁用。
+    expect(submit().onPressed, isNull);
+
+    await tester.enterText(find.byKey(const Key('block-member-title-1')), 's2');
+    await tester.enterText(find.byKey(const Key('block-member-goal-1')), 'g2');
+    await tester.enterText(
+      find.byKey(const Key('block-member-acceptance-1')),
+      'a2',
+    );
+    await tester.pump();
+    expect(submit().onPressed, isNotNull);
+  });
+
+  testWidgets('panel create button is disabled while the list reloads', (
+    tester,
+  ) async {
+    final client = _FakeAutomationClient();
+    await _pumpPage(tester, client);
+    FilledButton createButton() => tester.widget<FilledButton>(
+          find.byKey(const Key('automation-create')),
+        );
+    expect(createButton().onPressed, isNotNull);
+
+    // 挂起刷新请求：列表加载中创建按钮禁用（对齐 web disabled={!hasProject || loading}）。
+    client.viewsGate = Completer<void>();
+    await tester.tap(find.byKey(const Key('automation-refresh')));
+    await tester.pump();
+    expect(createButton().onPressed, isNull);
+
+    client.viewsGate!.complete();
+    await tester.pumpAndSettle();
+    expect(createButton().onPressed, isNotNull);
+  });
+
+  testWidgets('task rows show runtime summary, phase badge and attempt round', (
+    tester,
+  ) async {
+    final client = _FakeAutomationClient();
+    await _pumpPage(tester, client);
+
+    // 远端任务行内摘要 + runState/attemptPhase 徽章 + attempt 轮次。
+    expect(find.text('Runtime：streaming tokens'), findsOneWidget);
+    expect(
+      find.text('Claude：claude-9 · Transcript：/tmp/t2.jsonl'),
+      findsOneWidget,
+    );
+    expect(find.text('Running'), findsOneWidget);
+    expect(find.text('Streaming'), findsOneWidget);
+    expect(find.text('第 2 轮'), findsOneWidget);
+
+    // 本机任务缺 attemptPhase → unknown；缺 attempt → 不显示轮次徽章。
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('automation-task-body-t1')),
+        matching: find.text('unknown'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('automation-task-body-t1')),
+        matching: find.textContaining('轮'),
+      ),
+      findsNothing,
+    );
+  });
+
+  testWidgets('runtime badge shows refreshing while a request is in flight', (
+    tester,
+  ) async {
+    final client = _FakeAutomationClient();
+    await _pumpPage(tester, client);
+    Finder badgeText(String label) => find.descendant(
+          of: find.byKey(const Key('automation-runtime-badge')),
+          matching: find.text(label),
+        );
+    expect(badgeText('本机'), findsOneWidget);
+
+    // 挂起快照请求：即便页面还有旧数据也固定显示「刷新中」。
+    client.snapshotGate = Completer<void>();
+    await tester.tap(find.byKey(const Key('automation-refresh')));
+    await tester.pump();
+    expect(badgeText('刷新中'), findsOneWidget);
+
+    client.snapshotGate!.complete();
+    await tester.pumpAndSettle();
+    expect(badgeText('本机'), findsOneWidget);
+  });
+
+  testWidgets('outbox rows carry the pending origin badge', (tester) async {
+    final client = _FakeAutomationClient();
+    await _pumpPage(tester, client);
+    // outbox 区在首屏之外：先滚动到该行可见。
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('automation-outbox-o1')),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('automation-outbox-o1')),
+        matching: find.text('待发送'),
+      ),
+      findsOneWidget,
+    );
   });
 }

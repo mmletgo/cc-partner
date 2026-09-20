@@ -45,17 +45,25 @@ class _TransferPageState extends State<TransferPage> {
   List<Map<String, dynamic>> _targets = [];
   String? _selectedTargetId;
 
-  /// 设备列表首载失败错误文本：仅首载（无任何设备数据）失败时上屏，
-  /// 对齐 web devicesState=error 区（错误 + 重试按钮）。
+  /// 设备列表最近一次刷新失败错误文本：失败上屏（保留旧数据），
+  /// 对齐 web devicesState=error 区（错误 + 重试按钮），成功后清除。
   String? _devicesError;
 
-  /// 任务列表首载失败错误文本：仅首载（无任何任务数据）失败时上屏，
-  /// 对齐 web tasksState=error 区（错误 + 重试按钮）。
+  /// 设备首拉是否已结束（成功或失败）：驱动下拉「加载中…/未发现设备」占位，
+  /// 对齐 web devicesState 的 loading → success/error 迁移（独立于共享 _loading）。
+  bool _devicesSettled = false;
+
+  /// 任务列表最近一次刷新失败错误文本：失败上屏（保留旧数据），
+  /// 对齐 web tasksState=error 区（错误 + 重试按钮），成功后清除。
   String? _tasksError;
   bool _loading = true;
   String? _busy;
   int _uploadedBytes = 0;
   int _uploadTotalBytes = 0;
+
+  /// 本地上传卡展示的文件名与目标设备名（对齐 web localUpload 卡）。
+  String? _uploadFileName;
+  String? _uploadDeviceName;
 
   /// 发送区行内错误（role=alert 语义），与任务行级错误分开。
   String? _sendError;
@@ -103,7 +111,7 @@ class _TransferPageState extends State<TransferPage> {
   }
 
   /// Business Logic: 任务列表是进度/恢复动作的权威源，可见时每 3s 静默刷新。
-  /// Code Logic: 轮询路径不显示 loading；失败保留旧列表，仅首载失败才上屏错误。
+  /// Code Logic: 轮询路径不显示 loading；失败保留旧列表并上屏错误行，成功后清除。
   Future<void> _pollTasks() => _loadTasks(showLoading: false);
 
   /// Business Logic: 设备列表驱动目标下拉与续传能力判定，可见时每 5s 静默刷新。
@@ -133,9 +141,9 @@ class _TransferPageState extends State<TransferPage> {
         });
       }
     } catch (error) {
-      // 刷新失败保留上一份列表（对齐 web retainListOnRefreshFailure）；
-      // 只有首载（尚无数据）才上屏错误 + 重试按钮。
-      if (mounted && _tasks.isEmpty) {
+      // 刷新失败保留上一份列表（对齐 web retainListOnRefreshFailure），
+      // 同时上屏错误行 + 重试按钮（有旧数据也上屏，对齐 web tasksState=error）。
+      if (mounted) {
         setState(() {
           _tasksError = '任务列表加载失败：$error';
           _loading = false;
@@ -162,12 +170,15 @@ class _TransferPageState extends State<TransferPage> {
           _targets = targets;
           _selectedTargetId = pickTransferTargetId(targets, selectedId: _selectedTargetId);
           _devicesError = null;
+          _devicesSettled = true;
         });
       }
     } catch (error) {
-      if (mounted && _targets.isEmpty) {
+      // 同任务列表：保留旧数据、上屏错误行（有旧数据也上屏，成功后清除）。
+      if (mounted) {
         setState(() {
           _devicesError = '设备列表加载失败：$error';
+          _devicesSettled = true;
           _loading = false;
         });
       }
@@ -197,11 +208,20 @@ class _TransferPageState extends State<TransferPage> {
       return;
     }
     final target = pickTransferTargetId(_targets, selectedId: _selectedTargetId) ?? '';
+    String uploadDeviceName = '';
+    for (final device in _targets) {
+      if (transferDeviceId(device) == target) {
+        uploadDeviceName = transferDeviceLabel(device);
+        break;
+      }
+    }
     setState(() {
       _busy = '上传';
       _sendError = null;
       _uploadedBytes = 0;
       _uploadTotalBytes = 0;
+      _uploadFileName = file.name;
+      _uploadDeviceName = uploadDeviceName;
     });
     final intentKey = _transferSendIntentKey(target, file.name, bytes.length);
     final reused = _pendingSendIntentKey == intentKey ? _pendingSendOperationId : null;
@@ -444,24 +464,51 @@ class _TransferPageState extends State<TransferPage> {
     final supportsResume = peerSupportsTransferResume(task, _targets);
     final canResume = !reconciling && !recoveryLocked && isTransferResumable(task, supportsResume);
     final canRetry = !reconciling && !recoveryLocked && isTransferRetryable(task, supportsResume);
-    final canCancel = task.status == 'pending' || task.status == 'transferring';
+    // 对账中行内全部动作隐藏（取消/重试/续传/下载），对齐 web TransferItem showActions。
+    final canCancel = !reconciling && (task.status == 'pending' || task.status == 'transferring');
+    final downloadable = !reconciling && canDownload(task);
     final actionError = _taskActionErrors[task.id];
+    // 行内状态标签优先 phase（排队/连接/传输/收尾），缺失回退 coarse status。
+    final statusText = transferPhaseLabel(task.phase) ?? task.status;
     final subtitle = [
-      '${task.direction} · ${task.status}',
+      '${task.direction} · $statusText',
       if (reconciling) '正在确认结果',
-      if (canDownload(task)) '可下载',
+      if (downloadable) '可下载',
     ].join(' · ');
+    final peerText = transferPeerDisplayText(task);
+    final failureText =
+        task.status == 'failed' ? (task.failureMessage ?? task.errorMessage) : null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         ListTile(
           key: Key('transfer-task-${task.id}'),
           title: Text(task.fileName ?? task.id),
-          subtitle: Text(subtitle),
+          subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(subtitle),
+              // 对端设备名行：收件箱方向显示「手机」（对齐 web peerDevice 行）。
+              if (peerText != null)
+                Text(
+                  peerText,
+                  key: Key('transfer-peer-${task.id}'),
+                  style: theme.textTheme.bodySmall,
+                ),
+              // failed 行展示失败原因（failure.message 优先，回退 errorMessage）。
+              if (failureText != null)
+                Text(
+                  failureText,
+                  key: Key('transfer-failure-${task.id}'),
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.error),
+                ),
+            ],
+          ),
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (canDownload(task))
+              if (downloadable)
                 IconButton(
                   tooltip: '下载',
                   onPressed: () => _download(task),
@@ -541,11 +588,12 @@ class _TransferPageState extends State<TransferPage> {
     );
   }
 
-  /// Business Logic: 任务/设备首载失败且无任何数据时，只有下拉刷新一条恢复路径
-  /// 太隐蔽；对齐 web 失败区的显式「重试」按钮（common:action.retry）。
+  /// Business Logic: 任务/设备刷新失败（无论是否已有旧数据）不能只靠下拉刷新一条
+  /// 隐蔽恢复路径；对齐 web 失败区（tasksState/devicesState=error）的显式「重试」按钮，
+  /// 旧数据保留在屏上，成功后错误行清除。
   /// Code Logic: 一行 = 错误文本（liveRegion 语义、error 色）+ TextButton 重试，
   /// 回调由调用方注入（设备区 → _loadDevices，任务区 → _loadTasks）。
-  Widget _firstLoadErrorRow({
+  Widget _refreshErrorRow({
     required String text,
     required Key textKey,
     required Key retryKey,
@@ -581,7 +629,7 @@ class _TransferPageState extends State<TransferPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final groups = groupTransferTasks(_tasks);
+    final groups = groupTransferTasks(_tasks, reconcilingIds: _reconcilingIds);
     final uploadInProgress = _busy == '上传' && _uploadTotalBytes > 0;
     return Column(
       children: [
@@ -590,8 +638,22 @@ class _TransferPageState extends State<TransferPage> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
             child: Column(
+              key: const Key('transfer-upload-card'),
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // 本地上传卡：文件名 + 目标设备名（主机任务 complete 后才出现，
+                // 上传阶段先展示本地进度，对齐 web localUpload 卡）。
+                Text(
+                  '正在发送「${_uploadFileName ?? ''}」…',
+                  key: const Key('transfer-upload-file'),
+                ),
+                if (_uploadDeviceName != null && _uploadDeviceName!.isNotEmpty)
+                  Text(
+                    _uploadDeviceName!,
+                    key: const Key('transfer-upload-device'),
+                    style: theme.textTheme.bodySmall,
+                  ),
+                const SizedBox(height: 4),
                 LinearProgressIndicator(
                   key: const Key('transfer-upload-progress'),
                   value: _uploadedBytes / _uploadTotalBytes,
@@ -620,6 +682,23 @@ class _TransferPageState extends State<TransferPage> {
               ],
               onChanged: (value) => setState(() => _selectedTargetId = value),
             ),
+          )
+        else
+          // 首载中/空列表给占位下拉并禁用（对齐 web select 的 loading/noDevices 分支）。
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: DropdownButtonFormField<String>(
+              key: const Key('transfer-target'),
+              decoration: const InputDecoration(labelText: '发送到'),
+              items: [
+                DropdownMenuItem<String>(
+                  enabled: false,
+                  child: Text(_devicesSettled ? '未发现设备' : '加载中…'),
+                ),
+              ],
+              hint: Text(_devicesSettled ? '未发现设备' : '加载中…'),
+              onChanged: null,
+            ),
           ),
         Padding(
           padding: const EdgeInsets.all(8),
@@ -627,6 +706,15 @@ class _TransferPageState extends State<TransferPage> {
             onPressed: _busy == null ? _pickAndSend : null,
             icon: const Icon(Icons.file_upload),
             label: const Text('选择文件并立即发送'),
+          ),
+        ),
+        // 分块上传提示文案（对齐 web zh i18n transfer:chunkHint 原文）。
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Text(
+            '支持任意大小 · 自动分块 1MB · 断点可续传 · SHA256 校验',
+            key: const Key('transfer-chunk-hint'),
+            style: theme.textTheme.bodySmall,
           ),
         ),
         if (_sendError != null)
@@ -642,7 +730,7 @@ class _TransferPageState extends State<TransferPage> {
             ),
           ),
         if (_devicesError != null)
-          _firstLoadErrorRow(
+          _refreshErrorRow(
             text: _devicesError!,
             textKey: const Key('transfer-devices-error'),
             retryKey: const Key('transfer-devices-retry'),
@@ -666,7 +754,7 @@ class _TransferPageState extends State<TransferPage> {
                         _groupSection('已完成', groups.completed),
                       ],
                       if (_tasksError != null)
-                        _firstLoadErrorRow(
+                        _refreshErrorRow(
                           text: _tasksError!,
                           textKey: const Key('transfer-tasks-error'),
                           retryKey: const Key('transfer-tasks-retry'),

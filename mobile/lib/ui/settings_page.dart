@@ -5,6 +5,7 @@ import '../app.dart';
 import '../core/lan_http.dart';
 import '../push/fanout.dart';
 import '../settings/risk_copy.dart';
+import '../settings/theme.dart';
 
 class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key, required this.book, required this.http});
@@ -34,10 +35,20 @@ class SettingsPage extends StatelessWidget {
         ),
         ListTile(
           title: const Text('外观'),
-          subtitle: Text(theme.mode == ThemeMode.dark ? '深色' : '浅色'),
-          trailing: Switch(
-            value: theme.mode == ThemeMode.dark,
-            onChanged: (dark) => theme.onChanged(dark ? ThemeMode.dark : ThemeMode.light),
+          subtitle: Text(themeModeDisplayName(theme.mode)),
+          trailing: SegmentedButton<ThemeMode>(
+            key: const Key('theme-mode-segmented'),
+            segments: const [
+              ButtonSegment(value: ThemeMode.system, label: Text('系统')),
+              ButtonSegment(value: ThemeMode.light, label: Text('浅色')),
+              ButtonSegment(value: ThemeMode.dark, label: Text('深色')),
+            ],
+            selected: {theme.mode},
+            onSelectionChanged: (selection) {
+              if (selection.isNotEmpty) {
+                theme.onChanged(selection.first);
+              }
+            },
           ),
         ),
         ListTile(

@@ -105,6 +105,15 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// 当前生命周期快照；非 resumed 暂停徽章轮询（对齐 web visibilitychange 语义）。
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
 
+  /// lastLocation 防抖保存 Timer：panel/project/worktree/session 变化即时调度，
+  /// 500ms 内合并成一次写盘（对齐 web 每次变化 replaceState 的即时持久化语义）；
+  /// pop / 退后台时强制 flush，保证进程被杀后也能恢复。
+  Timer? _lastLocationSaveTimer;
+
+  /// 壳层连接态：由「最近一次 worktrees/projects 请求成败」驱动；
+  /// null = 尚无成败记录（状态行不显示连接药丸，对齐 web 初始 null）。
+  WorkbenchConnectionState? _connection;
+
   /// experimentalFeatures 拉取失败标记；Drawer 打开时据此静默重试一次。
   bool _featuresLoadFailed = false;
 
@@ -126,6 +135,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   void dispose() {
     _attentionPollTimer?.cancel();
     _attentionPollTimer = null;
+    _lastLocationSaveTimer?.cancel();
+    _lastLocationSaveTimer = null;
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -148,11 +159,23 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   }
 
   /// Business Logic: 手机退后台后半开连接与轮询都应停下，回前台立即恢复，
-  /// 让「待处理」未读徽章与网页版保持同粒度的新鲜度。
-  /// Code Logic: 记录生命周期快照并重新同步轮询 Timer。
+  /// 让「待处理」未读徽章与网页版保持同粒度的新鲜度；进程被杀前要把工作位置
+  /// 落盘（对齐 web 回前台 focus 立即强刷 + 位置即时持久化）。
+  /// Code Logic: resumed 边沿（此前非 resumed）先 unawaited 强刷一次未读徽章
+  /// （停在待处理面板时维持暂停逻辑，页面自身轮询负责回写）；paused 时强制
+  /// flush lastLocation；最后统一重同步轮询 Timer。
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    final wasResumed = _lifecycleState == AppLifecycleState.resumed;
     _lifecycleState = state;
+    if (state == AppLifecycleState.resumed && !wasResumed) {
+      if (_panel != WorkbenchPanel.attention) {
+        unawaited(_refreshAttentionUnread());
+      }
+    }
+    if (state == AppLifecycleState.paused) {
+      unawaited(_flushSaveLastLocation());
+    }
     _syncAttentionPoll();
   }
 
@@ -221,7 +244,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// Business Logic: 切面板不再整页换 widget——首次激活的面板进入常驻集合，
   /// 隐藏面板保留 State（Files 草稿、终端 xterm/会话流、传输进度不被销毁），
   /// 对齐 web /mobile files/transfer/terminal 首次激活后 hidden 常驻的策略。
-  /// Code Logic: 记录 visited + 处理终端全屏标志的暂存/恢复 + 同步徽章轮询；
+  /// Code Logic: 记录 visited + 处理终端全屏标志的暂存/恢复 + 同步徽章轮询 +
+  /// 防抖持久化 lastLocation（panel 也是工作位置的一部分）；
   /// 目标与当前相同则只补 visited，不触发多余副作用。必须在 setState 内调用。
   void _gotoPanel(WorkbenchPanel next) {
     _visitedPanels.add(next);
@@ -238,6 +262,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     }
     _panel = next;
     _syncAttentionPoll();
+    _scheduleSaveLastLocation();
   }
 
   /// Business Logic: 进入工作台时 Drawer「待处理」要显示未读数，且数字必须与列表一致。
@@ -254,8 +279,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     } catch (_) {}
   }
 
-  /// Business Logic: 离开工作台回地址簿后，再次进入同一 PC 应恢复上次的项目/面板/worktree/session。
-  /// Code Logic: 弹出路由时把当前工作位置写入该 server 的 lastLocation 并持久化；未打开项目则不覆盖。
+  /// Business Logic: 离开工作台回地址簿后，再次进入同一 PC 应恢复上次的项目/面板/worktree/session；
+  /// panel/project/worktree/session 任一变化时也要即时持久化（对齐 web 每次变化
+  /// replaceState 的语义），进程被杀后才能恢复到最后位置。
+  /// Code Logic: 弹出路由/paused 时把当前工作位置写入该 server 的 lastLocation 并持久化；
+  /// 未打开项目则不覆盖。
   Future<void> _saveLastLocation() async {
     final project = _project;
     if (project == null) {
@@ -272,18 +300,44 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     );
   }
 
-  /// Business Logic: 再次进入该 PC 工作台时应尽量回到上次的工作位置。
+  /// Business Logic: panel/project/worktree/session 高频连续变化时不必每次都写盘，
+  /// 但也不能丢更新——500ms 防抖合并，最后状态必然被写入。
+  /// Code Logic: 重置防抖 Timer，到期后异步执行 _saveLastLocation。
+  void _scheduleSaveLastLocation() {
+    _lastLocationSaveTimer?.cancel();
+    _lastLocationSaveTimer = Timer(const Duration(milliseconds: 500), () {
+      unawaited(_saveLastLocation());
+    });
+  }
+
+  /// Business Logic: pop / 退后台这类「可能不再有机会写盘」的时点必须绕过防抖
+  /// 立即落盘（对齐 web 进程被杀后可恢复的要求）。
+  /// Code Logic: 取消挂起的 Timer 并同步保存当前快照。
+  Future<void> _flushSaveLastLocation() async {
+    _lastLocationSaveTimer?.cancel();
+    _lastLocationSaveTimer = null;
+    await _saveLastLocation();
+  }
+
+  /// Business Logic: 再次进入该 PC 工作台时应尽量回到上次的工作位置；
+  /// 这里的 projects 请求成败同样驱动壳层连接态（对齐 web「最近一次
+  /// worktrees/projects 请求成败」口径）。
   /// Code Logic: 取最近项目列表后用纯函数回落解析（项目不在列表/无记录则保持现状）；
-  /// worktree 用 resumeWorktreeId 在新鲜列表里校验（无效回落主树）；session 由 TerminalPage 自行回落。
+  /// worktree 用 resumeWorktreeId 在新鲜列表里校验（无效回落主树）；session 由
+  /// TerminalPage 自行回落。
   Future<void> _restoreLastLocation() async {
     final location = _server.lastLocation;
     try {
       final projects = await ProjectsClient(widget.http, _server.baseUrl).listRecent();
+      if (!mounted) {
+        return;
+      }
+      _noteConnectionSuccess();
       final restore = resolveWorkbenchLocationRestore(
         location: location,
         recentProjectIds: projects.map((p) => p.id).toSet(),
       );
-      if (restore == null || !mounted) {
+      if (restore == null) {
         return;
       }
       final project = projects.firstWhere((p) => p.id == restore.projectId);
@@ -298,15 +352,23 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
           const SnackBar(content: Text('已恢复上次的工作位置')),
         );
       }
-    } catch (_) {}
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _noteConnectionFailure(error);
+    }
   }
 
   /// Business Logic: 终端/文件/Git 与 worktrees 页都要看运行期 Git 状态
-  /// （状态点/badge/可推送），列表统一带 includeGitStatus 拉取。
+  /// （状态点/badge/可推送），列表统一带 includeGitStatus 拉取。请求成败同时
+  /// 驱动壳层连接态：失败进入离线态（保留缓存提示），失败后的下一次成功视为
+  /// 恢复边沿并对当前项目重跑拉取（对齐 web 断线恢复自动刷新权威数据）。
   ///
   /// Code Logic: 进入即自增 _worktreesLoadSeq 并捕获局部快照；每次 await 之后、
   /// 写 _worktrees/_worktreeId（setState）之前校验自己仍是最新一次请求且页面仍在，
   /// 否则直接丢弃——快速连点两个 worktree chip 时旧响应晚到不得覆盖新选中。
+  /// 成功/失败分别上报连接态（丢弃的旧响应不上报）。
   Future<void> _loadWorktrees(
     ProjectSummary project, {
     required bool projectChanged,
@@ -319,6 +381,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       if (seq != _worktreesLoadSeq || !mounted) {
         return;
       }
+      _noteConnectionSuccess();
       final trees = asObjectList(body, wrapKey: 'worktrees');
       setState(() {
         _worktrees = trees;
@@ -334,7 +397,44 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
                 projectChanged: projectChanged,
               );
       });
-    } catch (_) {}
+      _scheduleSaveLastLocation();
+    } catch (error) {
+      if (seq != _worktreesLoadSeq || !mounted) {
+        return;
+      }
+      _noteConnectionFailure(error);
+    }
+  }
+
+  /// Business Logic: 壳层用「最近一次 worktrees/projects 请求成败」维护简易连接态；
+  /// 从离线恢复在线的边沿要对当前项目重拉权威 worktrees（对齐 web
+  /// shouldRefreshMobilePanelOnReconnect 的自动刷新；终端会话重连由终端页自理）。
+  /// Code Logic: 记录 online（含成功时间）；prev 非空且非 online 时视为恢复边沿，
+  /// 触发一次当前项目的 _loadWorktrees（该请求成功后 prev 已是 online，不会递归）。
+  void _noteConnectionSuccess() {
+    final prev = _connection;
+    final next = WorkbenchConnectionState.online(lastSucceededAt: DateTime.now());
+    final recovered = shouldRefreshWorkbenchOnReconnect(prev, next);
+    setState(() => _connection = next);
+    if (recovered) {
+      final project = _project;
+      if (project != null) {
+        unawaited(_loadWorktrees(project, projectChanged: false));
+      }
+    }
+  }
+
+  /// Business Logic: 请求失败后状态行要显示「离线 + 最近错误」与「缓存于」提示，
+  /// 让用户知道当前数据来自缓存（对齐 web markMobileConnectionOffline）。
+  /// Code Logic: 保留上次成功时间做 cachedSince；错误文案截断避免刷屏。
+  void _noteConnectionFailure(Object error) {
+    final message = error.toString();
+    setState(() {
+      _connection = markWorkbenchConnectionFailure(
+        message.length > 160 ? '${message.substring(0, 160)}…' : message,
+        _connection,
+      );
+    });
   }
 
   /// Business Logic: 删除的若是当前打开的项目，未保存的文件草稿会随上下文一起消失，
@@ -376,10 +476,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// Business Logic: worktrees 页/切换条选中新 worktree 后的统一入口：
   /// dirty 确认 → 写入 worktreeId；goTerminal 决定是否自动进入终端面板
   /// （对齐 web：点击 worktree 卡片切换后自动进入终端）。strip 删除/创建等
-  /// worktree 操作在途时拒绝切换（对齐 web worktreeOperationBusy 互斥），
-  /// 避免与在途刷新/删除竞态。
-  /// Code Logic: strip mutation 非 idle 或删除在途则提示并放弃；dirty guard
-  /// 不过则放弃；同树只更新选中，跨树刷新列表并回落 active。
+  /// worktree 操作全程在途时拒绝切换（对齐 web beginWorktreeOperation 的
+  /// worktreeOperationBusy 互斥——创建全程持锁，不只是删除），避免与在途
+  /// 刷新/删除/创建竞态。
+  /// Code Logic: 创建在途、strip mutation 非 idle 或删除在途则提示并放弃；
+  /// dirty guard 不过则放弃；同树只更新选中，跨树刷新列表并回落 active。
   Future<void> _selectWorktree(
     Map<String, dynamic> tree, {
     bool goTerminal = false,
@@ -388,7 +489,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     if (id.isEmpty) {
       return;
     }
-    if (_removingTree || _stripMutation.actionLocked) {
+    if (_removingTree || _creatingTree || _stripMutation.actionLocked) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('正在处理 worktree 操作，请稍候')),
@@ -408,6 +509,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         _gotoPanel(WorkbenchPanel.terminal);
       }
     });
+    _scheduleSaveLastLocation();
     final project = _project;
     if (project != null) {
       unawaited(_loadWorktrees(project, projectChanged: false, resumeWorktreeId: id));
@@ -445,7 +547,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('移除 worktree'),
-        content: Text('确定移除 worktree「$name」吗？未推送的提交可能丢失。'),
+        content: Text(worktreeStripRemoveConfirmText(name)),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
           FilledButton(
@@ -623,13 +725,35 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     return null;
   }
 
+  /// Business Logic: 壳层状态行的 worktree 药丸要显示权威列表里的显示名
+  /// （name/branch 兜底口径与切换条一致）；列表尚未拉到时回落 worktreeId，
+  /// 二者皆缺则交由壳层渲染「worktree」占位（对齐 web status.worktree）。
+  /// Code Logic: 纯读——从 _currentWorktreeInfo 取 worktreeDisplayName。
+  String? _statusWorktreeLabel() {
+    final info = _currentWorktreeInfo;
+    if (info != null) {
+      final name = worktreeDisplayName(info);
+      if (name.isNotEmpty) {
+        return name;
+      }
+    }
+    return _worktreeId;
+  }
+
+  /// Business Logic: 打开项目进入工作台。返回项目列表不再清空上下文后，项目列表
+  /// 点「同一项目」要直接回到原 worktree/session（不重拉、不走 dirty 确认——
+  /// 上下文没变，对齐 web shouldSkipMobileProjectReload 的同项目早退）；点不同项目
+  /// 才走完整切换流程（dirty 确认、清旧项目上下文）。attention/automation 聚焦
+  /// 同项目的指定 session 时不受早退影响，仍要精确切换。
+  /// Code Logic: 同项目且未显式指定 worktree/session → 只切目标面板；否则沿用
+  /// 既有流程：项目变化时清 worktree/常驻面板/mutation 锁，再拉权威列表。
   void _openProject(
     ProjectSummary project, {
     WorkbenchPanel panel = WorkbenchPanel.terminal,
     String? sessionId,
     String? resumeWorktreeId,
   }) {
-    final projectChanged = _project?.id != project.id;
+    final sameProject = _project?.id == project.id;
     // 恢复/跳转目标面板若被内测开关关闭，则回落到可用面板。
     final gated = resolvePanelForFeatures(
       panel: panel,
@@ -637,6 +761,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       automationEnabled: _automationEnabled,
       browserEnabled: _browserEnabled,
     );
+    if (sameProject && sessionId == null && resumeWorktreeId == null) {
+      setState(() => _gotoPanel(gated));
+      return;
+    }
+    final projectChanged = !sameProject;
     setState(() {
       _project = project;
       _sessionId = sessionId;
@@ -652,6 +781,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       }
       _gotoPanel(gated);
     });
+    _scheduleSaveLastLocation();
     _loadWorktrees(
       project,
       projectChanged: projectChanged,
@@ -714,6 +844,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
           onOpen: _openProject,
           onProjectRemoved: _onProjectRemoved,
           confirmRemove: _confirmProjectRemove,
+          activeProjectId: _project?.id,
         );
       case WorkbenchPanel.attention:
         return AttentionPage(
@@ -919,10 +1050,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         ? _server.name
         : (_server.deviceName ?? _server.baseUrl);
     return PopScope(
-      // 离开工作台回地址簿时记录工作位置，供下次进入恢复。
+      // 离开工作台回地址簿时强制落盘工作位置（绕过防抖），供下次进入恢复。
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) {
-          unawaited(_saveLastLocation());
+          unawaited(_flushSaveLastLocation());
         }
       },
       child: WorkbenchShell(
@@ -934,20 +1065,17 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         automationEnabled: _automationEnabled,
         browserEnabled: _browserEnabled,
         hideWorktreeStrip: _terminalFullscreen,
+        // 终端全屏对齐 web fixed overlay：盖住整个 shell chrome（AppBar + 状态行）。
+        hideAppBar: _terminalFullscreen,
+        connection: _connection,
+        worktreeLabel: _statusWorktreeLabel(),
+        sessionLabel: _sessionId,
         onSelect: _select,
         onDrawerOpened: _handleDrawerOpened,
         onBackToProjects: () {
-          setState(() {
-            _gotoPanel(WorkbenchPanel.projects);
-            _project = null;
-            _sessionId = null;
-            _worktreeId = clearWorktreeOnLeaveProject();
-            _worktrees = [];
-            _stripMutation.reset();
-            _stripMutationError = null;
-            // 退出项目上下文：项目级常驻面板整体失效并卸载。
-            _visitedPanels.removeAll(kProjectBoundPanels);
-          });
+          // 对齐 web handleBackToProjects：只切面板，不清项目/worktree/session 上下文；
+          // 项目列表点同一项目直接秒回原工作位置（见 _openProject 同项目早退）。
+          setState(() => _gotoPanel(WorkbenchPanel.projects));
         },
         worktreeStrip: _project != null && shouldShowWorktreeStrip(_panel)
             ? WorktreeStrip(

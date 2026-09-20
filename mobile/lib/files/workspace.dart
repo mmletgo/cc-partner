@@ -105,6 +105,35 @@ String? fileMetadataText(Map<String, dynamic> opened) {
   return parts.join(' · ');
 }
 
+/// Business Logic: 保存文本的乐观锁基线来自 open 响应 `text.baseHash`（后端
+/// WorkbenchTextContent 的 serde camelCase 字段）；旧注入/旧网关可能仍给 `hash`，
+/// 读错字段会导致保存恒带空基线而必然 409。
+/// Code Logic: 优先读 `baseHash`，兼容回退 `hash`；缺省或空串返回空字符串。
+String fileTextBaseHash(Map<String, dynamic> text) {
+  final baseHash = text['baseHash'];
+  if (baseHash is String && baseHash.isNotEmpty) {
+    return baseHash;
+  }
+  final hash = text['hash'];
+  if (hash is String && hash.isNotEmpty) {
+    return hash;
+  }
+  return '';
+}
+
+/// Business Logic: CSV 只读预览的表头字段在后端 DTO（WorkbenchCsvPreview）是
+/// `columns`；读错成不存在字段会让表头恒为占位列。
+/// Code Logic: 优先 `columns`，兼容回退旧字段 `headers`，都缺省给 `['col']` 占位。
+List<String> csvPreviewColumns(Map<String, dynamic> csv) {
+  for (final key in const ['columns', 'headers']) {
+    final value = csv[key];
+    if (value is List && value.isNotEmpty) {
+      return [for (final item in value) '$item'];
+    }
+  }
+  return const ['col'];
+}
+
 /// Business Logic: open 响应的 notice（如哈希不匹配、权限受限）必须上屏提示。
 /// Code Logic: 宽容读取 notice 字符串，空串视为无提示。
 String? openFileNotice(Map<String, dynamic> opened) {

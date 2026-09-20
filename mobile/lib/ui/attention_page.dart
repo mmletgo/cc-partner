@@ -50,6 +50,9 @@ class _AttentionPageState extends State<AttentionPage> {
   String? _error;
   bool _loading = true;
 
+  /// 后端缺 attention 能力的专用态：显示专用横幅并抑制 loading/error/empty。
+  bool _unsupported = false;
+
   /// 本地日过滤：默认只显示今天条目。
   bool _showEarlier = false;
 
@@ -146,6 +149,7 @@ class _AttentionPageState extends State<AttentionPage> {
         _items = items;
         _now = DateTime.now();
         _stale = false;
+        _unsupported = false;
         _lastSucceededAt = _now.toIso8601String();
         _loading = false;
       });
@@ -154,7 +158,15 @@ class _AttentionPageState extends State<AttentionPage> {
       if (!mounted || seq != _refreshSeq) {
         return;
       }
-      if (_items.isEmpty) {
+      if (error is AttentionUnsupportedError) {
+        // 后端缺 attention.v1：专用态，抑制整屏错误与空态（对齐 web unsupported）。
+        setState(() {
+          _unsupported = true;
+          _error = null;
+          _loading = false;
+          _stale = false;
+        });
+      } else if (_items.isEmpty) {
         setState(() {
           _error = error.toString();
           _loading = false;
@@ -224,10 +236,11 @@ class _AttentionPageState extends State<AttentionPage> {
     }
   }
 
-  /// Business Logic: 点击条目应直达权威界面，且已读状态随之落库（失败不阻断导航）；
-  /// 跳自动化面板时携带 taskId/outboxId 供聚焦。
-  /// Code Logic: 未读先 markRead（best-effort），再按 navigateAttention 语义匹配项目导航；
-  /// 项目已不在最近列表时 SnackBar 提示而不是静默。
+  /// Business Logic: 点击条目应直达权威界面，且已读状态随之落库（失败提示但不
+  /// 阻断导航）；跳自动化面板时携带 taskId/outboxId 供聚焦。
+  /// Code Logic: 未读先 markRead，失败 SnackBar 提示后继续导航（对齐 web markError
+  /// 横幅不拦跳转），再按 navigateAttention 语义匹配项目导航；项目已不在最近列表
+  /// 时 SnackBar 提示而不是静默。
   Future<void> _open(AttentionItem item) async {
     if (item.isUnread) {
       try {
@@ -235,8 +248,9 @@ class _AttentionPageState extends State<AttentionPage> {
         if (mounted) {
           _applyItems(items);
         }
-      } catch (_) {
-        // 标记失败不阻断导航。
+      } catch (error) {
+        // 标记失败不阻断导航，但要明确提示（不再静默吞掉）。
+        _showSnack('标记失败：$error');
       }
     }
     final nav = navigateAttention(item);
@@ -365,6 +379,29 @@ class _AttentionPageState extends State<AttentionPage> {
       );
     }
     if (_items.isEmpty) {
+      // 后端缺 attention 能力：专用横幅 + 重新加载入口，抑制空态文案。
+      if (_unsupported) {
+        return RefreshIndicator(
+          onRefresh: _reload,
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            children: [
+              const SizedBox(height: 24),
+              _unsupportedBanner(),
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Center(
+                  child: TextButton(
+                    key: const Key('attention-unsupported-reload'),
+                    onPressed: _reload,
+                    child: const Text('重新加载'),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      }
       return RefreshIndicator(
         onRefresh: _reload,
         child: ListView(
@@ -378,7 +415,6 @@ class _AttentionPageState extends State<AttentionPage> {
     }
     final partition = partitionAttentionItemsByLocalDay(_items, _now);
     final visible = _showEarlier ? _items : partition.today;
-    final unreadTotal = countUnreadAttentionItems(_items);
     final groups = groupAttentionItems(visible);
     return RefreshIndicator(
       onRefresh: _reload,
@@ -386,6 +422,7 @@ class _AttentionPageState extends State<AttentionPage> {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.symmetric(vertical: 4),
         children: [
+          if (_unsupported) _unsupportedBanner(),
           if (_stale) _staleBanner(),
           // 头部操作行：刷新 + 全部已读（对齐 web 面板头部 reload / markAllRead）。
           Padding(
@@ -398,9 +435,10 @@ class _AttentionPageState extends State<AttentionPage> {
                   onPressed: _refreshing ? null : _reload,
                   child: Text(_refreshing ? '刷新中…' : '刷新'),
                 ),
+                // 禁用口径对齐 web：刷新/标记进行中或有单条标记在途时都不可点。
                 TextButton(
                   key: const Key('attention-mark-all-read'),
-                  onPressed: unreadTotal == 0 || _markAllBusy ? null : _markAllRead,
+                  onPressed: _markAllReadEnabled ? _markAllRead : null,
                   child: Text(_markAllBusy ? '标记中…' : '全部已读'),
                 ),
               ],
@@ -417,9 +455,10 @@ class _AttentionPageState extends State<AttentionPage> {
               onTap: () => setState(() => _showEarlier = !_showEarlier),
             ),
           if (visible.isEmpty)
+            // 对齐 web zh dayFilter.todayEmpty 文案（无句号）。
             const Padding(
               padding: EdgeInsets.all(24),
-              child: Center(child: Text('今天没有待处理事项。')),
+              child: Center(child: Text('今天没有待处理事项')),
             ),
           for (final group in groups) ...[
             Padding(
@@ -433,6 +472,41 @@ class _AttentionPageState extends State<AttentionPage> {
             for (final item in group.items) _itemCard(context, item),
           ],
         ],
+      ),
+    );
+  }
+
+  /// 「全部已读」可用性：无未读、刷新中、全部标记进行中或存在单条标记在途时禁用
+  /// （对齐 web MobileAttentionPanel disabled = loading||refreshing||pendingReadIds
+  /// .size>0||unread===0）。
+  bool get _markAllReadEnabled =>
+      !_markAllBusy &&
+      !_refreshing &&
+      _pendingIds.isEmpty &&
+      countUnreadAttentionItems(_items) > 0;
+
+  /// Business Logic: 后端缺 attention.v1 时用户必须知道 Inbox 为何不可用，而不是
+  /// 看到普通报错或空白（对齐 web attention:unsupported 横幅）。
+  /// Code Logic: errorContainer 语义色横幅 + liveRegion，固定中文文案。
+  Widget _unsupportedBanner() {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+      child: Material(
+        key: const Key('attention-unsupported-banner'),
+        color: theme.colorScheme.errorContainer,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Semantics(
+            liveRegion: true,
+            child: Text(
+              attentionUnsupportedMessage,
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: theme.colorScheme.onErrorContainer),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -499,7 +573,8 @@ class _AttentionPageState extends State<AttentionPage> {
                   child: Text(
                     [
                       if (category != null) category,
-                      item.sourceKind,
+                      // 来源动作用可见中文文案，未知 sourceKind 回退原值。
+                      attentionSourceKindActionLabel(item.sourceKind),
                     ].join(' · '),
                     style: theme.textTheme.labelSmall,
                     maxLines: 1,

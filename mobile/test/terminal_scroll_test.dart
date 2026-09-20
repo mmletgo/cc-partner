@@ -118,6 +118,98 @@ void main() {
     });
   });
 
+  group('sgrWheelCellFromTouch', () {
+    test('触点像素按视口均分字符格换算 1-based col/row', () {
+      // 800x600 视口、80x24 格 → cell 10x25。
+      final cell = sgrWheelCellFromTouch(
+        localDx: 35,
+        localDy: 57,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        cols: 80,
+        rows: 24,
+      );
+      expect(cell.col, 4); // floor(35/10)+1
+      expect(cell.row, 3); // floor(57/25)+1
+    });
+
+    test('clamp 到 1..cols / 1..rows，越界触点不越格', () {
+      final low = sgrWheelCellFromTouch(
+        localDx: -5,
+        localDy: -1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        cols: 80,
+        rows: 24,
+      );
+      expect(low.col, 1);
+      expect(low.row, 1);
+
+      final high = sgrWheelCellFromTouch(
+        localDx: 799,
+        localDy: 599,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        cols: 80,
+        rows: 24,
+      );
+      expect(high.col, 80);
+      expect(high.row, 24);
+    });
+
+    test('非法视口/尺寸/触点回退 1,1（web 失败回落同语义）', () {
+      const degenerate = TerminalWheelCell(col: 1, row: 1);
+      expect(
+        sgrWheelCellFromTouch(
+          localDx: 10,
+          localDy: 10,
+          viewportWidth: 0,
+          viewportHeight: 0,
+          cols: 80,
+          rows: 24,
+        ),
+        degenerate,
+      );
+      expect(
+        sgrWheelCellFromTouch(
+          localDx: 10,
+          localDy: 10,
+          viewportWidth: double.negativeInfinity,
+          viewportHeight: double.nan,
+          cols: 80,
+          rows: 24,
+        ),
+        degenerate,
+      );
+      expect(
+        sgrWheelCellFromTouch(
+          localDx: double.nan,
+          localDy: 10,
+          viewportWidth: 800,
+          viewportHeight: 600,
+          cols: 0,
+          rows: 24,
+        ),
+        degenerate,
+      );
+    });
+
+    test('与 encodeSgrWheelReports 串联：触点坐标进入 SGR 帧', () {
+      final cell = sgrWheelCellFromTouch(
+        localDx: 35,
+        localDy: 57,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        cols: 80,
+        rows: 24,
+      );
+      expect(
+        encodeSgrWheelReports(-1, col: cell.col, row: cell.row),
+        '\x1b[<64;4;3M',
+      );
+    });
+  });
+
   group('accumulateHydrationScrollIntent', () {
     test('只累计向上意图并 clamp 到 [-rows, -1]', () {
       expect(accumulateHydrationScrollIntent(0, 3, 24), 0);

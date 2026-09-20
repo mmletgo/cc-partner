@@ -122,8 +122,10 @@ enum _PickerMode { lanDevices, browse }
 ///
 /// Business Logic: 手机没有系统目录选择框，用户需要逐级浏览主机或局域网对端
 /// 目录并挑一个目录打开为 Workbench 项目。
-/// Code Logic: lan=true 先列设备（主机置顶）再走远端接口逐级浏览；
-/// lan=false 直接从本机根目录起步浏览；busy 期间禁止关闭与重复提交。
+/// Code Logic: lan=true 先列设备（去重后仅在线非自身，影子设备带「经 X 中转」
+/// 徽标）再走远端接口逐级浏览；lan=false 直接从本机根目录起步浏览；路径切换即
+/// 预检 fs/remote info，「打开此目录」仅在可读目录且路径一致时可用；busy 期间
+/// 禁止关闭与重复提交；LAN 模式「新建文件夹」按对端 capabilities 门控。
 class ProjectDirPicker extends StatefulWidget {
   const ProjectDirPicker({
     super.key,
@@ -145,12 +147,22 @@ class _ProjectDirPickerState extends State<ProjectDirPicker> {
   List<Map<String, dynamic>> _devices = const [];
   bool _devicesLoading = false;
   String? _devicesError;
+
+  /// 当前选中的局域网设备条目（含 capabilities），供新建文件夹能力门控读取。
+  Map<String, dynamic>? _selectedDevice;
   String? _deviceId;
   String? _currentPath;
   List<ProjectDirEntry> _entries = const [];
   bool _entriesLoading = false;
   String? _browseError;
   bool _openBusy = false;
+
+  /// 当前路径的 info 预检结果（打开按钮启用依据，对齐 web pathInfo）。
+  ProjectPathInfo? _pathInfo;
+
+  /// info 对应的路径：响应回来时与 _currentPath 不一致则丢弃（防过期覆盖）。
+  String? _pathInfoPath;
+  bool _pathInfoLoading = false;
 
   @override
   void initState() {
@@ -165,14 +177,64 @@ class _ProjectDirPickerState extends State<ProjectDirPicker> {
 
   bool get _busy => _openBusy;
 
-  /// 拉取局域网设备列表；主机（isSelf）已被置顶并带「· 主机」标签。
+  /// Business Logic: 打开前必须确认选中路径仍是可读目录，且与 info 预检结果一致，
+  /// 避免 stale 请求打开旧路径或不可读文件（对齐 web canOpenHost/RemoteProjectSelection）。
+  /// Code Logic: 路径存在、info 已加载且 path/kind/readable 全部匹配、无预检或打开在途。
+  bool get _canOpenSelection {
+    final path = _currentPath;
+    final info = _pathInfo;
+    return path != null &&
+        info != null &&
+        _pathInfoPath == path &&
+        info.path == path &&
+        info.kind == 'dir' &&
+        info.readable &&
+        !_pathInfoLoading &&
+        !_busy;
+  }
+
+  /// Business Logic: 路径切换后自动预检新路径，用户无需额外操作即可点「打开此目录」。
+  /// Code Logic: 拉 fs/info（本机）或 remote/info（局域网）；响应路径与当前路径不一致
+  /// 则丢弃；失败按不可读处理（info 置空 → 打开按钮禁用，fail-closed）。
+  Future<void> _loadPathInfo(String path) async {
+    setState(() {
+      _pathInfo = null;
+      _pathInfoPath = path;
+      _pathInfoLoading = true;
+    });
+    try {
+      final info = widget.lan
+          ? await widget.client.remotePathInfo(deviceId: _deviceId ?? '', path: path)
+          : await widget.client.localPathInfo(path);
+      if (!mounted || _currentPath != path) {
+        return;
+      }
+      setState(() {
+        _pathInfo = info;
+        _pathInfoPath = path;
+        _pathInfoLoading = false;
+      });
+    } catch (_) {
+      if (!mounted || _currentPath != path) {
+        return;
+      }
+      setState(() {
+        _pathInfo = null;
+        _pathInfoPath = path;
+        _pathInfoLoading = false;
+      });
+    }
+  }
+
+  /// 拉取局域网设备列表：去重后仅保留在线非自身设备（对齐 web filterOnlineLanDevices）；
+  /// 主机（isSelf）与离线设备不可选，影子设备带「经 X 中转」徽标。
   Future<void> _loadDevices() async {
     setState(() {
       _devicesLoading = true;
       _devicesError = null;
     });
     try {
-      final devices = rankTransferTargets(await widget.transferApi.listDevices());
+      final devices = filterOnlineLanDevices(await widget.transferApi.listDevices());
       if (!mounted) {
         return;
       }
@@ -192,11 +254,13 @@ class _ProjectDirPickerState extends State<ProjectDirPicker> {
   }
 
   /// 选定设备后切到浏览态并从该设备根目录起步；未选设备不能进入浏览。
+  /// 设备条目整体保留，供「新建文件夹」能力门控读取 capabilities。
   Future<void> _selectDevice(Map<String, dynamic> device) async {
     if (_busy) {
       return;
     }
     setState(() {
+      _selectedDevice = device;
       _deviceId = transferDeviceId(device);
       _mode = _PickerMode.browse;
     });
@@ -223,6 +287,8 @@ class _ProjectDirPickerState extends State<ProjectDirPicker> {
       });
       if (_currentPath != null) {
         await _loadEntries();
+        // 根目录确定后立即预检，保证「打开此目录」尽早可用。
+        await _loadPathInfo(_currentPath!);
       } else {
         setState(() => _entriesLoading = false);
       }
@@ -237,13 +303,14 @@ class _ProjectDirPickerState extends State<ProjectDirPicker> {
     }
   }
 
-  /// 进入某个目录（含返回上级 / 新建文件夹后落入新目录）。
+  /// 进入某个目录（含返回上级 / 新建文件夹后落入新目录），并预检新路径。
   Future<void> _browse(String path) async {
     if (_busy) {
       return;
     }
     setState(() => _currentPath = path);
     await _loadEntries();
+    await _loadPathInfo(path);
   }
 
   /// 列出当前路径的条目并排序展示。
@@ -302,9 +369,10 @@ class _ProjectDirPickerState extends State<ProjectDirPicker> {
   }
 
   /// 把当前目录打开为项目；成功后 pop 回项目页并带回 ProjectSummary。
+  /// 打开前以 info 预检结果做门控（可读目录 + 路径一致），fail-closed。
   Future<void> _open() async {
     final path = _currentPath;
-    if (path == null || _busy) {
+    if (path == null || !_canOpenSelection) {
       return;
     }
     setState(() {
@@ -405,11 +473,34 @@ class _ProjectDirPickerState extends State<ProjectDirPicker> {
       itemCount: _devices.length,
       itemBuilder: (context, index) {
         final device = _devices[index];
+        final viaRelay = isRelayShadowDevice(device);
+        // 中转来源名兜底链对齐 web：viaDeviceName → viaDeviceId → 设备名。
+        final viaName = (device['viaDeviceName'] as String?) ??
+            (device['viaDeviceId'] as String?) ??
+            transferDeviceLabel(device);
+        final address = device['address'] as String? ?? '';
         return ListTile(
           key: Key('picker-device-${transferDeviceId(device)}'),
           leading: const Icon(Icons.computer),
           title: Text(transferDeviceLabel(device)),
-          onTap: () => _selectDevice(device),
+          subtitle: address.isEmpty ? null : Text(address, overflow: TextOverflow.ellipsis),
+          trailing: viaRelay
+              ? Container(
+                  key: Key('picker-device-via-${transferDeviceId(device)}'),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.secondaryContainer,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    '经 $viaName 中转',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSecondaryContainer,
+                        ),
+                  ),
+                )
+              : null,
+          onTap: _busy ? null : () => _selectDevice(device),
         );
       },
     );
@@ -490,20 +581,27 @@ class _ProjectDirPickerState extends State<ProjectDirPicker> {
   }
 
   Widget _buildFooter() {
+    // 新建文件夹能力门控（对齐 web canCreateFolder）：本机恒可用；局域网要求
+    // 所选设备 capabilities 含 workbench.fs.create-dir.v1，缺能力直接隐藏、不回落。
+    final canCreateFolder =
+        widget.lan ? deviceSupportsBrowseMkdir(_selectedDevice) : true;
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
         child: Row(
           children: [
-            OutlinedButton(
-              key: const Key('picker-create'),
-              onPressed: (_busy || _currentPath == null) ? null : _showCreateDialog,
-              child: const Text('新建文件夹'),
-            ),
+            if (canCreateFolder)
+              OutlinedButton(
+                key: const Key('picker-create'),
+                onPressed:
+                    (_busy || _currentPath == null) ? null : _showCreateDialog,
+                child: const Text('新建文件夹'),
+              ),
             const Spacer(),
+            // 预检未通过（info 未加载 / 不可读 / 非目录 / 路径不一致）时禁用打开。
             FilledButton(
               key: const Key('picker-open'),
-              onPressed: (_busy || _currentPath == null) ? null : _open,
+              onPressed: _canOpenSelection ? _open : null,
               child: const Text('打开此目录'),
             ),
           ],

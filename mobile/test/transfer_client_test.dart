@@ -240,4 +240,140 @@ void main() {
     final unrelated = TransferTask(id: 'z', direction: 'send', status: 'transferring');
     expect(isTransferRecoveryLocked(failed, [failed, unrelated], {}), isFalse);
   });
+
+  test('phase parses known values and keeps unknown or missing as null', () {
+    final task = TransferTask.fromJson({
+      'id': 't1',
+      'direction': 'send',
+      'status': 'transferring',
+      'phase': 'connecting',
+    });
+    expect(task.phase, 'connecting');
+    // 未知 phase 宽容保留 null，不抛错。
+    final unknown = TransferTask.fromJson({
+      'id': 't2',
+      'direction': 'send',
+      'status': 'transferring',
+      'phase': 'warp-speed',
+    });
+    expect(unknown.phase, isNull);
+    // 缺 phase 的旧后端任务同为 null。
+    final legacy = TransferTask.fromJson({
+      'id': 't3',
+      'direction': 'send',
+      'status': 'failed',
+    });
+    expect(legacy.phase, isNull);
+  });
+
+  test('task JSON parses failure message and top-level error message', () {
+    final task = TransferTask.fromJson({
+      'id': 't1',
+      'direction': 'send',
+      'status': 'failed',
+      'failure': {'code': 'peerGone', 'message': 'peer went offline', 'retryable': true},
+    });
+    expect(task.failureMessage, 'peer went offline');
+    expect(task.errorMessage, isNull);
+    final fallback = TransferTask.fromJson({
+      'id': 't2',
+      'direction': 'send',
+      'status': 'failed',
+      'errorMessage': 'host unreachable',
+    });
+    expect(fallback.failureMessage, isNull);
+    expect(fallback.errorMessage, 'host unreachable');
+  });
+
+  test('active phase keeps a task in the active group and attempt-active', () {
+    // status 已到 completed 但 phase 仍在传输链路 → 视为 active。
+    final inFlight = TransferTask(
+      id: 'a',
+      direction: 'send',
+      status: 'completed',
+      phase: 'transferring',
+    );
+    expect(classifyTransferGroup(inFlight), 'active');
+    expect(isTransferAttemptActive(inFlight), isTrue);
+    // 其余活跃 phase 同样生效。
+    for (final phase in ['queued', 'connecting', 'finalizing']) {
+      expect(
+        classifyTransferGroup(
+          TransferTask(id: 'p', direction: 'send', status: 'completed', phase: phase),
+        ),
+        'active',
+        reason: 'phase $phase should stay active',
+      );
+    }
+    // 终态 phase 不影响原分组。
+    final done = TransferTask(
+      id: 'b',
+      direction: 'send',
+      status: 'completed',
+      phase: 'completed',
+    );
+    expect(classifyTransferGroup(done), 'completed');
+    expect(isTransferAttemptActive(done), isFalse);
+    // 无 phase 的行为保持不变。
+    expect(
+      classifyTransferGroup(TransferTask(id: 'c', direction: 'send', status: 'failed')),
+      'needsAttention',
+    );
+    expect(isTransferAttemptActive(done), isFalse);
+  });
+
+  test('reconciling tasks group into needs-attention regardless of status', () {
+    final groups = groupTransferTasks(
+      [
+        TransferTask(id: 'r', direction: 'send', status: 'completed'),
+        TransferTask(id: 'ok', direction: 'send', status: 'completed'),
+      ],
+      reconcilingIds: {'r'},
+    );
+    expect(groups.needsAttention.map((t) => t.id), ['r']);
+    expect(groups.completed.map((t) => t.id), ['ok']);
+    // 单任务口径同样生效。
+    expect(
+      classifyTransferGroup(
+        TransferTask(id: 'r2', direction: 'send', status: 'transferring'),
+        reconciling: true,
+      ),
+      'needsAttention',
+    );
+  });
+
+  test('peer display text prefers the mobile-inbox label over device name', () {
+    expect(
+      transferPeerDisplayText(
+        TransferTask(id: 't', direction: 'send', status: 'completed', peer: mobileInboxDeviceId),
+      ),
+      '手机',
+    );
+    expect(
+      transferPeerDisplayText(
+        TransferTask(
+          id: 't',
+          direction: 'send',
+          status: 'failed',
+          peer: 'pc-1',
+          peerDeviceName: 'Hans Mac',
+        ),
+      ),
+      'Hans Mac',
+    );
+    expect(
+      transferPeerDisplayText(TransferTask(id: 't', direction: 'send', status: 'failed')),
+      isNull,
+    );
+  });
+
+  test('phase label maps known phases to Chinese copy', () {
+    expect(transferPhaseLabel('queued'), '排队中');
+    expect(transferPhaseLabel('connecting'), '连接中');
+    expect(transferPhaseLabel('transferring'), '传输中');
+    expect(transferPhaseLabel('finalizing'), '收尾中');
+    expect(transferPhaseLabel('completed'), '已完成');
+    expect(transferPhaseLabel(null), isNull);
+    expect(transferPhaseLabel('warp-speed'), isNull);
+  });
 }

@@ -63,6 +63,18 @@ void main() {
             {'path': '/Users/demo', 'label': 'Home'},
           ]),
         );
+      } else if (request.uri.path.endsWith('/fs/info') ||
+          request.uri.path.endsWith('/remote/info')) {
+        final path = payload['path'] as String? ?? '';
+        request.response.write(
+          jsonEncode({
+            'name': path.split('/').where((s) => s.isNotEmpty).lastOrNull ?? '/',
+            'path': path,
+            'kind': 'dir',
+            'readable': true,
+            'isGitRepo': false,
+          }),
+        );
       } else {
         request.response.write('{}');
       }
@@ -120,4 +132,102 @@ void main() {
       'path': '/srv/lan-app',
     });
   });
+
+  test('localPathInfo posts to fs/info and parses the readable dir info', () async {
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = ProjectsClient(http, baseUrl);
+    final info = await client.localPathInfo('/Users/demo/proj-a');
+    expect(captured['/api/mobile/workbench/fs/info'], {'path': '/Users/demo/proj-a'});
+    expect(info.path, '/Users/demo/proj-a');
+    expect(info.kind, 'dir');
+    expect(info.readable, isTrue);
+    expect(info.name, 'proj-a');
+  });
+
+  test('remotePathInfo posts deviceId+path to remote/info', () async {
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = ProjectsClient(http, baseUrl);
+    final info = await client.remotePathInfo(deviceId: 'pc-b', path: '/srv/lan');
+    expect(captured['/api/mobile/workbench/remote/info'], {
+      'deviceId': 'pc-b',
+      'path': '/srv/lan',
+    });
+    expect(info.path, '/srv/lan');
+    expect(info.kind, 'dir');
+    expect(info.readable, isTrue);
+  });
+
+  test('filterOnlineLanDevices drops offline/self and dedupes relay shadows', () {
+    final devices = [
+      // 直连在线 peer：保留。
+      {'id': 'peer-1', 'name': 'Laptop', 'isSelf': false, 'online': true},
+      // 同 id 直连 + 影子并存：只保留直连。
+      {
+        'id': 'peer-1',
+        'name': 'Laptop',
+        'isSelf': false,
+        'online': true,
+        'viaDeviceId': 'nas',
+        'viaDeviceName': 'NAS',
+      },
+      // 离线直连：过滤。
+      {'id': 'peer-2', 'name': 'Down', 'isSelf': false, 'online': false},
+      // 本机：过滤。
+      {'id': 'self-1', 'name': 'Desktop', 'isSelf': true, 'online': true},
+      // 仅影子可见的 peer：在线则保留（新 status 字段口径）。
+      {
+        'id': 'peer-3',
+        'name': 'Remote',
+        'isSelf': false,
+        'status': 'online',
+        'viaDeviceId': 'nas',
+        'viaDeviceName': 'NAS',
+      },
+      // 离线影子：同样过滤（对齐 web filterOnlineLanDevices，不同于桌面置灰口径）。
+      {
+        'id': 'peer-4',
+        'name': 'Ghost',
+        'isSelf': false,
+        'status': 'offline',
+        'viaDeviceId': 'nas',
+      },
+    ];
+    final filtered = filterOnlineLanDevices(devices);
+    expect(filtered.map(transferDeviceIdOf), ['peer-1', 'peer-3']);
+    // 直连排在前、影子在后（与 web dedupeRelayShadowDevices 排序一致）。
+    expect(isRelayShadowDevice(filtered.first), isFalse);
+    expect(isRelayShadowDevice(filtered.last), isTrue);
+  });
+
+  test('transferDeviceStatus tolerates legacy and new payloads', () {
+    // 新字段优先。
+    expect(
+      transferDeviceStatus({'status': 'online', 'online': false}),
+      'online',
+    );
+    // 旧字段推导：online=false → offline。
+    expect(transferDeviceStatus({'online': false}), 'offline');
+    // 双缺省按在线。
+    expect(transferDeviceStatus(<String, dynamic>{}), 'online');
+  });
+
+  test('deviceSupportsBrowseMkdir requires the exact create-dir capability', () {
+    expect(
+      deviceSupportsBrowseMkdir({
+        'capabilities': ['transfer.resume.v1', 'workbench.fs.create-dir.v1'],
+      }),
+      isTrue,
+    );
+    // 缺能力 / 缺字段 / 未选设备一律 false（fail-closed）。
+    expect(deviceSupportsBrowseMkdir({'capabilities': ['transfer.resume.v1']}), isFalse);
+    expect(deviceSupportsBrowseMkdir(<String, dynamic>{}), isFalse);
+    expect(deviceSupportsBrowseMkdir({'capabilities': 'workbench.fs.create-dir.v1'}), isFalse);
+    expect(deviceSupportsBrowseMkdir(null), isFalse);
+  });
 }
+
+/// 从设备条目取 id（测试内 shortcut，与 transfer.client 的 transferDeviceId 同口径）。
+String transferDeviceIdOf(Map<String, dynamic> device) =>
+    device['id'] as String? ?? device['deviceId'] as String? ?? '';

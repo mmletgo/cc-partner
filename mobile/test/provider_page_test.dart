@@ -12,6 +12,8 @@ class _FakeProviderClient extends ProviderClient {
     this.failFirstProbe = true,
     this.cliAvailable,
     this.emptyApps = false,
+    this.appName = 'claude',
+    this.currentProviderId = 'p-a',
   }) : super(LanHttpClient(), 'http://127.0.0.1:1');
 
   final bool failFirstProbe;
@@ -21,6 +23,12 @@ class _FakeProviderClient extends ProviderClient {
 
   /// true 时 summary 的 apps 为空数组（cc-switch 未配置任何 provider）。
   final bool emptyApps;
+
+  /// summary 返回的 app 枚举值（产品名映射用例可换成未知枚举）。
+  final String appName;
+
+  /// summary 返回的当前 provider id；置 null 验证副标题不渲染。
+  final String? currentProviderId;
   int probeCalls = 0;
 
   @override
@@ -39,8 +47,8 @@ class _FakeProviderClient extends ProviderClient {
         'apps': [
           if (!emptyApps)
             {
-              'app': 'claude',
-              'currentProviderId': 'p-a',
+              'app': appName,
+              'currentProviderId': currentProviderId,
               'providers': [
                 {'id': 'p-a', 'name': 'A', 'isCurrent': true},
                 {'id': 'p-b', 'name': 'B', 'isCurrent': false},
@@ -158,5 +166,37 @@ void main() {
       findsNothing,
     );
     expect(find.text('A'), findsOneWidget);
+  });
+
+  testWidgets('app group title shows the product name with a current-provider subtitle',
+      (tester) async {
+    final client = _FakeProviderClient(failFirstProbe: false);
+    await _pumpPage(tester, client);
+    await tester.pumpAndSettle();
+
+    // 分组标题用产品名（对齐 web providerManager:apps.claude = Claude Code），
+    // 不再直接显示原始 app 枚举。
+    expect(find.text('claude'), findsNothing);
+    expect(find.byKey(const Key('provider-app-claude')), findsOneWidget);
+    expect(find.text('Claude Code'), findsOneWidget);
+    // 副标题「当前：X」按 currentProviderId 解析（对齐 web AppSection）。
+    expect(find.byKey(const Key('provider-current-claude')), findsOneWidget);
+    expect(find.text('当前：A'), findsOneWidget);
+  });
+
+  testWidgets('unknown app falls back to the raw enum and missing current hides the subtitle',
+      (tester) async {
+    final client = _FakeProviderClient(
+      failFirstProbe: false,
+      appName: 'someNewApp',
+      currentProviderId: 'p-missing',
+    );
+    await _pumpPage(tester, client);
+    await tester.pumpAndSettle();
+
+    // 未知 app 枚举回退原值；currentProviderId 解析不到条目时副标题不渲染。
+    expect(find.text('someNewApp'), findsOneWidget);
+    expect(find.byKey(const Key('provider-current-someNewApp')), findsNothing);
+    expect(find.textContaining('当前：'), findsNothing);
   });
 }

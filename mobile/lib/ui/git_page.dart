@@ -91,13 +91,18 @@ class _GitPageState extends State<GitPage> {
   bool _commitsLoading = false;
   String? _commitsError;
 
+  /// 提交历史请求代数：选中树切换/刷新后自增，迟到的旧响应按代数丢弃，
+  /// 避免旧 worktree 的提交历史挂到新选中树下（对齐 web MobileGitPanel requestIdRef）。
+  int _commitsGeneration = 0;
+
   /// 用户在 Git 页内点选的 worktree（优先于 shell 传入的 worktreeId）。
   String? _localSelectedId;
 
   @override
   void initState() {
     super.initState();
-    _client = widget.gitClient ?? GitClient(widget.http, widget.book.active!.baseUrl);
+    _client =
+        widget.gitClient ?? GitClient(widget.http, widget.book.active!.baseUrl);
     _reload();
   }
 
@@ -148,7 +153,10 @@ class _GitPageState extends State<GitPage> {
   /// 静默刷新 worktrees（含 Git 状态）+ 提交历史；下拉刷新与动作后复用。
   Future<void> _refresh() async {
     try {
-      final body = await _client.listWorktrees(widget.project.id, includeGitStatus: true);
+      final body = await _client.listWorktrees(
+        widget.project.id,
+        includeGitStatus: true,
+      );
       final mapped = asObjectList(body, wrapKey: 'worktrees');
       if (mapped.isEmpty && body.containsKey('id')) {
         mapped.add(body);
@@ -168,17 +176,23 @@ class _GitPageState extends State<GitPage> {
   }
 
   /// 加载当前选中 worktree 的最近 30 条提交；合并后源 worktree 可能已删除，此时清空历史。
+  ///
+  /// Business Logic: 用户快速切换 worktree 卡时，旧树的提交请求可能晚于新树返回，
+  /// 迟到响应不得覆盖当前选中树的提交历史（对齐 web requestIdRef 代数守卫）。
+  /// Code Logic: 进入即自增请求代数并捕获；await 返回后代数不一致或已卸载则丢弃。
   Future<void> _loadCommits() async {
+    final generation = ++_commitsGeneration;
     final tree = _selectedTree;
     final worktreeId = tree?['id'] as String?;
     if (tree == null || worktreeId == null || worktreeId.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _commits = [];
-          _commitsError = null;
-          _commitsLoading = false;
-        });
+      if (!mounted || generation != _commitsGeneration) {
+        return;
       }
+      setState(() {
+        _commits = [];
+        _commitsError = null;
+        _commitsLoading = false;
+      });
       return;
     }
     if (mounted) {
@@ -188,20 +202,25 @@ class _GitPageState extends State<GitPage> {
       });
     }
     try {
-      final commits = await _client.commits(widget.project.id, worktreeId: worktreeId);
-      if (mounted) {
-        setState(() {
-          _commits = commits;
-          _commitsLoading = false;
-        });
+      final commits = await _client.commits(
+        widget.project.id,
+        worktreeId: worktreeId,
+      );
+      if (!mounted || generation != _commitsGeneration) {
+        return;
       }
+      setState(() {
+        _commits = commits;
+        _commitsLoading = false;
+      });
     } catch (error) {
-      if (mounted) {
-        setState(() {
-          _commitsError = error.toString();
-          _commitsLoading = false;
-        });
+      if (!mounted || generation != _commitsGeneration) {
+        return;
       }
+      setState(() {
+        _commitsError = error.toString();
+        _commitsLoading = false;
+      });
     }
   }
 
@@ -209,7 +228,9 @@ class _GitPageState extends State<GitPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        duration: transient ? kGitSuccessSnackbarDuration : const Duration(seconds: 4),
+        duration: transient
+            ? kGitSuccessSnackbarDuration
+            : const Duration(seconds: 4),
       ),
     );
   }
@@ -314,11 +335,16 @@ class _GitPageState extends State<GitPage> {
       }
       if (envelope.failedHook) {
         _tracker.markIdle();
-        _showHookFailure(envelope.hookFailure ?? const {}, tree['id'] as String? ?? '');
+        _showHookFailure(
+          envelope.hookFailure ?? const {},
+          tree['id'] as String? ?? '',
+        );
         return;
       }
       if (envelope.unknown) {
-        final result = await _reconcile(envelope.clientOperationId ?? operationId);
+        final result = await _reconcile(
+          envelope.clientOperationId ?? operationId,
+        );
         _tracker.settleReconcile(result);
         if (!mounted) {
           return;
@@ -356,15 +382,25 @@ class _GitPageState extends State<GitPage> {
   }
 
   /// pull/push 前的确认框：说明对哪个 worktree 做什么。
-  Future<bool> _confirmAction(String label, Map<String, dynamic> tree, String detail) async {
+  Future<bool> _confirmAction(
+    String label,
+    Map<String, dynamic> tree,
+    String detail,
+  ) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text('确认$label'),
         content: Text(detail),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('确认')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('确认'),
+          ),
         ],
       ),
     );
@@ -374,7 +410,8 @@ class _GitPageState extends State<GitPage> {
   /// Business Logic: 功能 worktree merge 与主工作区 collect-merge 语义不同，
   /// 确认文案必须区分（对齐 web mergeConfirm / mergeCollectConfirm）。
   /// Code Logic: 委托共享 worktreeMergeConfirmText（终端页 / worktrees 页同一口径）。
-  String mergeConfirmText(Map<String, dynamic> tree) => worktreeMergeConfirmText(tree);
+  String mergeConfirmText(Map<String, dynamic> tree) =>
+      worktreeMergeConfirmText(tree);
 
   /// 提交前填写说明；留空则由后端 Claude Code 生成提交信息（对齐 web message=null）。
   Future<void> _commit(Map<String, dynamic> tree) async {
@@ -393,13 +430,15 @@ class _GitPageState extends State<GitPage> {
             TextField(
               controller: controller,
               autofocus: true,
-              decoration:
-                  const InputDecoration(hintText: '留空则由 AI 生成提交信息'),
+              decoration: const InputDecoration(hintText: '留空则由 AI 生成提交信息'),
             ),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
           FilledButton(
             onPressed: () => Navigator.pop(context, controller.text.trim()),
             child: const Text('提交'),
@@ -421,23 +460,26 @@ class _GitPageState extends State<GitPage> {
 
   /// 触发 hook AI 修复；成功清卡片并提示，返回 terminalSessionId 时回调壳层聚焦修复终端
   /// （对齐 web MobileGitPanel：读 repair.terminalSessionId → onFocusRepairSession 刷新并切面板）。
+  ///
+  /// Business Logic: 修复请求在 owning device 启动可见 Claude agent，进行中必须禁用入口
+  /// 防重复触发（对齐 web MobileHookRepairCard busy → runButtonBusy + disabled）。
+  /// Code Logic: busy 复用页级 _busy（联动 _actionDisabled 锁全部动作）；结束后在 finally 解锁。
   Future<void> _repairHook() async {
     final failure = _hookFailure;
-    if (failure == null) {
+    if (failure == null || _busy != null) {
       return;
     }
+    setState(() => _busy = '修复');
     try {
       final result = await _client.repairHookFailure(
         worktreeId: _hookWorktreeId ?? widget.worktreeId ?? '',
         hookFailure: failure,
       );
-      final terminalSessionId = result['terminalSessionId'] as String? ??
+      final terminalSessionId =
+          result['terminalSessionId'] as String? ??
           result['terminal_session_id'] as String?;
       if (mounted) {
-        setState(() {
-          _hookFailure = null;
-          _hookFailureView = null;
-        });
+        _dismissHookFailure();
       }
       if (terminalSessionId != null && terminalSessionId.isNotEmpty) {
         // 壳层负责刷新 sessions、切终端面板并聚焦该会话（B4 接缝契约）。
@@ -449,7 +491,22 @@ class _GitPageState extends State<GitPage> {
       if (mounted) {
         _showSnack('hook 修复失败: $error');
       }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = null);
+      }
     }
+  }
+
+  /// Business Logic: 用户决定不修时必须能清掉过期 failedHook 卡；仅本地清除不调后端
+  /// （对齐 web MobileHookRepairCard dismissButton 语义）。
+  /// Code Logic: 置空原始载荷、宽容视图与目标 worktree id 三元状态。
+  void _dismissHookFailure() {
+    setState(() {
+      _hookFailure = null;
+      _hookFailureView = null;
+      _hookWorktreeId = null;
+    });
   }
 
   /// Business Logic: 当前选中 worktree 是否允许合并——非主 worktree 可合并回主工作区，
@@ -490,7 +547,8 @@ class _GitPageState extends State<GitPage> {
   }
 
   String _projectDisplayName(Map<String, dynamic> project) {
-    final name = project['deviceName'] as String? ?? project['name'] as String? ?? '';
+    final name =
+        project['deviceName'] as String? ?? project['name'] as String? ?? '';
     if (name.isNotEmpty) {
       return name;
     }
@@ -536,7 +594,9 @@ class _GitPageState extends State<GitPage> {
       }
       if (pushEnvelope.unknown) {
         // 与 commit/push/merge 同通道：先自动对账；仍不确定则锁定等「重新对账」。
-        final result = await _reconcile(pushEnvelope.clientOperationId ?? operationId);
+        final result = await _reconcile(
+          pushEnvelope.clientOperationId ?? operationId,
+        );
         _tracker.settleReconcile(result);
         if (!mounted) {
           return;
@@ -569,7 +629,9 @@ class _GitPageState extends State<GitPage> {
           final trees = asObjectList(body, wrapKey: 'worktrees');
           final siblingMain = pickMainWorktree(trees);
           final siblingMainId = siblingMain?['id'] as String?;
-          if (siblingMain == null || siblingMainId == null || siblingMainId.isEmpty) {
+          if (siblingMain == null ||
+              siblingMainId == null ||
+              siblingMainId.isEmpty) {
             failed.add('$name: 拉取失败');
             continue;
           }
@@ -623,10 +685,7 @@ class _GitPageState extends State<GitPage> {
         children: [
           if (_busy != null) LinearProgressIndicator(key: ValueKey(_busy)),
           if (_tracker.phase == GitMutationPhase.reconciling)
-            const Padding(
-              padding: EdgeInsets.all(8),
-              child: Text('核对结果中…'),
-            ),
+            const Padding(padding: EdgeInsets.all(8), child: Text('核对结果中…')),
           if (_loading)
             const Padding(
               padding: EdgeInsets.all(48),
@@ -639,7 +698,10 @@ class _GitPageState extends State<GitPage> {
                 child: ListTile(
                   title: const Text('加载失败'),
                   subtitle: Text(_error!),
-                  trailing: TextButton(onPressed: _reload, child: const Text('重试')),
+                  trailing: TextButton(
+                    onPressed: _reload,
+                    child: const Text('重试'),
+                  ),
                 ),
               ),
             if (selected != null && status != null)
@@ -671,7 +733,12 @@ class _GitPageState extends State<GitPage> {
                   selected: tree['id'] == (selected?['id']),
                   title: Text(worktreeDisplayName(tree)),
                   subtitle: Text(tree['branch'] as String? ?? ''),
-                  onTap: () => setState(() => _localSelectedId = tree['id'] as String?),
+                  onTap: () {
+                    setState(() => _localSelectedId = tree['id'] as String?);
+                    // 提交历史立即跟随新选中树（对齐 web useEffect(project/worktree) 驱动）；
+                    // 请求代数保证旧树迟到的响应不会覆盖新树的历史。
+                    _loadCommits();
+                  },
                 ),
               ),
             _buildCommitsSection(selected),
@@ -681,15 +748,15 @@ class _GitPageState extends State<GitPage> {
     );
   }
 
-  /// Business Logic: hook 失败要给用户看得到 stdout/stderr 输出与阶段/退出码，
-  /// 交互口径与终端页 hook 修复卡一致（可展开/收起，空输出占位），并保留 AI 修复出口。
+  /// Business Logic: hook 失败要给用户看得到 stdout/stderr 输出与退出码，
+  /// 交互与文案对齐 web MobileHookRepairCard / 终端页 hook 修复卡：
+  /// 标题区分 pre-commit/pre-push 阶段，「让 AI 修复」busy 时禁用并显示进行中文案，
+  /// 「忽略」仅本地清卡；可展开/收起输出，空输出给占位。
   /// Code Logic: 复用 HookFailureView 宽容解析（camel/snake 双读）与 formattedOutput
-  /// 拼接；标题保持「Git hook 失败」，阶段/退出码作为附属信息行。
+  /// 拼接；修复按钮复用页级 _actionDisabled（busy/对账相位期间锁定）。
   Widget _buildHookFailureCard(BuildContext context) {
     final theme = Theme.of(context);
-    final failure =
-        _hookFailureView ?? HookFailureView.fromJson(_hookFailure);
-    final stageLabel = failure.isPush ? 'pre-push' : 'pre-commit';
+    final failure = _hookFailureView ?? HookFailureView.fromJson(_hookFailure);
     return Card(
       color: theme.colorScheme.errorContainer,
       child: Padding(
@@ -700,19 +767,36 @@ class _GitPageState extends State<GitPage> {
             Row(
               children: [
                 Expanded(
-                  child: Text('Git hook 失败', style: theme.textTheme.titleMedium),
+                  child: Text(
+                    // 对齐 web hookRepair.titleCommit/titlePush（与终端页同口径）。
+                    failure.isPush
+                        ? 'pre-push 钩子阻止 push'
+                        : 'pre-commit 钩子阻止 commit',
+                    style: theme.textTheme.titleMedium,
+                  ),
                 ),
-                Text('$stageLabel 阶段', style: theme.textTheme.bodySmall),
-                if (failure.exitCode != null) ...[
-                  const SizedBox(width: 8),
-                  Text('退出码 ${failure.exitCode}', style: theme.textTheme.bodySmall),
-                ],
+                if (failure.exitCode != null)
+                  Text(
+                    '退出码 ${failure.exitCode}',
+                    style: theme.textTheme.bodySmall,
+                  ),
               ],
             ),
             _HookOutputToggle(output: failure.formattedOutput),
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton(onPressed: _repairHook, child: const Text('hook-repair')),
+            Wrap(
+              spacing: 8,
+              children: [
+                FilledButton(
+                  key: const Key('git-hook-repair'),
+                  onPressed: _actionDisabled ? null : _repairHook,
+                  child: Text(_actionDisabled ? '正在启动 AI 修复…' : '让 AI 修复'),
+                ),
+                TextButton(
+                  key: const Key('git-hook-dismiss'),
+                  onPressed: _dismissHookFailure,
+                  child: const Text('忽略'),
+                ),
+              ],
             ),
           ],
         ),
@@ -724,16 +808,9 @@ class _GitPageState extends State<GitPage> {
   /// （提交/拉取/推送/合并/同步，对齐 web 状态卡工具栏）。
   Widget _buildStatusCard(Map<String, dynamic> tree, WorktreeGitStatus status) {
     final branch = status.branch ?? tree['branch'] as String? ?? '—';
-    String stateText;
-    if (!status.present) {
-      stateText = '状态未知';
-    } else if (status.conflicts > 0) {
-      stateText = '冲突（${status.conflicts} 个文件）';
-    } else if (!status.clean || status.changed > 0) {
-      stateText = '有改动（${status.changed} 个文件）';
-    } else {
-      stateText = '工作区干净';
-    }
+    // 三态口径与 worktrees 页共用 worktreeStatusLabel（N 处冲突 / N 处改动 / 干净）；
+    // 后端未返回 status 时保留「状态未知」提示。
+    final stateText = status.present ? worktreeStatusLabel(tree) : '状态未知';
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -815,7 +892,11 @@ class _GitPageState extends State<GitPage> {
                   onPressed: _actionDisabled || !canMergeTree(tree)
                       ? null
                       : () async {
-                          final ok = await _confirmAction('合并', tree, mergeConfirmText(tree));
+                          final ok = await _confirmAction(
+                            '合并',
+                            tree,
+                            mergeConfirmText(tree),
+                          );
                           if (!ok) {
                             return;
                           }
@@ -882,7 +963,10 @@ class _GitPageState extends State<GitPage> {
           child: Row(
             children: [
               Expanded(
-                child: Text('最近提交', style: Theme.of(context).textTheme.titleMedium),
+                child: Text(
+                  '最近提交',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
               ),
               TextButton.icon(
                 onPressed: _busy == null ? _refresh : null,
@@ -908,7 +992,10 @@ class _GitPageState extends State<GitPage> {
             child: ListTile(
               title: const Text('提交历史加载失败'),
               subtitle: Text(_commitsError!),
-              trailing: TextButton(onPressed: _loadCommits, child: const Text('重试')),
+              trailing: TextButton(
+                onPressed: _loadCommits,
+                child: const Text('重试'),
+              ),
             ),
           )
         else if (_commits.isEmpty)
@@ -935,19 +1022,17 @@ class _GitPageState extends State<GitPage> {
                     commit.summary.isEmpty ? commit.hash : commit.summary,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodyMedium
-                        ?.copyWith(fontWeight: FontWeight.w600),
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 8),
                 Text(
                   commit.shortHash.isEmpty ? '—' : commit.shortHash,
-                  style: Theme.of(context)
-                      .textTheme
-                      .bodySmall
-                      ?.copyWith(fontFamily: 'monospace'),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
                 ),
               ],
             ),
@@ -1017,7 +1102,9 @@ class _HookOutputToggleState extends State<_HookOutputToggle> {
             color: theme.colorScheme.surface,
             child: Text(
               widget.output.isEmpty ? '（未捕获到输出）' : widget.output,
-              style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: 'monospace',
+              ),
             ),
           ),
       ],

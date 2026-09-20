@@ -1,4 +1,19 @@
-/// Host-relay transfer: phone is not a P2P node.
+// Host-relay transfer: phone is not a P2P node.
+
+/// 移动端收件箱虚拟设备的 peer id（对端=手机自身）。
+const mobileInboxDeviceId = 'cc-partner-mobile-inbox';
+
+/// 已知 phase 集合（对齐 web TransferPhase）；未知值宽容解析为 null。
+const _knownTransferPhases = <String>{
+  'queued',
+  'connecting',
+  'transferring',
+  'finalizing',
+  'completed',
+  'cancelled',
+  'failed',
+};
+
 class TransferTask {
   TransferTask({
     required this.id,
@@ -12,6 +27,9 @@ class TransferTask {
     this.transferredBytes,
     this.failureRetryable,
     this.logicalTransferId,
+    this.phase,
+    this.failureMessage,
+    this.errorMessage,
   });
 
   final String id;
@@ -36,6 +54,16 @@ class TransferTask {
   /// 逻辑传输 id（跨 retry 稳定）；缺省回落 task.id。
   final String? logicalTransferId;
 
+  /// 细粒度阶段（queued/connecting/transferring/finalizing/...）；
+  /// 未知值宽容保留 null，驱动分组与行内状态标签。
+  final String? phase;
+
+  /// 结构化 failure.message（失败行展示失败原因，优先于 errorMessage）。
+  final String? failureMessage;
+
+  /// 顶层 errorMessage（旧后端兜底失败原因）。
+  final String? errorMessage;
+
   factory TransferTask.fromJson(Map<String, dynamic> json) {
     assertNoHostPaths(json);
     final failure = json['failure'];
@@ -52,8 +80,21 @@ class TransferTask {
       transferredBytes: (json['transferredBytes'] as num?)?.toInt(),
       failureRetryable: failureMap['retryable'] as bool?,
       logicalTransferId: json['logicalTransferId'] as String?,
+      phase: _parseTransferPhase(json['phase']),
+      failureMessage: failureMap['message'] as String?,
+      errorMessage: json['errorMessage'] as String?,
     );
   }
+}
+
+/// Business Logic: 旧后端可能下发未知 phase 枚举，UI 不能把它当合法阶段渲染或参与分组。
+/// Code Logic: 只接受已知枚举值；缺失/未知一律返回 null。
+String? _parseTransferPhase(Object? raw) {
+  final value = raw as String?;
+  if (value == null || !_knownTransferPhases.contains(value)) {
+    return null;
+  }
+  return value;
 }
 
 const _hostPathKeys = {
@@ -80,13 +121,47 @@ bool canDownload(TransferTask task) {
   if (task.direction.toLowerCase() == 'receive') {
     return true;
   }
-  return task.peer == 'cc-partner-mobile-inbox';
+  return task.peer == mobileInboxDeviceId;
+}
+
+/// Business Logic: 行内对端展示需要区分「收件箱（手机自身）」与远端设备名，
+/// 对齐 web `isMobileInboxDevice(task.peerDeviceId) ? t('transfer:mobileInbox') : peerDeviceName`。
+/// Code Logic: peer 为收件箱 id → 「手机」；否则显示 peerDeviceName；缺失返回 null 不渲染。
+String? transferPeerDisplayText(TransferTask task) {
+  if ((task.peer ?? '') == mobileInboxDeviceId) {
+    return '手机';
+  }
+  final name = task.peerDeviceName?.trim() ?? '';
+  return name.isEmpty ? null : name;
+}
+
+/// Business Logic: 行内状态标签优先展示细粒度 phase，让「排队/连接/收尾」可见
+/// （对齐 web TransferItem statusLabel 的 phase 优先口径）。
+/// Code Logic: phase → 中文标签（对齐 web i18n transfer:phase.*）；未知/缺失返回 null。
+String? transferPhaseLabel(String? phase) {
+  const labels = <String, String>{
+    'queued': '排队中',
+    'connecting': '连接中',
+    'transferring': '传输中',
+    'finalizing': '收尾中',
+    'completed': '已完成',
+    'cancelled': '已取消',
+    'failed': '失败',
+  };
+  return phase == null ? null : labels[phase];
 }
 
 /// 任务分组 key，与 /mobile 的 groupTransferTasks 对齐：
-/// pending/transferring → active；failed/cancelled → needsAttention；其余 completed。
-String classifyTransferGroup(TransferTask task) {
+/// 对账中 → needsAttention；pending/transferring/活跃 phase → active；
+/// failed/cancelled → needsAttention；其余 completed。
+String classifyTransferGroup(TransferTask task, {bool reconciling = false}) {
+  if (reconciling) {
+    return 'needsAttention';
+  }
   if (task.status == 'pending' || task.status == 'transferring') {
+    return 'active';
+  }
+  if (isTransferPhaseActive(task.phase)) {
     return 'active';
   }
   if (task.status == 'failed' || task.status == 'cancelled') {
@@ -108,13 +183,20 @@ class TransferTaskGroups {
   final List<TransferTask> completed;
 }
 
-/// 按进行中/需注意/已完成把任务列表分成三组，保持原有顺序。
-TransferTaskGroups groupTransferTasks(List<TransferTask> tasks) {
+/// 按进行中/需注意/已完成把任务列表分成三组，保持原有顺序；
+/// [reconcilingIds] 中的任务无论状态一律归「需注意」（对账结果未确认）。
+TransferTaskGroups groupTransferTasks(
+  List<TransferTask> tasks, {
+  Set<String> reconcilingIds = const {},
+}) {
   final active = <TransferTask>[];
   final needsAttention = <TransferTask>[];
   final completed = <TransferTask>[];
   for (final task in tasks) {
-    final group = classifyTransferGroup(task);
+    final group = classifyTransferGroup(
+      task,
+      reconciling: reconcilingIds.contains(task.id),
+    );
     if (group == 'active') {
       active.add(task);
     } else if (group == 'needsAttention') {
@@ -276,10 +358,21 @@ String resolveLogicalTransferId(TransferTask task) {
   return logical.isNotEmpty ? logical : task.id;
 }
 
+/// Business Logic: 处于传输链路中的活跃 phase 等同于进行中，参与 attempt 活跃判定。
+/// Code Logic: queued/connecting/transferring/finalizing 即活跃（对齐 web 同名分支）。
+bool isTransferPhaseActive(String? phase) =>
+    phase == 'queued' ||
+    phase == 'connecting' ||
+    phase == 'transferring' ||
+    phase == 'finalizing';
+
 /// Business Logic: 判定某 attempt 是否仍占用 logical transfer 的发送槽。
-/// Code Logic: status 为 pending 或 transferring 即活跃。
+/// Code Logic: status 为 pending 或 transferring，或 phase 处于活跃链路即活跃。
 bool isTransferAttemptActive(TransferTask task) {
-  return task.status == 'pending' || task.status == 'transferring';
+  if (task.status == 'pending' || task.status == 'transferring') {
+    return true;
+  }
+  return isTransferPhaseActive(task.phase);
 }
 
 /// Business Logic: 同一 logical transfer 下已有 attempt 在传输或对账中时，

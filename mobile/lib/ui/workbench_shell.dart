@@ -2,6 +2,106 @@ import 'package:flutter/material.dart';
 
 import '../workbench/nav.dart';
 
+/// 壳层连接态种类（对齐 web MobileConnectionState 的简易三态）。
+enum WorkbenchConnectionKind { online, reconnecting, offline }
+
+/// 壳层连接态：由「最近一次 worktrees/projects 请求成败」驱动（对齐 web
+/// mobileWorkbenchState.ts 的 MobileConnectionState）。
+///
+/// Business Logic: 弱网/后端离线时用户需要知道当前数据来自缓存以及失败原因，
+/// 恢复后要自动刷新当前面板的权威数据（恢复边沿见
+/// [shouldRefreshWorkbenchOnReconnect]）。
+///
+/// Code Logic: 不可变值对象；offline 在 web 基础上额外保留 cachedSince，
+/// 供「缓存于 HH:mm」提示（web 的 offline 无缓存时间，这里按移动端壳层需要保留）。
+class WorkbenchConnectionState {
+  const WorkbenchConnectionState.online({required DateTime this.lastSucceededAt})
+      : kind = WorkbenchConnectionKind.online,
+        cachedSince = null,
+        lastError = null;
+
+  const WorkbenchConnectionState.reconnecting({this.cachedSince, this.lastError})
+      : kind = WorkbenchConnectionKind.reconnecting,
+        lastSucceededAt = null;
+
+  const WorkbenchConnectionState.offline({required this.lastError, this.cachedSince})
+      : kind = WorkbenchConnectionKind.offline,
+        lastSucceededAt = null;
+
+  final WorkbenchConnectionKind kind;
+
+  /// 最近一次成功时间（online 专有）。
+  final DateTime? lastSucceededAt;
+
+  /// 进入失败态前的最后成功时间（reconnecting/offline 用于「缓存于」提示）。
+  final DateTime? cachedSince;
+
+  /// 最近一次失败的错误文案（reconnecting/offline）。
+  final String? lastError;
+}
+
+/// Business Logic: worktrees/projects 请求失败后壳层要进入离线态，
+/// 同时保留上次成功时间做「缓存于」提示（对齐 web markMobileConnectionOffline，
+/// 差异仅是额外保留 cachedSince 供展示）。
+/// Code Logic: 纯函数——online 的 lastSucceededAt / 失败态的 cachedSince 透传为新的 cachedSince。
+WorkbenchConnectionState markWorkbenchConnectionFailure(
+  String lastError,
+  WorkbenchConnectionState? prev,
+) {
+  final cachedSince = prev == null
+      ? null
+      : (prev.kind == WorkbenchConnectionKind.online ? prev.lastSucceededAt : prev.cachedSince);
+  return WorkbenchConnectionState.offline(lastError: lastError, cachedSince: cachedSince);
+}
+
+/// Business Logic: 从 offline/reconnecting 恢复 online 时要刷新当前面板权威数据
+/// （对齐 web shouldRefreshMobilePanelOnReconnect）；首次成功（prev 为 null）不算恢复。
+/// Code Logic: 纯函数——next 为 online 且 prev 存在且 prev 非 online 时返回 true。
+bool shouldRefreshWorkbenchOnReconnect(
+  WorkbenchConnectionState? prev,
+  WorkbenchConnectionState next,
+) {
+  return next.kind == WorkbenchConnectionKind.online &&
+      prev != null &&
+      prev.kind != WorkbenchConnectionKind.online;
+}
+
+/// Business Logic: 状态行的「缓存于」提示只在非 online 且确有上次成功时间时展示
+/// （对齐 web getMobileConnectionCachedAt + cachedLabel 条件）。
+/// Code Logic: 纯函数——reconnecting/offline 返回 cachedSince，其余返回 null。
+DateTime? workbenchConnectionCachedAt(WorkbenchConnectionState? connection) {
+  final conn = connection;
+  if (conn == null || conn.kind == WorkbenchConnectionKind.online) {
+    return null;
+  }
+  return conn.cachedSince;
+}
+
+/// Business Logic: 连接态药丸文案逐字对齐 web zh workbench.mobile.connection。
+/// Code Logic: 纯函数映射；connection 为 null（尚无成败记录）时不显示药丸。
+String? workbenchConnectionLabel(WorkbenchConnectionState? connection) {
+  final conn = connection;
+  if (conn == null) {
+    return null;
+  }
+  switch (conn.kind) {
+    case WorkbenchConnectionKind.online:
+      return '已连接';
+    case WorkbenchConnectionKind.reconnecting:
+      return '重新连接中…';
+    case WorkbenchConnectionKind.offline:
+      return '离线';
+  }
+}
+
+/// Business Logic: 「缓存于 HH:mm」要求两位数时刻，避免 9:5 这类难读输出。
+/// Code Logic: 纯函数—— HH:mm 补零格式化。
+String formatWorkbenchCachedTime(DateTime time) {
+  final hh = time.hour.toString().padLeft(2, '0');
+  final mm = time.minute.toString().padLeft(2, '0');
+  return '$hh:$mm';
+}
+
 IconData _icon(IconDataForPanel kind) {
   switch (kind) {
     case IconDataForPanel.folder:
@@ -75,6 +175,10 @@ class WorkbenchShell extends StatelessWidget {
     this.automationEnabled = true,
     this.browserEnabled = true,
     this.hideWorktreeStrip = false,
+    this.hideAppBar = false,
+    this.connection,
+    this.worktreeLabel,
+    this.sessionLabel,
   });
 
   final WorkbenchNavMode mode;
@@ -99,6 +203,18 @@ class WorkbenchShell extends StatelessWidget {
   /// 终端全屏等工作区场景下隐藏 worktree 切换条。
   final bool hideWorktreeStrip;
 
+  /// 终端全屏时隐藏 AppBar 与状态行（对齐 web 全屏 fixed overlay 盖住整个 shell）。
+  final bool hideAppBar;
+
+  /// 壳层连接态（null = 尚无成败记录，不显示连接药丸，对齐 web 初始 null）。
+  final WorkbenchConnectionState? connection;
+
+  /// 当前 worktree 显示名；null 时状态行回落「worktree」占位（对齐 web status.worktree）。
+  final String? worktreeLabel;
+
+  /// 当前会话名；null 时状态行回落「session」占位（对齐 web status.session）。
+  final String? sessionLabel;
+
   @override
   Widget build(BuildContext context) {
     final groups = filterWorkbenchNavGroupsByFeatures(
@@ -106,21 +222,33 @@ class WorkbenchShell extends StatelessWidget {
       automationEnabled: automationEnabled,
       browserEnabled: browserEnabled,
     );
+    final showAppBar = !hideAppBar;
+    final body = Column(
+      children: [
+        if (showAppBar) _statusSection(context),
+        if (worktreeStrip != null && !hideWorktreeStrip)
+          KeyedSubtree(key: const Key('worktree-strip'), child: worktreeStrip!),
+        Expanded(child: child),
+      ],
+    );
     return Scaffold(
       key: const Key('workbench-shell'),
-      appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              projectLabel ?? panelLabel(panel),
-              overflow: TextOverflow.ellipsis,
-            ),
-            if (subtitle != null)
-              Text(subtitle!, style: Theme.of(context).textTheme.bodySmall),
-          ],
-        ),
-      ),
+      appBar: showAppBar
+          ? AppBar(
+              title: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    projectLabel ?? panelLabel(panel),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (subtitle != null)
+                    Text(subtitle!, style: Theme.of(context).textTheme.bodySmall),
+                ],
+              ),
+            )
+          : null,
+      body: showAppBar ? body : SafeArea(child: body),
       drawer: Drawer(
         child: SafeArea(
           child: _DrawerOpenedProbe(
@@ -171,12 +299,83 @@ class WorkbenchShell extends StatelessWidget {
           ),
         ),
       ),
-      body: Column(
-        children: [
-          if (worktreeStrip != null && !hideWorktreeStrip)
-            KeyedSubtree(key: const Key('worktree-strip'), child: worktreeStrip!),
-          Expanded(child: child),
-        ],
+    );
+  }
+
+  /// Business Logic: 壳层要有一条只读状态行（对齐 web MobileWorkbenchShell 的
+  /// statusRow）：worktree 显示名 · 会话名 · 连接态药丸（含「缓存于 HH:mm」），
+  /// 离线时在下方整行展示最近错误（对齐 web offlineError 行）。
+  /// Code Logic: Wrap 布局防长名溢出；连接态为 null 时不出连接药丸；
+  /// 错误行仅在 offline 且有 lastError 时渲染。
+  Widget _statusSection(BuildContext context) {
+    final connection = this.connection;
+    final connectionText = workbenchConnectionLabel(connection);
+    final cachedAt = workbenchConnectionCachedAt(connection);
+    final pillText = connectionText == null
+        ? null
+        : (cachedAt == null
+            ? connectionText
+            : '$connectionText · 缓存于 ${formatWorkbenchCachedTime(cachedAt)}');
+    final theme = Theme.of(context);
+    Widget? errorLine;
+    if (connection != null &&
+        connection.kind == WorkbenchConnectionKind.offline &&
+        (connection.lastError ?? '').isNotEmpty) {
+      errorLine = Padding(
+        key: const Key('shell-status-error'),
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+        child: Text(
+          '最后错误：${connection.lastError}',
+          style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+          overflow: TextOverflow.ellipsis,
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(12, 6, 12, errorLine == null ? 6 : 2),
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 4,
+            children: [
+              _statusPill(
+                context,
+                (worktreeLabel == null || worktreeLabel!.isEmpty) ? 'worktree' : worktreeLabel!,
+                key: const Key('shell-status-worktree'),
+              ),
+              _statusPill(
+                context,
+                (sessionLabel == null || sessionLabel!.isEmpty) ? 'session' : sessionLabel!,
+                key: const Key('shell-status-session'),
+              ),
+              if (pillText != null)
+                _statusPill(context, pillText, key: const Key('shell-status-connection')),
+            ],
+          ),
+        ),
+        if (errorLine != null) errorLine,
+      ],
+    );
+  }
+
+  /// Business Logic: 状态行药丸是只读徽标，需要弱化视觉但与主题色联动。
+  /// Code Logic: 圆角容器 + labelSmall；不用硬编码颜色，全部走主题 scheme。
+  Widget _statusPill(BuildContext context, String text, {Key? key}) {
+    final theme = Theme.of(context);
+    return Container(
+      key: key,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        text,
+        style: theme.textTheme.labelSmall,
+        overflow: TextOverflow.ellipsis,
       ),
     );
   }

@@ -501,7 +501,7 @@ cc-partner 仅面向本机与局域网，产品只有一种固定局域网行为
 
 ### 2.21 Flutter 原生移动客户端
 
-**描述**：正式 iOS/Android 客户端（一套 Flutter 代码），在局域网内切换多台 PC 工作台。网页 `/mobile` 继续存在且不改 UI。设计见 [`docs/superpowers/specs/2026-09-19-flutter-mobile-app-design.md`](superpowers/specs/2026-09-19-flutter-mobile-app-design.md)。状态：工作台面板与交互已与网页 `/mobile` 三轮对齐（第三轮补齐面板常驻挂载——Files 草稿/终端流/传输进度不因切面板销毁、终端 boot 重试与 replay 输入门闩、输入 WS 未就绪禁用输入行、会话列表重连/回前台刷新、同步 push unknown 纳入对账、Git hook 卡对齐终端语义、传输行内进度、文件/Attention 错误重试与刷新入口、Attention 可见时轮询、Drawer 断开入口、删除激活项目 dirty 预检、项目 kind 徽章与设备名），复审 low 备忘已清零（终端 commit/merge 交叉互锁、非 running 禁输入行、worktrees 请求序号守卫与空列表占位、项目不支持类型禁选、文件路径 crumb、Provider 空列表提示、传输首载失败重试按钮）；推送点开导航等原生集成项仍待真机验证。
+**描述**：正式 iOS/Android 客户端（一套 Flutter 代码），在局域网内切换多台 PC 工作台。网页 `/mobile` 继续存在且不改 UI。设计见 [`docs/superpowers/specs/2026-09-19-flutter-mobile-app-design.md`](superpowers/specs/2026-09-19-flutter-mobile-app-design.md)。状态：工作台面板与交互已与网页 `/mobile` 四轮对齐。第一至三轮补齐面板常驻挂载、终端 replay 输入门闩与 commit/merge 交叉互锁、Git hook 卡、传输行内进度、Attention 可见时轮询、项目 kind 徽章等；第四轮补齐文件保存 baseHash 真实基线与图片/CSV/SQLite 预览可达、终端会话 worktree 作用域过滤与空态手动新建、多会话缓冲常驻（LRU 8）、划选操作条、全屏保留动作、输入 WS ready 握手/帧上限/error 帧封锁、resize 基线抑制同尺寸、hydration 首滑触发与失败重试、回前台钉底跟随、events 2s 重连 + 35s 看门狗、commit 一键直提、动作失败常驻错误条、壳层连接态状态行与断线恢复自动刷新、返回项目列表保留上下文、lastLocation 即时持久化、主题跟随系统、自动化草稿保留与按钮门控与 attemptPhase 中文映射、浏览器重新探测与自动打开、传输 phase 接入与对账隐藏动作与失败原因展示、Attention 不支持专用态与 sourceKind 中文、选择器在线过滤/影子去重/mkdir 能力门控/info 预检、Provider 产品名映射、删除项目顺序、请求竞态守卫等；推送点开导航等原生集成项仍待真机验证。
 
 **功能点**：
 - 本地地址簿：手填 `IP:端口`（默认端口 62116）、粘贴 URL、扫描桌面现有 `/mobile` 二维码（只取主机和端口）；同一规范化 host:port 不重复；保存前 health 探测，失败允许强制保存但不得标为在线，并展示失败原因。iOS 必须声明本地网络用途（`NSLocalNetworkUsageDescription`）。地址簿在打开、回到前台和下拉刷新时重新探测 `GET /api/health`

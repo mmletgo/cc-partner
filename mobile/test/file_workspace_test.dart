@@ -49,4 +49,25 @@ void main() {
     expect(preview.selectedTable, 'users');
     expect(preview.selectTable('orders').selectedTable, 'orders');
   });
+
+  test('乐观锁基线优先读 baseHash（后端真实字段），兼容回退 hash', () {
+    expect(fileTextBaseHash({'baseHash': 'b1', 'hash': 'h1'}), 'b1');
+    expect(fileTextBaseHash({'baseHash': 'b1'}), 'b1');
+    expect(fileTextBaseHash({'hash': 'h1'}), 'h1');
+    expect(fileTextBaseHash({'baseHash': ''}), '');
+    expect(fileTextBaseHash(const {}), '');
+  });
+
+  test('CSV 表头优先读 columns（后端真实字段），回退 headers，缺省占位', () {
+    expect(
+      csvPreviewColumns({'columns': ['a', 'b'], 'headers': ['x']}),
+      ['a', 'b'],
+    );
+    expect(
+      csvPreviewColumns({'headers': ['x', 'y']}),
+      ['x', 'y'],
+    );
+    expect(csvPreviewColumns({'columns': <String>[]}), ['col']);
+    expect(csvPreviewColumns(const {}), ['col']);
+  });
 }

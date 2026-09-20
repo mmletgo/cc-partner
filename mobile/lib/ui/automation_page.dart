@@ -32,6 +32,28 @@ const Map<String, String> _runStateLabels = {
   'delivering': 'Delivering',
 };
 
+/// Attempt phase 文案映射（对齐 web MOBILE_AUTOMATION_ATTEMPT_PHASE_LABEL_KEYS
+/// 的 zh locale 文案；未知 phase 回落原样英文 key）。
+const Map<String, String> _attemptPhaseLabels = {
+  'preparingWorkspace': 'Preparing workspace',
+  'buildingPrompt': 'Building prompt',
+  'launchingRunner': 'Launching runner',
+  'initializingSession': 'Initializing session',
+  'streaming': 'Streaming',
+  'finishing': 'Finishing',
+  'succeeded': 'Succeeded',
+  'failed': 'Failed',
+  'timedOut': 'Timed out',
+  'stalled': 'Stalled',
+  'canceledByReconciliation': 'Canceled',
+};
+
+/// Attempt phase 徽章文案：空值显示 unknown（对齐 web unknownLabel），未知值回落原样英文。
+String _attemptPhaseLabel(String? attemptPhase) {
+  if (attemptPhase == null || attemptPhase.isEmpty) return 'unknown';
+  return _attemptPhaseLabels[attemptPhase] ?? attemptPhase;
+}
+
 /// Outbox 状态中文文案（待发送/发送中/已同步/发送失败/已放弃）。
 const Map<String, String> _pendingStatusLabels = {
   'pending': '待发送',
@@ -218,8 +240,11 @@ class _AutomationPageState extends State<AutomationPage> {
   final _prompt = TextEditingController();
   final _blockTitle = TextEditingController();
 
-  /// 创建对话框块成员草稿（2..N 行）。
-  List<_BlockMemberDraft> _blockMembers = [];
+  /// 创建对话框块成员草稿（2..N 行）；初始即为两行空白，块模式首开即可编辑。
+  List<_BlockMemberDraft> _blockMembers = [
+    _BlockMemberDraft(),
+    _BlockMemberDraft(),
+  ];
 
   /// 是否块创建模式（append 模式由 [_appendBlockId] 表达）。
   bool _blockMode = false;
@@ -234,6 +259,52 @@ class _AutomationPageState extends State<AutomationPage> {
   /// 一次逻辑创建提交的幂等键：表单内容不变的重试复用；成功/关闭/表单变更后清空。
   String? _createClientRequestId;
   String? _createClientRequestFingerprint;
+
+  /// 是否有项目上下文（对齐 web hasProject；页面必传项目，恒真兜底）。
+  bool get _hasProject => widget.project.id.trim().isNotEmpty;
+
+  /// 任务三字段（标题/目标/验收）是否都已填写。
+  bool get _taskFieldsComplete =>
+      _title.text.trim().isNotEmpty &&
+      _goal.text.trim().isNotEmpty &&
+      _acceptance.text.trim().isNotEmpty;
+
+  /// 单任务创建可用性（对齐 web canSubmit：字段齐备 + 非 busy + 非列表加载）。
+  bool get _canSubmitTask =>
+      _hasProject &&
+      _taskFieldsComplete &&
+      !_creating &&
+      !_completing &&
+      !_loading;
+
+  /// 任务块创建可用性（对齐 web canCreateBlock：块标题齐 + 2..8 成员全完整 + 非 busy）。
+  bool get _canSubmitBlock =>
+      _hasProject &&
+      _canCreateTaskBlock &&
+      _blockTitle.text.trim().isNotEmpty &&
+      _blockMembers.length >= kAutomationBlockMinMembers &&
+      _blockMembers.length <= kAutomationBlockMaxMembers &&
+      _blockMembers.every((member) => member.complete) &&
+      !_creating &&
+      !_completing &&
+      !_loading;
+
+  /// 块末尾追加可用性（对齐 web canAppend：三字段齐备 + 目标块存在 + 非 busy）。
+  bool get _canSubmitAppend =>
+      _hasProject &&
+      _appendBlockId != null &&
+      _taskFieldsComplete &&
+      !_creating &&
+      !_completing &&
+      !_loading;
+
+  /// AI 完善可用性（对齐 web canCompletePrompt：prompt 非空 + 非 busy + 非列表加载）。
+  bool get _canCompletePrompt =>
+      _hasProject &&
+      _prompt.text.trim().isNotEmpty &&
+      !_completing &&
+      !_creating &&
+      !_loading;
 
   @override
   void initState() {
@@ -346,12 +417,8 @@ class _AutomationPageState extends State<AutomationPage> {
     _experimentActionId = null;
     _expandedBlockIds.clear();
     _canCreateTaskBlock = false;
-    _createClientRequestId = null;
-    _createClientRequestFingerprint = null;
-    for (final member in _blockMembers) {
-      member.dispose();
-    }
-    _blockMembers = [];
+    // 项目切换整体清空创建表单草稿：草稿只在同项目内保留，跨项目不得串台。
+    _clearCreateDrafts();
   }
 
   /// 拉取泳道视图 / 实验组；runtime 快照独立请求；请求序号过期则丢弃整个响应。
@@ -502,9 +569,10 @@ class _AutomationPageState extends State<AutomationPage> {
     }
   }
 
-  /// runtime 徽章文案：本机归一显示「本机」；cold offline / 未知为中性「状态未知」。
+  /// runtime 徽章文案：请求进行中固定显示「刷新中」（即便还有旧快照，对齐 web）；
+  /// 本机归一显示「本机」；cold offline / 未知为中性「状态未知」。
   String _runtimeBadgeLabel() {
-    if (_runtimeLoading && _snapshot == null) return '刷新中';
+    if (_runtimeLoading) return '刷新中';
     if (_snapshot?['remoteStatus'] == 'local') return '本机';
     switch (_runtimeStatus) {
       case 'live':
@@ -651,8 +719,22 @@ class _AutomationPageState extends State<AutomationPage> {
     }
   }
 
-  /// 重置创建/追加对话框草稿与幂等键；打开新对话框视为新逻辑提交周期。
-  void _resetCreateForm() {
+  /// 只重置一次逻辑提交周期状态（幂等键 + busy 标记），不动画表单草稿。
+  ///
+  /// Business Logic: 用户误关创建对话框后重开，已填写的草稿应保留可继续编辑
+  /// （对齐 web handleOpenCreateDialog：打开只清幂等键/error/status）。
+  /// Code Logic: 仅清空 creating/completing 与幂等键指纹；title/goal 等字段不动。
+  void _resetCreateSubmission() {
+    _creating = false;
+    _completing = false;
+    _createClientRequestId = null;
+    _createClientRequestFingerprint = null;
+  }
+
+  /// 整体清空创建表单草稿：提交成功或切换项目时调用（对齐需求口径）。
+  ///
+  /// Code Logic: 清空全部字段控制器并重建两行空白块成员草稿，同时结束提交周期。
+  void _clearCreateDrafts() {
     _title.clear();
     _goal.clear();
     _acceptance.clear();
@@ -662,21 +744,21 @@ class _AutomationPageState extends State<AutomationPage> {
       member.dispose();
     }
     _blockMembers = [_newBlockMemberDraft(), _newBlockMemberDraft()];
-    _creating = false;
-    _completing = false;
-    _createClientRequestId = null;
-    _createClientRequestFingerprint = null;
+    _resetCreateSubmission();
   }
 
   /// 新建一个空白块成员草稿。
   _BlockMemberDraft _newBlockMemberDraft() => _BlockMemberDraft();
 
   /// 打开创建任务对话框；[preferredAction] 来自泳道头「+ 任务 / + 块」入口。
+  ///
+  /// Business Logic: 重开对话框是新的逻辑提交周期，但表单草稿保留让用户继续编辑。
+  /// Code Logic: 只重置幂等键/busy，归位 action 与块模式；不清字段。
   Future<void> _openCreateDialog({
     String? preferredAction,
     bool blockMode = false,
   }) async {
-    _resetCreateForm();
+    _resetCreateSubmission();
     _createAction = preferredAction ?? 'backlog';
     _blockMode = blockMode && _canCreateTaskBlock;
     _appendBlockId = null;
@@ -684,8 +766,14 @@ class _AutomationPageState extends State<AutomationPage> {
   }
 
   /// 打开块末尾追加对话框：只填 title/goal/acceptance 三字段。
+  ///
+  /// Code Logic: append 是独立入口，打开时清空三字段（对齐 web handleOpenAppend），
+  /// 其余草稿（prompt/块草稿）与创建入口互不影响。
   Future<void> _openAppendDialog(String blockId) async {
-    _resetCreateForm();
+    _resetCreateSubmission();
+    _title.clear();
+    _goal.clear();
+    _acceptance.clear();
     _appendBlockId = blockId;
     _blockMode = false;
     _createAction = 'backlog';
@@ -795,9 +883,8 @@ class _AutomationPageState extends State<AutomationPage> {
                     content: Text(_createActionSuccessLabels[action] ?? '任务已创建'),
                   ),
                 );
-                // 成功即结束本逻辑提交周期，清空幂等键。
-                _createClientRequestId = null;
-                _createClientRequestFingerprint = null;
+                // 成功即结束本逻辑提交周期，并整体清空表单草稿。
+                _clearCreateDrafts();
                 await _reload();
               } catch (error) {
                 if (mounted) {
@@ -871,8 +958,8 @@ class _AutomationPageState extends State<AutomationPage> {
                 }
                 _blockMembers = [_newBlockMemberDraft(), _newBlockMemberDraft()];
                 _prompt.clear();
-                _createClientRequestId = null;
-                _createClientRequestFingerprint = null;
+                // 块创建成功：整体清空草稿并结束本逻辑提交周期。
+                _resetCreateSubmission();
                 await _reload();
               } catch (error) {
                 if (mounted) {
@@ -918,6 +1005,8 @@ class _AutomationPageState extends State<AutomationPage> {
                 dialogClosed = true;
                 Navigator.of(context).pop();
                 _appendBlockId = null;
+                // 追加成功：清空草稿并结束本逻辑提交周期。
+                _clearCreateDrafts();
                 await _reload();
               } catch (error) {
                 if (mounted) {
@@ -934,11 +1023,11 @@ class _AutomationPageState extends State<AutomationPage> {
               }
             }
 
-            final submitDisabled = busy ||
-                (isAppend
-                    ? false
-                    : _blockMode &&
-                        !_canCreateTaskBlock);
+            // 按钮有效性门控（对齐 web canSubmit/canCreateBlock/canAppend）：
+            // 字段不完备或 busy/列表加载中直接禁用；提交内的空字段校验仅作兜底。
+            final submitDisabled = isAppend
+                ? !_canSubmitAppend
+                : (_blockMode ? !_canSubmitBlock : !_canSubmitTask);
 
             return PopScope(
               // busy 时禁止关闭（返回键 / 点遮罩 / 取消按钮全部无效）。
@@ -1041,9 +1130,9 @@ class _AutomationPageState extends State<AutomationPage> {
                                   OutlinedButton.icon(
                                     key: const Key('create-ai'),
                                     onPressed:
-                                        busy || _prompt.text.trim().isEmpty
-                                            ? null
-                                            : onCompletePrompt,
+                                        _canCompletePrompt
+                                            ? onCompletePrompt
+                                            : null,
                                     icon: _completing
                                         ? const SizedBox(
                                             width: 14,
@@ -1065,6 +1154,8 @@ class _AutomationPageState extends State<AutomationPage> {
                                     enabled: !busy,
                                     decoration:
                                         const InputDecoration(labelText: '任务标题'),
+                                    // 输入即重建，联动提交按钮有效性门控。
+                                    onChanged: (_) => setDialogState(() {}),
                                   ),
                                   TextField(
                                     key: const Key('create-goal'),
@@ -1074,6 +1165,7 @@ class _AutomationPageState extends State<AutomationPage> {
                                     maxLines: 4,
                                     decoration:
                                         const InputDecoration(labelText: '目标'),
+                                    onChanged: (_) => setDialogState(() {}),
                                   ),
                                   TextField(
                                     key: const Key('create-acceptance'),
@@ -1083,6 +1175,7 @@ class _AutomationPageState extends State<AutomationPage> {
                                     maxLines: 4,
                                     decoration: const InputDecoration(
                                         labelText: '验收标准'),
+                                    onChanged: (_) => setDialogState(() {}),
                                   ),
                                 ] else ...[
                                   TextField(
@@ -1091,6 +1184,7 @@ class _AutomationPageState extends State<AutomationPage> {
                                     enabled: !busy,
                                     decoration: const InputDecoration(
                                         labelText: '块标题'),
+                                    onChanged: (_) => setDialogState(() {}),
                                   ),
                                   for (var i = 0; i < _blockMembers.length; i++)
                                     _buildBlockMemberFields(
@@ -1234,6 +1328,8 @@ class _AutomationPageState extends State<AutomationPage> {
             controller: member.title,
             enabled: !busy,
             decoration: const InputDecoration(labelText: '任务标题'),
+            // 输入即重建，联动块提交按钮有效性门控。
+            onChanged: (_) => setDialogState(() {}),
           ),
           TextField(
             key: Key('block-member-goal-$index'),
@@ -1242,6 +1338,7 @@ class _AutomationPageState extends State<AutomationPage> {
             minLines: 2,
             maxLines: 3,
             decoration: const InputDecoration(labelText: '目标'),
+            onChanged: (_) => setDialogState(() {}),
           ),
           TextField(
             key: Key('block-member-acceptance-$index'),
@@ -1250,6 +1347,7 @@ class _AutomationPageState extends State<AutomationPage> {
             minLines: 2,
             maxLines: 3,
             decoration: const InputDecoration(labelText: '验收标准'),
+            onChanged: (_) => setDialogState(() {}),
           ),
         ],
       ),
@@ -1399,7 +1497,8 @@ class _AutomationPageState extends State<AutomationPage> {
             padding: const EdgeInsets.only(top: 12),
             child: FilledButton.icon(
               key: const Key('automation-create'),
-              onPressed: () => _openCreateDialog(),
+              // 对齐 web 面板头创建按钮：无项目或列表加载中禁用。
+              onPressed: (!_hasProject || _loading) ? null : () => _openCreateDialog(),
               icon: const Icon(Icons.add),
               label: const Text('创建任务'),
             ),
@@ -1646,7 +1745,9 @@ class _AutomationPageState extends State<AutomationPage> {
     );
   }
 
-  /// 任务行：标题 + 来源徽章 + workflow 徽章；点击展开详情卡；选中/聚焦高亮。
+  /// 任务行：标题 + 来源徽章 + 行内 runtime 摘要（运行消息 / Claude·Transcript 引用）
+  /// + workflow/runState/attemptPhase 徽章与 attempt 轮次（对齐 web MobileTaskRow）；
+  /// 点击展开详情卡；选中/聚焦高亮。
   Widget _buildTaskCard(ThemeData theme, AutomationRenderableTask renderable) {
     final task = renderable.task;
     final id = renderable.id;
@@ -1657,6 +1758,16 @@ class _AutomationPageState extends State<AutomationPage> {
         ? '远端 ${renderable.deviceName ?? 'unknown'}'
         : '本机';
     final workflow = task['workflowState'] as String? ?? 'backlog';
+    final runState = task['runState'] as String?;
+    final attemptPhase = task['attemptPhase'] as String?;
+    // attempt 宽容解析：后端 DTO 恒有 attempt，缺失（旧快照/兼容数据）时隐藏轮次徽章。
+    final attempt = _runtimeIntValue(task['attempt']);
+    final runtimeMessage =
+        _runtimeValue(task['lastRuntimeMessage'] as String?, 'unknown');
+    final claudeSessionId =
+        _runtimeValue(task['claudeSessionId'] as String?, 'unknown');
+    final transcriptPath =
+        _runtimeValue(task['transcriptPath'] as String?, 'unknown');
     final selected = _selectedTaskId == id;
     return Card(
       key: Key('automation-task-$id'),
@@ -1673,16 +1784,41 @@ class _AutomationPageState extends State<AutomationPage> {
           ListTile(
             title: Text(title),
             subtitle: goal.isEmpty ? null : Text(goal, maxLines: 1),
-            trailing: Wrap(
-              spacing: 4,
-              runSpacing: 4,
-              alignment: WrapAlignment.end,
-              children: [
-                _badge(theme, originLabel, accent: true),
-                _badge(theme, _workflowLabels[workflow] ?? workflow),
-              ],
-            ),
+            trailing: _badge(theme, originLabel, accent: true),
             onTap: () => selected ? _closeDetail() : _selectTask(id),
+          ),
+          Padding(
+            key: Key('automation-task-body-$id'),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+            // 对齐 web：整行可点（行内摘要也响应展开详情）。
+            child: InkWell(
+              onTap: () => selected ? _closeDetail() : _selectTask(id),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Runtime：$runtimeMessage',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  Text(
+                    'Claude：$claudeSessionId · Transcript：$transcriptPath',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 4,
+                    runSpacing: 4,
+                    children: [
+                      _badge(theme, _workflowLabels[workflow] ?? workflow),
+                      if (runState != null && runState.isNotEmpty)
+                        _badge(theme, _runStateLabels[runState] ?? runState),
+                      _badge(theme, _attemptPhaseLabel(attemptPhase)),
+                      if (attempt > 0) _badge(theme, '第 $attempt 轮'),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           ),
           if (selected) _buildDetailSection(theme, task),
         ],
@@ -1728,7 +1864,7 @@ class _AutomationPageState extends State<AutomationPage> {
           _kvRow(
             theme,
             '运行阶段',
-            attemptPhase == null || attemptPhase.isEmpty ? unknown : attemptPhase,
+            _attemptPhaseLabel(attemptPhase),
           ),
           _kvRow(
             theme,
@@ -1937,6 +2073,9 @@ class _AutomationPageState extends State<AutomationPage> {
                   : '远端路径：${item['remoteProjectPath'] as String? ?? ''}',
               style: theme.textTheme.bodySmall,
             ),
+            const SizedBox(height: 4),
+            // 对齐 web：outbox 行固定展示 origin 徽章（离线创建，待发送到远端）。
+            _badge(theme, '待发送'),
             if (failed)
               Padding(
                 padding: const EdgeInsets.only(top: 8),

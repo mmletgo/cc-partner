@@ -7,6 +7,8 @@ class SessionSummary {
     required this.name,
     required this.status,
     this.worktreeId,
+    this.cols,
+    this.rows,
     this.supportsPanes = false,
     this.paneCount = 0,
   });
@@ -16,6 +18,15 @@ class SessionSummary {
   final String name;
   final String status;
   final String? worktreeId;
+
+  /// 服务端持久化的 PTY 列数；旧后端不下发时为 null。
+  ///
+  /// UI 应以此作为 resize 基线：首次 fit 尺寸与该基线相同就不回传 resize（后端把同尺寸
+  /// resize 当强制重绘，会把 TUI 末屏抖进 tmux history，web 同语义）。
+  final int? cols;
+
+  /// 服务端持久化的 PTY 行数；解析口径同 [cols]。
+  final int? rows;
 
   /// 是否支持真实 tmux pane 操作（split/switch/close/zoom）。
   ///
@@ -32,6 +43,8 @@ class SessionSummary {
         name: json['name'] as String? ?? '',
         status: json['status'] as String? ?? '',
         worktreeId: json['worktreeId'] as String? ?? json['worktree_id'] as String?,
+        cols: (json['cols'] as num?)?.toInt(),
+        rows: (json['rows'] as num?)?.toInt(),
         supportsPanes:
             json['supportsPanes'] == true || json['supports_panes'] == true,
         paneCount: (json['paneCount'] as num?)?.toInt() ??
@@ -43,12 +56,18 @@ class SessionSummary {
   String get displayName => name.isEmpty ? id : name;
 }
 
-/// 业务逻辑：进入终端页时应优先恢复指定会话，其次选一个仍在运行的会话，而不是盲选第一个。
+/// 业务逻辑：进入终端页时应优先恢复指定会话；否则按 web selectPreferredMobileSession
+/// 的优先级自动落到最合理的窗口，而不是盲选第一个。
 ///
-/// Code Logic：优先返回 id 匹配 preferredId 的会话，否则返回首个非 exited 会话；都没有则返回 null，
-/// 由调用方决定新建。
-SessionSummary? pickPreferredSession(List<SessionSummary> sessions,
-    {String? preferredId}) {
+/// Code Logic：依次选择——(1) preferredId 精确匹配（既有恢复语义，保留）；(2) 同 worktree
+/// 且 running；(3) 同 worktree 任意；(4) 全局任意 running；(5) 列表第一个（可为 exited，
+/// 与 web sessions[0] 对齐）；空列表返回 null，由调用方决定新建。[worktreeId] 缺省 null 时
+/// 跳过 worktree 作用域，保持全局口径。
+SessionSummary? pickPreferredSession(
+  List<SessionSummary> sessions, {
+  String? preferredId,
+  String? worktreeId,
+}) {
   if (preferredId != null && preferredId.isNotEmpty) {
     for (final session in sessions) {
       if (session.id == preferredId) {
@@ -56,12 +75,46 @@ SessionSummary? pickPreferredSession(List<SessionSummary> sessions,
       }
     }
   }
+  if (worktreeId != null && worktreeId.isNotEmpty) {
+    for (final session in sessions) {
+      if (session.worktreeId == worktreeId && session.status == 'running') {
+        return session;
+      }
+    }
+    for (final session in sessions) {
+      if (session.worktreeId == worktreeId) {
+        return session;
+      }
+    }
+  }
   for (final session in sessions) {
-    if (session.status != 'exited') {
+    if (session.status == 'running') {
       return session;
     }
   }
+  if (sessions.isNotEmpty) {
+    return sessions.first;
+  }
   return null;
+}
+
+/// 业务逻辑：终端 tab 需按 project/worktree 作用域过滤（web scopedSessions：
+/// projectId 相同且 worktree 匹配；无 worktree 上下文时只按 project 过滤）。
+///
+/// Code Logic：[projectId] 提供时必须与 session.projectId 相等；[worktreeId] 提供时必须与
+/// session.worktreeId 相等；任一为 null 表示该维度不过滤（与 web `!worktree ||` 兜底一致）。
+bool sessionMatchesWorktree(
+  SessionSummary session,
+  String? worktreeId, {
+  String? projectId,
+}) {
+  if (projectId != null && session.projectId != projectId) {
+    return false;
+  }
+  if (worktreeId != null && session.worktreeId != worktreeId) {
+    return false;
+  }
+  return true;
 }
 
 /// sessions/close-pane 的返回：ok 幂等，closedWindow=true 表示最后一个 pane 已关、窗口随之移除。
@@ -114,12 +167,26 @@ class SessionsClient {
     return SessionSummary.fromJson(body);
   }
 
+  /// replay 快照（签名保持不变：既有 Fake 覆写兼容）。
   Future<Map<String, dynamic>> replay(String sessionId, {bool refreshHistory = false}) {
     return _http.postJson(
       baseUrl,
       '/api/mobile/workbench/sessions/replay',
       {'sessionId': sessionId, 'refreshHistory': refreshHistory},
     );
+  }
+
+  /// 历史 hydration（回看 tmux 旧消息）专用变体：等价 `replay(refreshHistory: true)`，
+  /// 与 web sessions.hydrateScrollback 同名同语义。
+  ///
+  /// [timeout] 非空时超时抛 TimeoutException（web SCROLLBACK_HYDRATION_TIMEOUT_MS 10s
+  /// abort 同语义，失败可重试）；请求失败同样经 Future 错误上抛，由 UI 展示并允许重试。
+  Future<Map<String, dynamic>> hydrateScrollback(
+    String sessionId, {
+    Duration? timeout,
+  }) {
+    final future = replay(sessionId, refreshHistory: true);
+    return timeout == null ? future : future.timeout(timeout);
   }
 
   Future<void> pasteImage(String sessionId, String dataUrl) async {

@@ -185,6 +185,13 @@ class _PanelHttp extends LanHttpClient {
         'experimentalFeatures': {'automation': true, 'browser': true},
       };
     }
+    if (path == '/api/health') {
+      // attention 徽章拉取先探测能力（attention.v2 含 Agent 投影）。
+      return {
+        'protocol_version': 2,
+        'capabilities': ['attention.v1', 'attention.v2'],
+      };
+    }
     throw LanHttpException(404, 'not found: $path');
   }
 
@@ -269,6 +276,135 @@ class _PanelHttp extends LanHttpClient {
   }
 }
 
+/// 上下文保留 / 连接态 / lastLocation 测试用的假 HTTP：
+/// 两个项目（p1 demo 两棵树、p2 other 一棵树）+ 关键端点计数；
+/// worktrees/list 可用 [failWorktreesList] 切换失败模拟断线；
+/// worktrees/create 挂起到 [createGate] 放行，模拟创建全程在途。
+class _CtxHttp extends LanHttpClient {
+  final Completer<void> createGate = Completer<void>();
+
+  int worktreesListCalls = 0;
+  int sessionsListCalls = 0;
+  int replayCalls = 0;
+
+  /// true 时 worktrees/list 抛错（壳层应进入离线态）。
+  bool failWorktreesList = false;
+
+  static const Map<String, List<Map<String, dynamic>>> _treesByProject = {
+    'p1': [
+      {'id': 'wt-main', 'name': 'main', 'branch': 'main', 'isMain': true, 'path': '/repo'},
+      {
+        'id': 'wt-1',
+        'name': 'feat',
+        'branch': 'feat/app',
+        'isMain': false,
+        'path': '/repo/.worktrees/feat-app',
+      },
+    ],
+    'p2': [
+      {'id': 'wt-p2-main', 'name': 'main', 'branch': 'main', 'isMain': true, 'path': '/repo2'},
+    ],
+  };
+
+  @override
+  Future<Map<String, dynamic>> getJson(String baseUrl, String path) async {
+    if (path == '/api/orchestrator/config') {
+      return {'experimentalFeatures': {'automation': true, 'browser': true}};
+    }
+    if (path == '/api/health') {
+      // attention 徽章拉取先探测能力（attention.v2 含 Agent 投影）。
+      return {
+        'protocol_version': 2,
+        'capabilities': ['attention.v1', 'attention.v2'],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> getDynamic(String baseUrl, String path) async {
+    if (path == '/api/mobile/attention/v2' || path == '/api/mobile/attention') {
+      return {'items': <Map<String, dynamic>>[]};
+    }
+    if (path == '/api/mobile/workbench/projects/list') {
+      return {
+        'projects': [
+          {'id': 'p1', 'name': 'demo', 'path': '/repo', 'kind': 'local'},
+          {'id': 'p2', 'name': 'other', 'path': '/repo2', 'kind': 'local'},
+        ],
+      };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    if (path == '/api/mobile/workbench/sessions/list') {
+      sessionsListCalls += 1;
+      return [
+        {'id': 's1', 'projectId': 'p1', 'name': 's1', 'status': 'running'},
+      ];
+    }
+    if (path == '/api/mobile/workbench/files/list-dir') {
+      return [
+        {'name': 'src', 'kind': 'dir', 'path': 'src'},
+      ];
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String baseUrl,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      worktreesListCalls += 1;
+      if (failWorktreesList) {
+        throw LanHttpException(503, 'worktrees unavailable');
+      }
+      final trees = _treesByProject[body['projectId'] as String? ?? 'p1']!;
+      return {
+        'ok': true,
+        'worktrees': [for (final tree in trees) Map<String, dynamic>.from(tree)],
+      };
+    }
+    if (path == '/api/mobile/workbench/worktrees/create') {
+      // 创建全程在途：挂起直到测试放行（对齐 web beginWorktreeOperation 全程持锁）。
+      await createGate.future;
+      return {
+        'id': 'wt-new',
+        'name': 'feat/task1',
+        'branch': 'feat/task1',
+        'isMain': false,
+        'path': '/repo/.worktrees/feat-task1',
+      };
+    }
+    if (path == '/api/mobile/workbench/sessions/create') {
+      return {'id': 's-new', 'projectId': 'p1', 'name': 's-new', 'status': 'running'};
+    }
+    if (path == '/api/mobile/workbench/sessions/replay') {
+      replayCalls += 1;
+      return {'sessionId': body['sessionId'], 'snapshot': 'boot-ok', 'lastSeq': 0};
+    }
+    if (path == '/api/mobile/workbench/sessions/focus' ||
+        path == '/api/mobile/workbench/sessions/zoom-pane') {
+      return <String, dynamic>{};
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<WebSocket> openWebSocket(
+    String baseUrl,
+    String path, {
+    Iterable<String>? protocols,
+  }) {
+    return Completer<WebSocket>().future;
+  }
+}
+
 /// 构造带一个离线 server 的地址簿（面板级测试共用）。
 Future<AddressBook> _panelBook() async {
   final book = AddressBook(store: MemoryAddressBookStore());
@@ -287,6 +423,16 @@ Future<void> _pumpHome(WidgetTester tester, _PanelHttp http) async {
     MaterialApp(home: WorkbenchHome(book: book, http: http)),
   );
   await tester.pumpAndSettle();
+}
+
+/// 挂载 WorkbenchHome 并返回地址簿（lastLocation 持久化断言用）。
+Future<AddressBook> _pumpHomeWithBook(WidgetTester tester, _CtxHttp http) async {
+  final book = await _panelBook();
+  await tester.pumpWidget(
+    MaterialApp(home: WorkbenchHome(book: book, http: http)),
+  );
+  await tester.pumpAndSettle();
+  return book;
 }
 
 /// 打开项目「demo」进入 project 模式（终端面板）。
@@ -324,9 +470,10 @@ void main() {
     expect(find.byKey(const Key('nav-transfer')), findsOneWidget);
     expect(find.byKey(const Key('nav-settings')), findsOneWidget);
     expect(find.byKey(const Key('nav-provider')), findsOneWidget);
-    // 「项目」/「待处理」同时是分组标题与导航项文案；「工具」是分组标题。
+    // 「项目」同时是分组标题与导航项文案；「待处理」只是导航项（分组标题已是收件箱）。
     expect(find.text('项目'), findsWidgets);
-    expect(find.text('待处理'), findsNWidgets(2));
+    expect(find.text('待处理'), findsOneWidget);
+    expect(find.text('收件箱'), findsOneWidget);
     expect(find.text('工具'), findsOneWidget);
     expect(find.text('传输'), findsOneWidget);
     expect(find.text('设置'), findsOneWidget);
@@ -365,11 +512,11 @@ void main() {
     expect(find.text('终端'), findsOneWidget);
     expect(find.text('文件'), findsOneWidget);
     expect(find.text('Git'), findsOneWidget);
-    expect(find.text('worktrees'), findsOneWidget);
+    expect(find.text('Worktrees'), findsOneWidget);
     expect(find.text('自动化'), findsOneWidget);
-    expect(find.text('浏览器'), findsOneWidget);
-    // Drawer 分组标题已中文化（不再是英文 id）。
-    expect(find.text('工作'), findsOneWidget);
+    expect(find.text('预览'), findsOneWidget);
+    // Drawer 分组标题已对齐 web zh navGroups（工作台/快捷）。
+    expect(find.text('工作台'), findsOneWidget);
     expect(find.text('快捷'), findsOneWidget);
     expect(find.text('work'), findsNothing);
     expect(find.text('shortcuts'), findsNothing);
@@ -436,7 +583,8 @@ void main() {
     await tester.tap(find.byTooltip('Open navigation menu'));
     await tester.pumpAndSettle();
     expect(find.text('项目'), findsWidgets);
-    expect(find.text('待处理'), findsNWidgets(2));
+    expect(find.text('待处理'), findsOneWidget);
+    expect(find.text('收件箱'), findsOneWidget);
     expect(find.text('工具'), findsOneWidget);
     expect(find.text('传输'), findsOneWidget);
     expect(find.text('设置'), findsOneWidget);
@@ -493,9 +641,10 @@ void main() {
     await tester.pumpAndSettle();
 
     // 同 id 对账（ledger remove intent + 权威列表无 wt-1）→ 确认成功。
+    // 显示名口径为 branch 优先（worktreeDisplayName = branch ?? name，对齐 web）。
     expect(find.byKey(const Key('worktree-strip-error')), findsNothing);
     expect(find.byKey(const Key('worktree-remove-wt-1')), findsNothing);
-    expect(find.textContaining('已移除 worktree「feat」'), findsOneWidget);
+    expect(find.textContaining('已移除 worktree「feat/app」'), findsOneWidget);
     // 让 SnackBar 自动消失，避免残留 Timer。
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
@@ -763,5 +912,253 @@ void main() {
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump(const Duration(milliseconds: 50));
     expect(http.attentionCalls, pausedBase + 1);
+  });
+
+  testWidgets('resumed 边沿（非待处理面板）壳层立即强刷一次未读徽章', (tester) async {
+    final http = _PanelHttp();
+    await _pumpHome(tester, http);
+    final baseline = http.attentionCalls;
+
+    // 退后台：壳层轮询停表。
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump(const Duration(seconds: 30));
+    expect(http.attentionCalls, baseline);
+
+    // 回前台边沿：不等 10s 周期，立即强刷一次（对齐 web useAttention focus 强刷）。
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(http.attentionCalls, baseline + 1, reason: 'resumed 边沿应立即拉取一次');
+
+    // 随后周期轮询恢复：10s 后恰好再 +1。
+    await tester.pump(const Duration(seconds: 10));
+    expect(http.attentionCalls, baseline + 2);
+  });
+
+  testWidgets('创建 worktree 在途时点 chip 被拒绝并提示（创建全程持锁）', (tester) async {
+    final http = _CtxHttp();
+    await _pumpHomeWithBook(tester, http);
+    await tester.tap(find.text('demo'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('worktree-strip')), findsOneWidget);
+
+    Future<void> expectSelected(String id, {required bool selected}) async {
+      final chip = tester.widget<ChoiceChip>(find.byKey(Key('worktree-$id')));
+      expect(chip.selected, selected, reason: 'chip $id 选中态应为 $selected');
+    }
+
+    // 打开条上创建表单并确认创建：worktrees/create 挂起，创建全程在途。
+    await tester.tap(find.byKey(const Key('worktree-create')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('worktree-create-suffix')), 'task1');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('worktree-create-confirm')));
+    await tester.pump();
+
+    // 在途窗口内点其它 chip：守卫拒绝并提示，选中态不变。
+    await tester.tap(find.byKey(const Key('worktree-wt-1')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('正在处理 worktree 操作，请稍候'), findsOneWidget);
+    await expectSelected('wt-main', selected: true);
+    await expectSelected('wt-1', selected: false);
+
+    // 放行创建：后续链路（sessions/create → list → 自动选中进入终端）正常收尾。
+    http.createGate.complete();
+    await tester.pumpAndSettle();
+    // 让 SnackBar（含排队提示）自动消失，避免残留 Timer。
+    await tester.pump(const Duration(seconds: 10));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('返回项目列表保留上下文：同一项目秒回原 worktree，不同项目走完整切换', (tester) async {
+    final http = _CtxHttp();
+    await _pumpHomeWithBook(tester, http);
+
+    Future<void> backToProjects() async {
+      await tester.tap(find.byTooltip('Open navigation menu'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('nav-back-projects')));
+      await tester.pumpAndSettle();
+    }
+
+    // 打开 demo → 终端面板，选中 wt-1（列表请求 #1 + #2 resume）。
+    await tester.tap(find.text('demo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('worktree-wt-1')));
+    await tester.pumpAndSettle();
+    expect(http.worktreesListCalls, 2);
+    // Flutter 既有行为：worktreeId 是终端 ValueKey 的一部分，切树重挂载并重新 boot。
+    expect(http.sessionsListCalls, 2);
+
+    // 返回项目列表：只切面板，上下文全保留（对齐 web handleBackToProjects）。
+    await backToProjects();
+    expect(http.sessionsListCalls, 2, reason: '终端常驻挂载不因返回列表销毁');
+    // AppBar 仍显示激活项目名 + 列表行「demo」，共两处。
+    expect(find.text('demo'), findsNWidgets(2));
+
+    // 点同一项目：同项目早退——直接回原 worktree/终端，不重拉、不重 boot。
+    await tester.tap(find.byKey(const Key('project-row-p1')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('worktree-strip')), findsOneWidget);
+    expect(http.worktreesListCalls, 2, reason: '同项目早退不应重拉 worktrees');
+    expect(http.sessionsListCalls, 2, reason: '同项目早退不应重新 boot 终端');
+    final chip = tester.widget<ChoiceChip>(find.byKey(const Key('worktree-wt-1')));
+    expect(chip.selected, isTrue, reason: '原 worktree 选中态保留');
+
+    // 再返回列表，点不同项目：走完整切换（拉新列表 + 终端换 key 重 boot）。
+    await backToProjects();
+    await tester.tap(find.byKey(const Key('project-row-p2')));
+    await tester.pumpAndSettle();
+    expect(http.worktreesListCalls, 3, reason: '切换项目应拉取新项目 worktrees');
+    expect(http.sessionsListCalls, 3, reason: '切换项目终端重挂载并 boot');
+    final p2Chip = tester.widget<ChoiceChip>(find.byKey(const Key('worktree-wt-p2-main')));
+    expect(p2Chip.selected, isTrue);
+  });
+
+  testWidgets('lastLocation 防抖即时持久化，paused 时强制 flush', (tester) async {
+    final http = _CtxHttp();
+    final book = await _pumpHomeWithBook(tester, http);
+    await tester.tap(find.text('demo'));
+    await tester.pumpAndSettle();
+
+    // 切 worktree → 500ms 防抖到期后 lastLocation 已含最新位置（无需离开页面）。
+    await tester.tap(find.byKey(const Key('worktree-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 600));
+    var location = book.active!.lastLocation;
+    expect(location?.projectId, 'p1');
+    expect(location?.panel, 'terminal');
+    expect(location?.worktreeId, 'wt-1');
+
+    // 再切回主树后立刻退后台：不等防抖，paused 强制 flush 最新位置。
+    await tester.tap(find.byKey(const Key('worktree-wt-main')));
+    await tester.pumpAndSettle();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    location = book.active!.lastLocation;
+    expect(location?.worktreeId, 'wt-main', reason: 'paused 应绕过防抖立即落盘');
+    // 终端页持有 AppLifecycleListener，必须按合法序列回前台（paused→hidden→inactive→resumed）。
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('连接态：请求失败显示离线+最近错误，恢复在线自动重拉当前项目', (tester) async {
+    final http = _CtxHttp();
+    await _pumpHomeWithBook(tester, http);
+    await tester.tap(find.text('demo'));
+    await tester.pumpAndSettle();
+
+    // 首次成功：状态行显示「已连接」。
+    expect(find.text('已连接'), findsOneWidget);
+
+    // worktrees/list 失败：进入离线态——连接药丸含缓存时间，下方整行最近错误。
+    http.failWorktreesList = true;
+    await tester.tap(find.byKey(const Key('worktree-wt-1')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('离线 · 缓存于'), findsOneWidget);
+    expect(find.textContaining('最后错误：'), findsOneWidget);
+    expect(find.text('已连接'), findsNothing);
+
+    // 恢复：下一次成功即视为恢复边沿——自动重拉当前项目权威列表（#3 成功 + #4 恢复刷新）。
+    http.failWorktreesList = false;
+    await tester.tap(find.byKey(const Key('worktree-wt-main')));
+    await tester.pumpAndSettle();
+    expect(http.worktreesListCalls, 4, reason: '恢复在线后应对当前项目自动重拉一次');
+    expect(find.text('已连接'), findsOneWidget);
+    expect(find.textContaining('最后错误：'), findsNothing);
+  });
+
+  testWidgets('状态行：worktree/session/连接态药丸 + 缓存时间 + 离线整行错误', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WorkbenchShell(
+          mode: WorkbenchNavMode.project,
+          panel: WorkbenchPanel.terminal,
+          projectLabel: 'demo',
+          connection: WorkbenchConnectionState.offline(
+            lastError: 'boom',
+            cachedSince: DateTime(2026, 9, 20, 10, 30),
+          ),
+          worktreeLabel: 'feat',
+          sessionLabel: 's1',
+          onSelect: (_) {},
+          onBackToProjects: () {},
+          child: const Text('project-body'),
+        ),
+      ),
+    );
+    expect(find.text('feat'), findsOneWidget);
+    expect(find.text('s1'), findsOneWidget);
+    expect(find.text('离线 · 缓存于 10:30'), findsOneWidget);
+    expect(find.text('最后错误：boom'), findsOneWidget);
+    expect(find.byKey(const Key('shell-status-connection')), findsOneWidget);
+  });
+
+  testWidgets('状态行：无连接记录不显示连接药丸，标签缺省回落占位', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WorkbenchShell(
+          mode: WorkbenchNavMode.global,
+          panel: WorkbenchPanel.projects,
+          onSelect: (_) {},
+          child: const Text('global-body'),
+        ),
+      ),
+    );
+    expect(find.text('worktree'), findsOneWidget);
+    expect(find.text('session'), findsOneWidget);
+    expect(find.byKey(const Key('shell-status-connection')), findsNothing);
+    expect(find.byKey(const Key('shell-status-error')), findsNothing);
+  });
+
+  testWidgets('终端全屏（hideAppBar）盖住 AppBar 与状态行，退出恢复', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WorkbenchShell(
+          mode: WorkbenchNavMode.project,
+          panel: WorkbenchPanel.terminal,
+          projectLabel: 'demo',
+          hideWorktreeStrip: true,
+          hideAppBar: true,
+          connection: WorkbenchConnectionState.online(
+            lastSucceededAt: DateTime(2026, 9, 20, 10, 30),
+          ),
+          worktreeStrip: const Text('wt-main'),
+          onSelect: (_) {},
+          onBackToProjects: () {},
+          child: const Text('project-body'),
+        ),
+      ),
+    );
+    // 全屏：无 AppBar（Scaffold 无 AppBar 分支），状态行与切换条一并隐藏。
+    expect(find.byType(AppBar), findsNothing);
+    expect(find.byKey(const Key('shell-status-worktree')), findsNothing);
+    expect(find.byKey(const Key('shell-status-connection')), findsNothing);
+    expect(find.byKey(const Key('worktree-strip')), findsNothing);
+    expect(find.text('project-body'), findsOneWidget);
+
+    // 退出全屏：AppBar + 状态行 + 切换条恢复。
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WorkbenchShell(
+          mode: WorkbenchNavMode.project,
+          panel: WorkbenchPanel.terminal,
+          projectLabel: 'demo',
+          connection: WorkbenchConnectionState.online(
+            lastSucceededAt: DateTime(2026, 9, 20, 10, 30),
+          ),
+          worktreeStrip: const Text('wt-main'),
+          onSelect: (_) {},
+          onBackToProjects: () {},
+          child: const Text('project-body'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(AppBar), findsOneWidget);
+    expect(find.byKey(const Key('shell-status-worktree')), findsOneWidget);
+    expect(find.text('已连接'), findsOneWidget);
+    expect(find.byKey(const Key('worktree-strip')), findsOneWidget);
   });
 }

@@ -198,4 +198,23 @@ void main() {
     expect(attentionCategoryLabel('unknown'), isNull);
     expect(attentionCategoryLabel(null), isNull);
   });
+
+  test('attentionSourceKindActionLabel maps every web action copy', () {
+    // 全量映射与 web zh/attention.json action.* 一致（getAttentionActionI18nKey 口径）。
+    expect(attentionSourceKindActionLabel('orchestratorHumanReview'), '前往复核');
+    expect(attentionSourceKindActionLabel('orchestratorBlocked'), '查看阻塞原因');
+    expect(attentionSourceKindActionLabel('remoteOutboxFailed'), '查看失败项');
+    expect(attentionSourceKindActionLabel('workbenchDependency'), '打开设置');
+    expect(attentionSourceKindActionLabel('agentNeedsInput'), '打开终端');
+    expect(attentionSourceKindActionLabel('agentFailed'), '打开终端');
+    expect(attentionSourceKindActionLabel('experimentNeedsDecision'), '查看实验');
+    expect(attentionSourceKindActionLabel('agentHubConflict'), '打开 Agent Hub');
+    expect(attentionSourceKindActionLabel('agentHubProjectionBlocked'), '打开 Agent Hub');
+  });
+
+  test('attentionSourceKindActionLabel falls back to the raw value', () {
+    // 未知来源回退原值，新增 sourceKind 不丢信息；缺省回退空串。
+    expect(attentionSourceKindActionLabel('someFutureKind'), 'someFutureKind');
+    expect(attentionSourceKindActionLabel(null), '');
+  });
 }

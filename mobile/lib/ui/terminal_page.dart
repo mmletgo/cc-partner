@@ -25,6 +25,62 @@ import 'extra_keys_bar.dart';
 /// 收藏面板「全部」标签哨兵，避免与真实 tag 字面量冲突（对齐 web FAVORITE_ALL_TAG）。
 const String _kFavoriteAllTag = '__all__';
 
+/// 常驻终端缓冲上限：超出后淘汰最久未用的非当前会话（对齐 web
+/// mobileMountedTerminals.ts MAX_MOUNTED_MOBILE_TERMINALS = 8）。
+///
+/// 已挂载会话保留输出缓冲，切回不清屏、不重放，用 events 增量（afterSequence）
+/// 补齐 gap；仅在序列过旧触发 gap 帧时才走全量 replay。
+const int _kMaxMountedTerminalBuffers = 8;
+
+/// 回前台后视口钉住最新输出的时长（对齐 web mobileTerminalResumeFollow.ts 8s）。
+const int _kResumeFollowMs = 8000;
+
+/// 单个会话的常驻运行时：输出缓冲（xterm Terminal）+ 协议策略 + 事件基线。
+///
+/// Business Logic（为什么需要）:
+///   多会话切换时保留各自的画面与协议状态（web MobileTerminalXtermSlot 每会话一份
+///   Terminal/Buffer），切回时不清屏不重放；后台期间无法积累增量（events 每会话一条
+///   连接），靠 afterSequence 续传，序列过旧由 gap 帧兜底全量 replay。
+///
+/// Code Logic（做什么）:
+///   持有 TerminalController（本会话 id 构造，replayReady/hydration/inputLink 均
+///   会话私有）、Terminal 输出缓冲、ownerInstanceId/sequence 事件基线、resize 上报
+///   基线与 hydration 触发状态；由页面的 LRU 表管理创建/复用/淘汰。
+class _MountedSession {
+  _MountedSession(this.sessionId, {required void Function(String) onOutput})
+      : policy = TerminalController(sessionId: sessionId),
+        terminal = Terminal(maxLines: 5000, onOutput: onOutput);
+
+  /// 会话 id（与 policy.sessionId 一致，供 LRU 键与日志使用）。
+  final String sessionId;
+
+  /// 本会话的协议策略（输入链路握手/背压、replayReady、hydration 标记均会话私有）。
+  final TerminalController policy;
+
+  /// 本会话的输出缓冲；切走时保留，切回时由 TerminalView 重新挂载。
+  final Terminal terminal;
+
+  /// 最近一次 events 帧的 ownerInstanceId（ reconnect 时作 afterOwnerInstanceId）。
+  String? owner;
+
+  /// 最近一次 events 帧的 sequence（reconnect 时作 afterSequence 增量续传）。
+  int sequence = 0;
+
+  /// resize 上报基线：创建时优先取服务端持久化 session.cols/rows（同尺寸不回传，
+  /// 对齐 web XtermSlot persistedSessionSize）；上报后记录实测值。
+  (String, int, int)? lastSentResize;
+
+  /// 服务端持久化 PTY 尺寸（创建该 buffer 时的会话 DTO 快照；旧后端无值为 null）。
+  int? persistedCols;
+  int? persistedRows;
+
+  /// hydration（refreshHistory replay）单飞门闩。
+  bool hydrating = false;
+
+  /// hydration 触发前累计的向上滚动意图（行）。
+  int hydrationIntent = 0;
+}
+
 /// 局域网远端项目终端页。
 ///
 /// Business Logic（为什么需要）:
@@ -102,26 +158,45 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   late final SessionsClient _sessions;
   late final PromptsClient _prompts;
   late final GitClient _git;
-  late final TerminalController _policy;
-  late final Terminal _terminal;
   final _view = xterm.TerminalController();
   final _input = TextEditingController();
   final _scrollController = ScrollController();
   WebSocket? _socket;
   HttpClient? _eventsClient;
+
+  /// 常驻会话缓冲表：插入顺序即 LRU 顺序（最近使用重插尾部），上限
+  /// [_kMaxMountedTerminalBuffers]，淘汰最久未用的非当前会话。
+  final Map<String, _MountedSession> _mounted = <String, _MountedSession>{};
+
+  /// 当前激活会话的缓冲；空态（尚无会话）为 null。
+  _MountedSession? _active;
+
+  /// 当前激活会话 id；与 [_active] 同步维护，空态为 null。
   String? _sessionId;
   String? _error;
   String _status = '连接中';
   String? _laneId;
   int _seq = 1;
-  String? _owner;
-  int _sequence = 0;
-  StickyModifier? _sticky;
   List<SessionSummary> _sessionList = [];
   bool _disposed = false;
 
-  // 通用动作占用：'create' | 'create-pane' | 'switch-pane' | 'close-pane' | 'commit'
-  // | 'merge' | 'repair' | 'close-<sessionId>'，防重入。
+  /// 面板常驻错误条文案（对齐 web panelError：前缀 + 可读详情，被覆盖前常驻）；
+  /// 非空时若 [_panelErrorActionLabel] 也非空则附带动入口（如 hydration 重试）。
+  String? _panelError;
+  String? _panelErrorActionLabel;
+  VoidCallback? _panelErrorAction;
+
+  /// 划选操作条可见性（xterm 长按出现选区时显示，对齐 web selecting 底栏）。
+  bool _selectionBarVisible = false;
+
+  /// 当前选区覆盖的行数（操作条「已选 N 行」）。
+  int _selectedLineCount = 0;
+
+  /// 回前台跟随最新输出的 pin 截止时间；用户手动滚动（拖动）取消，null 表示未 pin。
+  DateTime? _resumePinUntil;
+
+  /// 通用动作占用：'create' | 'create-pane' | 'switch-pane' | 'close-pane' | 'commit'
+  /// | 'merge' | 'repair' | 'close-会话id'，防重入。
   String? _actionBusy;
 
   // hook 失败修复卡状态（对齐 web MobileHookRepair）。
@@ -132,7 +207,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   final GitMutationTracker _commitMutation = GitMutationTracker();
   final GitMutationTracker _mergeMutation = GitMutationTracker();
 
-  // 全屏状态：隐藏 chip 条与工具行，仅保留状态文本与退出全屏入口。
+  // 全屏状态：隐藏 chip 条；顶部工具行保留全部动作入口（对齐 web
+  // getMobileTerminalChromeVisibility：全屏仅隐藏 windowTabs/worktreeStrip）。
   bool _fullscreen = false;
 
   // 收藏 Prompt 快捷输入：筛选条件跨打开保留（对齐 web 外层 state）。
@@ -142,11 +218,6 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   // Prompt 优化提交中防重复。
   bool _optimizing = false;
 
-  // 惰性历史 hydration：已灌过的会话集合 + 在途会话 + 累计向上意图（行）。
-  final Set<String> _hydratedSessions = <String>{};
-  String? _hydratingSession;
-  int _hydrationIntent = 0;
-
   // 触控滚动转发（SGR wheel）：仅在 mouse tracking 已协商或 alt screen 时生效。
   bool _forwardWheel = false;
   final Set<int> _dragPointers = <int>{};
@@ -154,7 +225,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   Size? _viewportSize;
   bool _measureScheduled = false;
   bool _terminalMeasured = false;
-  (String, int, int)? _lastSentResize;
+  int? _lastMeasuredCols;
+  int? _lastMeasuredRows;
   Timer? _resizeDebounce;
 
   // events 长连接：代数用于让旧循环在切会话/销毁后立即失效。
@@ -170,15 +242,61 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   int _inputGeneration = 0;
   int _inputBackoffAttempt = 0;
   Timer? _inputReconnectTimer;
-  bool _inputDown = false;
-
-  // replay 输入门闩：初始进入与每次切换会话后的首次 replay 完成（成功或失败）前保持关闭，
-  // 对齐 web shouldForwardMobileTerminalInput = replayReady && gate（门闩期间输入丢弃不排队）。
-  bool _inputGateOpen = false;
 
   // sticky Ctrl/Alt：3 秒无后续输入自动解除。
+  StickyModifier? _sticky;
   final StickyModifierHold _stickyHold = StickyModifierHold();
   Timer? _stickyTimer;
+
+  /// 当前激活会话的 DTO（来自最近一次列表刷新），无则 null。
+  SessionSummary? get _currentSession {
+    final id = _sessionId;
+    if (id == null) {
+      return null;
+    }
+    for (final session in _sessionList) {
+      if (session.id == id) {
+        return session;
+      }
+    }
+    return null;
+  }
+
+  /// 会话 chip 条的作用域列表：projectId + worktreeId 过滤（对齐 web scopedSessions）。
+  List<SessionSummary> get _scopedSessions => _sessionList
+      .where((session) =>
+          sessionMatchesWorktree(session, widget.worktreeId,
+              projectId: widget.project.id))
+      .toList();
+
+  /// 输入发送全路径门控（对齐 web inputEnabled + replayReady 门闩）：
+  /// 会话已激活、权威状态 running、本会话 replay 门闩已放行、输入链路完成服务端
+  /// ready 握手且 WS 仍处于 open。任一不满足一律丢弃输入（含 SGR wheel）。
+  bool get _inputSendEnabled {
+    final buffer = _active;
+    final socket = _socket;
+    return buffer != null &&
+        _currentSession?.status == 'running' &&
+        buffer.policy.replayReady &&
+        buffer.policy.inputStreamReady &&
+        socket != null &&
+        socket.readyState == WebSocket.open;
+  }
+
+  /// 输入链路是否处于断开态（用于状态行文案）。
+  bool get _inputLinkDown {
+    final buffer = _active;
+    return buffer != null &&
+        buffer.policy.inputLink.state == TerminalInputLinkState.closed;
+  }
+
+  /// 断线时是否有未确认输入被丢弃（状态行区分两种断线提示）。
+  bool get _inputDroppedUnacked =>
+      _active?.policy.inputLink.droppedUnackedOnDisconnect ?? false;
+
+  /// 贴图/收藏/优化统一门控（对齐 web canPasteImage/canOpenFavoriteQuickInput）：
+  /// running + 输入流 ready + replay 门闩放行（收口到 [_inputSendEnabled] 同口径）。
+  bool get _canUseInputActions => _inputSendEnabled;
 
   @override
   void initState() {
@@ -189,9 +307,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     _prompts = widget.promptsClient ??
         PromptsClient(widget.http, widget.book.active!.baseUrl);
     _git = widget.gitClient ?? GitClient(widget.http, widget.book.active!.baseUrl);
-    _policy = TerminalController(sessionId: widget.preferredSessionId ?? '');
-    _terminal = Terminal(maxLines: 5000, onOutput: _handleTerminalOutput);
-    _terminal.addListener(_onTerminalStateMaybeChanged);
+    // 划选操作条跟随 xterm 选区出现/消失。
+    _view.addListener(_onViewSelectionChanged);
     _boot();
   }
 
@@ -212,7 +329,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     _inputReconnectTimer?.cancel();
     _socket?.close();
     _eventsClient?.close(force: true);
-    _terminal.removeListener(_onTerminalStateMaybeChanged);
+    _view.removeListener(_onViewSelectionChanged);
+    _mounted.clear();
+    _active = null;
     _scrollController.dispose();
     _input.dispose();
     _view.dispose();
@@ -227,14 +346,15 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     _handleResumed();
   }
 
-  /// 业务逻辑：手机回前台后半开连接无法探测，输入通道必须立即重建、事件流立即重连一次。
+  /// 业务逻辑：手机回前台后半开连接无法探测，输入通道必须立即重建、事件流立即重连一次；
+  /// 同时视口应跟随最新输出（对齐 web mobileTerminalResumeFollow：8s pin 窗口）。
   ///
   /// Code Logic：输入直接重连（重连 Timer 若在等待则被取消）；events 若在退避等待中
   /// 则立即唤醒并重置退避，若仍在连接中则强制断开交给循环走重连分支；随后静默刷新
-  /// 一次会话列表（后台期间状态点/pane 数可能已变化，刷新失败静默）。由回前台强制的
-  /// events 重连成功后还会在首帧处再静默刷一次（与退避重连共用该钩子），两次均为幂等读。
-  /// xterm 4.0.0 的 RenderTerminal 自带 stick-to-bottom（滚轮位置在底部时写输出自动钉底），
-  /// 回前台未在浏览历史时视口天然跟随最新输出，无需额外 pin。
+  /// 一次会话列表。回前台时若未在划选、无选区，把视口钉到底并在 8s 窗口内随
+  /// catch-up 跟随（xterm RenderTerminal 在底部时自动钉底）；用户拖动滚动经
+  /// NotificationListener 取消 pin。由回前台强制的 events 重连成功后还会在首帧处
+  /// 再静默刷一次（与退避重连共用该钩子），两次均为幂等读。
   void _handleResumed() {
     if (!mounted || _disposed) {
       return;
@@ -247,16 +367,35 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     } else {
       _eventsClient?.close(force: true);
     }
+    // 回前台跟随最新输出：划选/有选区时不抢滚动（对齐 web
+    // shouldFollowMobileTerminalToLatest）。
+    if (_active != null && _view.selection == null && !_selectionBarVisible) {
+      _resumePinUntil =
+          DateTime.now().add(const Duration(milliseconds: _kResumeFollowMs));
+      _jumpToBottom();
+    }
     // 回前台后静默刷新会话列表；刷新失败静默（_refreshSessions 自吞异常）。
     unawaited(_refreshSessions());
   }
 
+  /// 把终端视口跳到最新输出（帧末执行，等 scrollExtent 稳定）。
+  void _jumpToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final scroll = _scrollController;
+      if (_disposed || !scroll.hasClients) {
+        return;
+      }
+      scroll.jumpTo(scroll.position.maxScrollExtent);
+    });
+  }
+
   /// 业务逻辑：boot 是页面可重入的初始化入口（initState 首启与错误页「重试」共用）：
-  /// 拉会话列表 → 选/建首选会话 → 激活；任一步失败展示错误页并保留重试入口。
+  /// 拉会话列表 → 选首选会话 → 激活；无会话时展示空态 + 手动新建，不再自动创建
+  /// （对齐 web：无会话显示「当前 worktree 还没有终端窗口」+「新窗口」按钮）。
   ///
   /// Code Logic：先清掉上一次的 _error（initState 首次调用时为空，跳过 setState），
-  /// 随后按既有顺序 list → pickPreferredSession（缺失则 create）→ _activateSession；
-  /// 异常统一落 _error，由 build 渲染错误页与重试按钮。
+  /// 随后 list → pickPreferredSession（带 worktreeId 作用域优先级）→ 命中则
+  /// _activateSession；异常统一落 _error，由 build 渲染错误页与重试按钮。
   Future<void> _boot() async {
     if (_error != null && mounted && !_disposed) {
       setState(() => _error = null);
@@ -267,9 +406,14 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         return;
       }
       setState(() => _sessionList = sessions);
-      var session = pickPreferredSession(sessions, preferredId: widget.preferredSessionId);
-      session ??= await _createSessionInternal();
-      await _activateSession(session);
+      final session = pickPreferredSession(
+        sessions,
+        preferredId: widget.preferredSessionId,
+        worktreeId: widget.worktreeId,
+      );
+      if (session != null) {
+        await _activateSession(session);
+      }
     } catch (error) {
       if (mounted) {
         setState(() => _error = error.toString());
@@ -277,11 +421,14 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     }
   }
 
-  /// 业务逻辑：切换会话时旧画面属于上一个会话，必须清屏并重放快照，否则新会话输出串台。
+  /// 业务逻辑：切换会话时新画面来自目标会话的常驻缓冲——首次激活清屏 + replay 快照
+  /// 建立基线；切回已缓冲会话不清屏不重放，靠 events 增量（afterSequence）续传，
+  /// 序列过旧由 gap 帧兜底全量重放（对齐 web 常驻 xterm + 增量续传）。
   ///
-  /// Code Logic：先停掉旧 events 循环，再 focus 远端、zoom-pane 幂等、事件基线归零
-  /// （ownerInstanceId / sequence 重取）、清屏 + replay 快照，然后重建输入 WS 并重启
-  /// events 循环，最后刷新列表。hydration 标记按会话记录，切会话时重置在途状态。
+  /// Code Logic：先停掉旧 events 循环、丢弃旧会话未确认输入，再 focus 远端（失败上屏
+  /// 错误条）、zoom-pane 幂等（失败上屏）；随后取/建目标缓冲并清屏 + replay（仅新
+  /// buffer），成败都放行 replayReady；切会话保持全屏（对齐 web），最后重建输入 WS
+  /// 并重启 events 循环，刷新列表。划选状态随切会话清除。
   Future<void> _activateSession(SessionSummary session) async {
     final nextId = session.id;
     if (nextId.isEmpty ||
@@ -290,80 +437,124 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       return;
     }
     _stopEventsLoop();
+    // 旧会话未确认输入结果未知：切走即丢弃（不重放、不写入 /sessions/write）。
+    _active?.policy.takeUnackedOnDisconnect();
     try {
       await _sessions.focus(nextId);
-    } catch (_) {
-      // focus 失败不阻断本地切换。
+    } catch (error) {
+      _setPanelError('切换终端失败：$error');
     }
-    // 移动端单屏只能展示一个 pane：切会话后把 tmux 分屏收成 zoom 单 pane（幂等，失败静默）。
+    // 移动端单屏只能展示一个 pane：切会话后把 tmux 分屏收成 zoom 单 pane（幂等）。
     await _ensurePaneZoomed(session);
     if (!mounted || _disposed) {
       return;
     }
-    final wasFullscreen = _fullscreen;
+    var buffer = _mounted[nextId];
+    final isNewBuffer = buffer == null;
+    if (buffer == null) {
+      buffer = _MountedSession(nextId, onOutput: _handleTerminalOutput)
+        ..persistedCols = session.cols
+        ..persistedRows = session.rows;
+      _mounted[nextId] = buffer;
+      _evictMountedBuffers();
+    } else {
+      // LRU 触碰：重插尾部，避免切回常用会话被淘汰。
+      _mounted.remove(nextId);
+      _mounted[nextId] = buffer;
+    }
+    buffer.terminal.addListener(_onTerminalStateMaybeChanged);
+    _view.clearSelection();
     setState(() {
       _sessionId = nextId;
-      _owner = null;
-      _sequence = 0;
+      _active = buffer;
       _connectedOnce = false;
       _eventsDown = false;
       _status = '连接中';
-      _hydratingSession = null;
-      _hydrationIntent = 0;
-      _fullscreen = false;
-      // 首次 replay 完成前关闭输入门闩，避免输入先于历史快照执行。
-      _inputGateOpen = false;
+      _panelError = null;
+      _panelErrorActionLabel = null;
+      _panelErrorAction = null;
+      _selectionBarVisible = false;
+      _selectedLineCount = 0;
+      _resumePinUntil = null;
+      // 切换会话保持全屏（对齐 web：isTerminalFullscreen 只随 visibleSession 存在性变化）。
     });
-    if (wasFullscreen) {
-      widget.onFullscreenChanged?.call(false);
-    }
-    _policy.resetForSessionSwitch();
-    _terminal.write('\x1b[3J\x1b[2J\x1b[H');
-    try {
-      final replay = await _sessions.replay(nextId);
-      if (!mounted || _disposed || _sessionId != nextId) {
-        return;
+    buffer.policy.onInputLinkChanged = _onInputLinkChanged;
+    if (isNewBuffer) {
+      // 首次激活：清屏 + replay 快照建立基线；完成（成功或失败）前输入门闩保持关闭。
+      buffer.terminal.write('\x1b[3J\x1b[2J\x1b[H');
+      try {
+        final replay = await _sessions.replay(nextId);
+        if (!mounted || _disposed || !identical(_active, buffer)) {
+          return;
+        }
+        final snapshot = _replaySnapshotOf(replay);
+        if (snapshot.isNotEmpty) {
+          buffer.terminal.write(snapshot);
+        }
+      } catch (error) {
+        // 快照拉取失败时仍以实时流继续，gap 帧会触发再次重放；失败上屏错误条
+        // （对齐 web XtermSlot replay catch → setPanelError）。
+        if (!mounted || _disposed || !identical(_active, buffer)) {
+          return;
+        }
+        _setPanelError('加载终端历史失败：$error');
+      } finally {
+        // 成败都置 replayReady（对齐 web then/catch 两分支均置 replayReady=true）。
+        buffer.policy.finishReplay();
       }
-      final snapshot = _replaySnapshotOf(replay);
-      if (snapshot.isNotEmpty) {
-        _terminal.write(snapshot);
-      }
-      _openInputGate();
-    } catch (_) {
-      // 快照拉取失败时仍以实时流继续，gap 帧会触发再次重放。
-      // 失败同样放行输入门闩（对齐 web replay 失败分支也置 replayReady=true）。
-      _openInputGate();
+      _jumpToBottom();
     }
     await _openInput();
     _startEventsLoop();
     await _refreshSessions();
   }
 
-  /// 业务逻辑：初始进入与切换会话后的首次 replay 完成（成功或失败）后必须放行输入，
-  /// 否则输入行会永远停留在门闩禁用态（对齐 web then/catch 两个分支都置 replayReady=true）。
-  ///
-  /// Code Logic：页面已销毁或门闩已放行时直接返回；否则置 true 并刷新 UI，
-  /// 让输入行/发送按钮/extra keys（经 _send 门控）恢复可用。
-  void _openInputGate() {
-    if (!mounted || _disposed || _inputGateOpen) {
-      return;
+  /// LRU 淘汰：超过上限时从最旧开始淘汰非当前会话（对齐 web
+  /// nextMountedMobileSessionIds：active 始终保留）。
+  void _evictMountedBuffers() {
+    while (_mounted.length > _kMaxMountedTerminalBuffers) {
+      String? evictId;
+      for (final id in _mounted.keys) {
+        if (id != _sessionId) {
+          evictId = id;
+          break;
+        }
+      }
+      if (evictId == null) {
+        return;
+      }
+      final evicted = _mounted.remove(evictId);
+      evicted?.terminal.removeListener(_onTerminalStateMaybeChanged);
     }
-    setState(() => _inputGateOpen = true);
   }
 
-  /// 输入行可用性：会话已激活、权威状态为 running、replay 门闩已放行且输入 WS 处于 ready（open）。
-  ///
-  /// Code Logic：四者缺一即禁用——status 取自当前会话 DTO（最近一次列表刷新），
-  /// 严格等于 'running' 才启用，缺失/非 running（如 exited）一律禁用
-  /// （fail-closed 对齐 web inputEnabled 的 status === 'running' 严格比较）；
-  /// _sessionList 刷新与 _socket 状态翻转处都有 setState，UI 会跟随刷新。
-  bool get _inputRowEnabled {
-    final socket = _socket;
-    return _sessionId != null &&
-        _currentSession?.status == 'running' &&
-        _inputGateOpen &&
-        socket != null &&
-        socket.readyState == WebSocket.open;
+  /// 输入链路状态变化：刷新状态行/输入禁用态；封锁原因上屏错误条
+  /// （对齐 web input stream error → setPanelError）。
+  void _onInputLinkChanged(TerminalInputLinkStatus status) {
+    if (!mounted || _disposed) {
+      return;
+    }
+    if (status.state == TerminalInputLinkState.blocked && status.message != null) {
+      _setPanelError(status.message!);
+      return;
+    }
+    _refreshStatus();
+  }
+
+  /// 面板常驻错误条：写入可读错误（对齐 web panelError = 前缀 + getErrorMessage，
+  /// 被覆盖前常驻）；message 为 null 时清除。可选附带一个动作用户（如 hydration 重试）。
+  void _setPanelError(String? message, {String? actionLabel, VoidCallback? action}) {
+    if (_disposed) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _panelError = message;
+      _panelErrorActionLabel = message == null ? null : actionLabel;
+      _panelErrorAction = message == null ? null : action;
+    });
   }
 
   /// 刷新会话列表；失败静默（列表刷新失败不影响已完成的切换）。
@@ -384,20 +575,6 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         '';
   }
 
-  /// 当前激活会话的 DTO（来自最近一次列表刷新），无则 null。
-  SessionSummary? get _currentSession {
-    final id = _sessionId;
-    if (id == null) {
-      return null;
-    }
-    for (final session in _sessionList) {
-      if (session.id == id) {
-        return session;
-      }
-    }
-    return null;
-  }
-
   /// pane 操作通用门控：session 支持 panes 且无动作占用（对齐 web canRunMobilePaneMutation）。
   bool get _canRunPaneMutation {
     final session = _currentSession;
@@ -410,33 +587,36 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   /// 业务逻辑：移动端单屏只能展示一个 pane，进入多 pane window 后必须收成 zoom 单 pane。
   ///
-  /// Code Logic：仅对 running 且支持 panes 的会话调用 zoom-pane；后端幂等，失败静默。
+  /// Code Logic：仅对 running 且支持 panes 的会话调用 zoom-pane；后端幂等，失败上屏
+  /// 错误条（对齐 web ensurePaneZoomedById catch → setPanelError）。
   Future<void> _ensurePaneZoomed(SessionSummary session) async {
     if (session.status != 'running' || !session.supportsPanes) {
       return;
     }
     try {
       await _sessions.zoomPane(session.id);
-    } catch (_) {
-      // 幂等调用，失败静默（对齐任务约定）。
+    } catch (error) {
+      _setPanelError('切换单 pane 视图失败：$error');
     }
   }
 
   /// 业务逻辑：手机端新增 pane 必须由 tmux 创建真实 pane，方向固定向下（对齐 web）。
   ///
-  /// Code Logic：split-pane(down) → zoom 收单 pane → 刷新列表；全部动作 busy 防重入。
+  /// Code Logic：split-pane(down) → zoom 收单 pane → 刷新列表；全部动作 busy 防重入；
+  /// 失败写入面板错误条（前缀 + 服务端错误详情，对齐 web handleCreatePane）。
   Future<void> _createPane() async {
     final session = _currentSession;
     if (session == null || !session.supportsPanes || _actionBusy != null) {
       return;
     }
     setState(() => _actionBusy = 'create-pane');
+    _setPanelError(null);
     try {
       await _sessions.splitPane(session.id, direction: 'down');
       await _ensurePaneZoomed(session);
       await _refreshSessions();
-    } catch (_) {
-      _toast('分屏失败，请稍后重试');
+    } catch (error) {
+      _setPanelError('分屏失败：$error');
     } finally {
       if (mounted && !_disposed) {
         setState(() => _actionBusy = null);
@@ -446,18 +626,19 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   /// 业务逻辑：多 pane window 中一键切到下一个 pane，避免用户手敲 tmux 快捷键。
   ///
-  /// Code Logic：switch-pane → zoom 幂等；仅 paneCount > 1 时可用。
+  /// Code Logic：switch-pane → zoom 幂等；仅 paneCount > 1 时可用；失败上屏错误条。
   Future<void> _switchPane() async {
     final session = _currentSession;
     if (session == null || !_canSwitchPane) {
       return;
     }
     setState(() => _actionBusy = 'switch-pane');
+    _setPanelError(null);
     try {
       await _sessions.switchPane(session.id);
       await _ensurePaneZoomed(session);
-    } catch (_) {
-      _toast('切换窗格失败，请稍后重试');
+    } catch (error) {
+      _setPanelError('切换 pane 失败：$error');
     } finally {
       if (mounted && !_disposed) {
         setState(() => _actionBusy = null);
@@ -468,38 +649,49 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// 业务逻辑：关闭 pane 应映射到真实 tmux pane；关掉最后一个 pane 时窗口随之移除。
   ///
   /// Code Logic：close-pane；closedWindow=true 时本地移除该会话并按优先级选下一个
-  /// （pickPreferredSession，非 exited 优先）走既有切换流程，随后刷新权威列表。
+  /// （同 worktree 作用域，pickPreferredSession）走既有切换流程；false 分支为幂等
+  /// zoom-pane + 刷新会话列表（对齐 web handleClosePane else 分支）。失败上屏错误条。
   Future<void> _closePane() async {
     final session = _currentSession;
     if (session == null || !session.supportsPanes || _actionBusy != null) {
       return;
     }
     setState(() => _actionBusy = 'close-pane');
+    _setPanelError(null);
     try {
       final result = await _sessions.closePane(session.id);
       if (result.closedWindow) {
-        final next = List<SessionSummary>.from(_sessionList)
-          ..removeWhere((item) => item.id == result.sessionId);
+        final next = _scopedSessions
+            .where((item) => item.id != result.sessionId)
+            .toList();
         if (!mounted || _disposed) {
           return;
         }
-        setState(() => _sessionList = next);
+        setState(() {
+          _sessionList = _sessionList
+              .where((item) => item.id != result.sessionId)
+              .toList();
+        });
         if (_sessionId == result.sessionId) {
           _sessionId = null;
-          final nextSession = pickPreferredSession(next);
+          final nextSession =
+              pickPreferredSession(next, worktreeId: widget.worktreeId);
           if (nextSession != null) {
             await _activateSession(nextSession);
-          } else if (mounted && !_disposed) {
-            setState(() => _status = '连接中');
-            _stopEventsLoop();
+          } else {
+            await _showEmptyState();
           }
         } else {
           await _ensurePaneZoomed(session);
         }
         await _refreshSessions();
+      } else {
+        // 仅关 pane 未关窗口：zoom-pane 幂等收拢 + 刷新权威列表（对齐 web）。
+        await _ensurePaneZoomed(session);
+        await _refreshSessions();
       }
-    } catch (_) {
-      _toast('关闭窗格失败，请稍后重试');
+    } catch (error) {
+      _setPanelError('关闭 pane 失败：$error');
     } finally {
       if (mounted && !_disposed) {
         setState(() => _actionBusy = null);
@@ -509,34 +701,41 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   /// 业务逻辑：手机端需要能关闭终端窗口（当前或非当前、含 exited），释放后端 PTY。
   ///
-  /// Code Logic：调 sessions/close；关当前会话 → 本地移除 → pickPreferredSession 选下一个
-  /// → 既有切换流程；关其他会话 → 仅移除 chip 后刷新列表；失败 SnackBar。
+  /// Code Logic：调 sessions/close；关当前会话 → 本地移除 → 同 worktree 作用域
+  /// pickPreferredSession 选下一个 → 既有切换流程，无剩余会话进入空态；关其他会话 →
+  /// 仅移除 chip 后刷新列表；失败上屏错误条。
   Future<void> _closeSession(SessionSummary session) async {
     if (_actionBusy != null) {
       return;
     }
     setState(() => _actionBusy = 'close-${session.id}');
+    _setPanelError(null);
     try {
       await _sessions.close(session.id);
-      final next = List<SessionSummary>.from(_sessionList)
-        ..removeWhere((item) => item.id == session.id);
+      final next = _scopedSessions
+          .where((item) => item.id != session.id)
+          .toList();
       if (!mounted || _disposed) {
         return;
       }
-      setState(() => _sessionList = next);
+      setState(() {
+        _sessionList = _sessionList
+            .where((item) => item.id != session.id)
+            .toList();
+      });
       if (_sessionId == session.id) {
         _sessionId = null;
-        final nextSession = pickPreferredSession(next);
+        final nextSession =
+            pickPreferredSession(next, worktreeId: widget.worktreeId);
         if (nextSession != null) {
           await _activateSession(nextSession);
-        } else if (mounted && !_disposed) {
-          setState(() => _status = '连接中');
-          _stopEventsLoop();
+        } else {
+          await _showEmptyState();
         }
       }
       await _refreshSessions();
-    } catch (_) {
-      _toast('关闭窗口失败，请稍后重试');
+    } catch (error) {
+      _setPanelError('关闭窗口失败：$error');
     } finally {
       if (mounted && !_disposed) {
         setState(() => _actionBusy = null);
@@ -544,11 +743,34 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     }
   }
 
+  /// 业务逻辑：当前会话被关闭/合并掉且没有下一个会话时，进入空态并退出全屏
+  /// （对齐 web：isTerminalFullscreen = fullscreen && visibleSession !== null）。
+  Future<void> _showEmptyState() async {
+    if (!mounted || _disposed) {
+      return;
+    }
+    final wasFullscreen = _fullscreen;
+    setState(() {
+      _active = null;
+      _status = '连接中';
+      if (wasFullscreen) {
+        _fullscreen = false;
+      }
+    });
+    if (wasFullscreen) {
+      widget.onFullscreenChanged?.call(false);
+    }
+    _stopEventsLoop();
+  }
+
   /// 业务逻辑：终端区域尺寸变化必须同步远端 PTY（web ResizeObserver 同语义），否则 TUI 错位。
   ///
   /// Code Logic：LayoutBuilder 记录视口尺寸，帧末读取 xterm autoResize 后的 viewWidth/viewHeight，
-  /// clamp 后与最近上报基线不同才经 80ms 防抖调 sessions/resize；首次测量成功后标记
-  /// _terminalMeasured，新建会话时据此携带实测尺寸。
+  /// clamp 后与最近上报基线不同才经 80ms 防抖调 sessions/resize。基线按会话保留在
+  /// buffer.lastSentResize；基线缺失时优先以服务端持久化 session.cols/rows 初始化
+  /// （后端把同尺寸 resize 当强制重绘、会把 TUI 末屏抖进 tmux history，对齐 web
+  /// XtermSlot persistedSessionSize：相同不回传）。首次测量成功后记录实测尺寸，
+  /// 新建会话时据此携带 initialCols/initialRows。
   void _scheduleMeasure(Size size) {
     _viewportSize = size;
     if (_measureScheduled) {
@@ -560,27 +782,40 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       if (_disposed || !mounted) {
         return;
       }
-      final sessionId = _sessionId;
       final viewport = _viewportSize;
       if (viewport == null || viewport.height <= 0 || viewport.width <= 0) {
         return;
       }
       _terminalMeasured = true;
-      if (sessionId == null) {
+      final buffer = _active;
+      if (buffer == null) {
         return;
       }
-      final cols = clampTerminalDimension(_terminal.viewWidth, kMinTerminalCols);
-      final rows = clampTerminalDimension(_terminal.viewHeight, kMinTerminalRows);
-      final last = _lastSentResize;
+      final sessionId = buffer.sessionId;
+      final cols = clampTerminalDimension(buffer.terminal.viewWidth, kMinTerminalCols);
+      final rows = clampTerminalDimension(buffer.terminal.viewHeight, kMinTerminalRows);
+      _lastMeasuredCols = cols;
+      _lastMeasuredRows = rows;
+      if (buffer.lastSentResize == null &&
+          buffer.persistedCols != null &&
+          buffer.persistedRows != null) {
+        // 服务端持久化尺寸作为已上报基线：首帧 fit 相同就不回传 resize。
+        buffer.lastSentResize = (
+          sessionId,
+          clampTerminalDimension(buffer.persistedCols!, kMinTerminalCols),
+          clampTerminalDimension(buffer.persistedRows!, kMinTerminalRows),
+        );
+      }
+      final last = buffer.lastSentResize;
       if (last != null && last.$1 == sessionId && last.$2 == cols && last.$3 == rows) {
         return;
       }
       _resizeDebounce?.cancel();
       _resizeDebounce = Timer(const Duration(milliseconds: 80), () {
-        if (_disposed || _sessionId != sessionId) {
+        if (_disposed || !identical(_active, buffer)) {
           return;
         }
-        _lastSentResize = (sessionId, cols, rows);
+        buffer.lastSentResize = (sessionId, cols, rows);
         _sessions.resize(sessionId, cols, rows).then<void>(
           (_) {},
           onError: (Object _) {},
@@ -589,27 +824,49 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     });
   }
 
-  /// 业务逻辑：xterm buffer/mouse 状态随输出变化，滚动转发门控翻转时需要重建手势层。
+  /// 业务逻辑：xterm buffer/mouse 状态随输出变化，滚动转发门控翻转时需要重建手势层；
+  /// 同时回前台 pin 窗口内的 catch-up 输出要跟随最新行。
   ///
   /// Code Logic：terminal notifyListeners 时重算 _forwardWheel；只有翻转才 setState，
-  /// 避免高频输出触发无谓重建。
+  /// 避免高频输出触发无谓重建。pin 窗口内且视口未在底部时帧末钉回底部；用户拖动
+  /// （ScrollUpdateNotification.dragDetails 非空）已把 pin 置空。
   void _onTerminalStateMaybeChanged() {
     final next = _computeForwardWheel();
     if (next != _forwardWheel && mounted && !_disposed) {
       setState(() => _forwardWheel = next);
     }
+    if (_selectionBarVisible) {
+      _refreshSelectionBarState();
+    }
+    // 回前台 8s pin 窗口：catch-up 输出持续把视口钉在最新行（xterm 在底部时本就
+    // 自动钉底；此处兜底「跳底后首帧 catch-up 尚未写入」的场景）。
+    final pinUntil = _resumePinUntil;
+    if (pinUntil != null &&
+        mounted &&
+        !_disposed &&
+        DateTime.now().isBefore(pinUntil) &&
+        _scrollController.hasClients &&
+        _scrollController.position.pixels < _scrollController.position.maxScrollExtent) {
+      _jumpToBottom();
+    }
   }
 
   /// 滚动转发判定：mouse tracking 已协商或处于 alternate screen 时把拖动编码为 SGR wheel。
   bool _computeForwardWheel() {
-    return _terminal.mouseMode != MouseMode.none || _terminal.isUsingAltBuffer;
+    final terminal = _active?.terminal;
+    if (terminal == null) {
+      return false;
+    }
+    return terminal.mouseMode != MouseMode.none || terminal.isUsingAltBuffer;
   }
 
-  /// 业务逻辑：转发模式下单指拖动即 TUI 滚轮；非转发模式下向上拖到顶触发历史 hydration。
+  /// 业务逻辑：转发模式下单指拖动即 TUI 滚轮；非转发模式下首次向上拖动即累计
+  /// hydration 意图（未灌历史时触发，对齐 web 首次上滑即触发）。
   ///
-  /// Code Logic：仅跟踪单指 touch；行高按视口/rows 换算；转发模式经纯函数编码
-  /// `CSI < 64/65 ; col ; row M`（单次最多 8 帧）走 _send；普通模式在滚到顶且存在向上
-  /// 意图时调 refreshHistory replay hydration。
+  /// Code Logic：仅跟踪单指 touch；行高按视口/rows 换算；转发模式按触点落格
+  /// （sgrWheelCellFromTouch）编码 `CSI < 64/65 ; col ; row M`（单次最多 8 帧）走
+  /// _send；普通模式对向上意图累计，≤ -1 行且 replay 门闩已放行时触发
+  /// refreshHistory hydration（去掉「须先滚到顶」前置）。
   void _onSurfacePointerDown(PointerDownEvent event) {
     if (event.kind != PointerDeviceKind.touch) {
       return;
@@ -628,12 +885,14 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       return;
     }
     final state = _touchScroll;
-    if (state == null) {
+    final buffer = _active;
+    if (state == null || buffer == null) {
       return;
     }
+    final terminal = buffer.terminal;
     final lineHeight = terminalTouchLineHeight(
       _viewportSize?.height ?? 0,
-      _terminal.viewHeight,
+      terminal.viewHeight,
       0,
     );
     final result = updateTouchScroll(state, event.position.dy, lineHeight);
@@ -642,24 +901,38 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       return;
     }
     if (_forwardWheel) {
-      final wheel = encodeSgrWheelReports(result.lines);
+      // 触点换算为 1-based 字符格（贴近桌面滚轮落点；失败回落 1,1，对齐 web）。
+      final local = event.localPosition;
+      final cell = sgrWheelCellFromTouch(
+        localDx: local.dx,
+        localDy: local.dy,
+        viewportWidth: _viewportSize?.width ?? 0,
+        viewportHeight: _viewportSize?.height ?? 0,
+        cols: clampTerminalDimension(terminal.viewWidth, kMinTerminalCols),
+        rows: clampTerminalDimension(terminal.viewHeight, kMinTerminalRows),
+      );
+      final wheel = encodeSgrWheelReports(result.lines, col: cell.col, row: cell.row);
       if (wheel.isNotEmpty) {
         _send(wheel);
       }
       return;
     }
-    // 普通滚动：向上（lines<0）拖动且视口已在顶 → 触发惰性历史 hydration。
-    if (_sessionId == null || _hydratingSession != null) {
+    // 普通滚动：向上（lines<0）拖动即累计意图，首次上滑即触发 hydration（不再要求
+    // 先滚到顶；对齐 web resolveMobileTerminalScrollMode 的 hydrateScrollback 分支）。
+    if (result.lines >= 0) {
       return;
     }
-    final atTop = _scrollController.hasClients && _scrollController.position.pixels <= 0.5;
-    if (!atTop) {
+    final hydrated = buffer.policy.isHistoryHydrated(ownerInstanceId: buffer.owner);
+    if (hydrated || buffer.hydrating || !buffer.policy.replayReady) {
       return;
     }
-    _hydrationIntent =
-        accumulateHydrationScrollIntent(_hydrationIntent, result.lines, _terminal.viewHeight);
-    if (_hydrationIntent <= -1) {
-      unawaited(_beginHistoryHydration(_sessionId!));
+    buffer.hydrationIntent = accumulateHydrationScrollIntent(
+      buffer.hydrationIntent,
+      result.lines,
+      terminal.viewHeight,
+    );
+    if (buffer.hydrationIntent <= -1) {
+      unawaited(_beginHistoryHydration(buffer));
     }
   }
 
@@ -673,38 +946,52 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// 业务逻辑：tmux 里的 resume 旧消息不在本地 replay 快照中，首次回看历史必须显式
   /// refreshHistory 拉含 tmux 历史的快照并替换当前 buffer。
   ///
-  /// Code Logic：单飞门闩（_hydratingSession）；记录替换前「距底部行距」作锚点；
-  /// 成功后清屏（含 scrollback 擦除）+ 写入快照，按会话记录已 hydrated，帧末把视口
-  /// 钉回相同底部锚点；失败不标记 hydrated（可重试），live 流继续不受影响。
-  Future<void> _beginHistoryHydration(String sessionId) async {
-    if (_hydratedSessions.contains(sessionId) || _hydratingSession != null) {
+  /// Code Logic：单飞门闩（buffer.hydrating）；是否已灌按会话 + ownerInstanceId 判定
+  /// （/resume 换 owner 后允许重灌，对齐 web hydratedScrollbackSessionRef + owner）；记录
+  /// 替换前「距底部行距」作锚点；成功后清屏（含 scrollback 擦除）+ 写入快照，帧末把视口
+  /// 钉回相同底部锚点；失败不标记 hydrated、错误上屏并附「重试」，live 流继续不受影响。
+  Future<void> _beginHistoryHydration(_MountedSession buffer) async {
+    if (buffer.hydrating ||
+        buffer.policy.isHistoryHydrated(ownerInstanceId: buffer.owner)) {
       return;
     }
-    _hydratingSession = sessionId;
+    buffer.hydrating = true;
+    final sessionId = buffer.sessionId;
     final scroll = _scrollController;
     final distFromBottom =
         scroll.hasClients ? scroll.position.maxScrollExtent - scroll.position.pixels : null;
     try {
-      final replay = await _sessions.replay(sessionId, refreshHistory: true);
-      if (!mounted || _disposed || _sessionId != sessionId) {
+      final replay = await _sessions.hydrateScrollback(
+        sessionId,
+        timeout: const Duration(milliseconds: kHistoryHydrationTimeoutMs),
+      );
+      if (!mounted || _disposed || !identical(_active, buffer)) {
         return;
       }
       final snapshot = _replaySnapshotOf(replay);
-      _terminal.write('\x1b[3J\x1b[2J\x1b[H');
+      buffer.terminal.write('\x1b[3J\x1b[2J\x1b[H');
       if (snapshot.isNotEmpty) {
-        _terminal.write(snapshot);
+        buffer.terminal.write(snapshot);
       }
-      _hydratedSessions.add(sessionId);
-      _hydrationIntent = 0;
+      buffer.policy.markHistoryHydrated(ownerInstanceId: buffer.owner);
+      buffer.hydrationIntent = 0;
+      if (identical(_active, buffer)) {
+        _setPanelError(null);
+      }
       if (distFromBottom != null) {
         _anchorViewportFromBottom(distFromBottom);
       }
-    } catch (_) {
-      // hydration 失败可重试：不标记 hydrated，不打断 live 流。
-    } finally {
-      if (!_disposed && _hydratingSession == sessionId) {
-        _hydratingSession = null;
+    } catch (error) {
+      // hydration 失败可重试：不标记 hydrated，错误上屏并附「重试」入口。
+      if (mounted && !_disposed && identical(_active, buffer)) {
+        _setPanelError(
+          '加载终端历史失败：$error',
+          actionLabel: '重试',
+          action: () => unawaited(_beginHistoryHydration(buffer)),
+        );
       }
+    } finally {
+      buffer.hydrating = false;
     }
   }
 
@@ -731,25 +1018,25 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   /// 启动当前会话的 events 循环（先停掉旧循环）。
   void _startEventsLoop() {
-    final sessionId = _sessionId;
-    if (sessionId == null) {
+    final buffer = _active;
+    if (buffer == null) {
       return;
     }
     _stopEventsLoop();
     final generation = _eventsGeneration;
     _eventsBackoffAttempt = 0;
     _eventsDown = false;
-    unawaited(_runEventsLoop(generation, sessionId));
+    unawaited(_runEventsLoop(generation, buffer));
   }
 
   /// 业务逻辑：events 流断开后必须自动重连，否则画面停留在旧状态且用户无从恢复。
   ///
   /// Code Logic：按代数运行；每轮建立 NDJSON 流直到 EOF/异常，随后如实显示断开状态并
-  /// 指数退避（1s→2s→4s→…上限 15s）等待重连；代数变化（切会话/页面销毁）立即退出。
-  Future<void> _runEventsLoop(int generation, String sessionId) async {
+  /// 固定节奏（2s）等待重连；代数变化（切会话/页面销毁）立即退出。
+  Future<void> _runEventsLoop(int generation, _MountedSession buffer) async {
     while (mounted && !_disposed && generation == _eventsGeneration) {
       try {
-        await _streamEventsOnce(generation, sessionId);
+        await _streamEventsOnce(generation, buffer);
       } catch (_) {
         // 断流按可重连处理。
       }
@@ -797,18 +1084,20 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   /// 建立一轮 events NDJSON 流，直到 EOF/异常/被打断。
   ///
-  /// 重连接续帧时携带最近 ownerInstanceId+afterSequence（现有字段），首帧到达后
-  /// 恢复「就绪」并重置退避；每收到一帧（含 heartbeat）重置 45s 空闲看门狗。
-  Future<void> _streamEventsOnce(int generation, String sessionId) async {
+  /// 重连接续帧时携带该会话最近 ownerInstanceId+afterSequence（增量续传：切回已
+  /// 缓冲会话时不清屏，只补 gap），首帧到达后恢复「就绪」并重置退避；每收到一帧
+  /// （含 heartbeat）重置空闲看门狗。
+  Future<void> _streamEventsOnce(int generation, _MountedSession buffer) async {
+    final sessionId = buffer.sessionId;
     _eventsClient?.close(force: true);
     final client = HttpClient();
     _eventsClient = client;
     final http = LanHttpClient(client: client);
     var query = 'terminalSessionId=${Uri.encodeQueryComponent(sessionId)}';
-    final owner = _owner;
+    final owner = buffer.owner;
     if (owner != null) {
       query +=
-          '&afterOwnerInstanceId=${Uri.encodeQueryComponent(owner)}&afterSequence=$_sequence';
+          '&afterOwnerInstanceId=${Uri.encodeQueryComponent(owner)}&afterSequence=${buffer.sequence}';
     }
     var firstFrame = true;
     try {
@@ -846,16 +1135,19 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         final frameOwner = frame['ownerInstanceId'] as String?;
         final seq = frame['sequence'];
         if (frameOwner != null) {
-          _owner = frameOwner;
+          // owner 变化说明桌面端 /resume 换了 owner：经 policy 记录后，
+          // isHistoryHydrated(ownerInstanceId:) 会判定为未灌、允许重灌历史。
+          buffer.policy.noteOwnerInstanceId(frameOwner);
+          buffer.owner = frameOwner;
         }
         if (seq is int) {
-          _sequence = seq;
+          buffer.sequence = seq;
         }
         if (type == 'heartbeat') {
           continue;
         }
         if (type == 'gap') {
-          await _handleGapFrame(generation, sessionId);
+          await _handleGapFrame(generation, buffer);
           continue;
         }
         if (type == 'terminalOutput') {
@@ -863,7 +1155,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           if (payload is Map && payload['sessionId'] == sessionId) {
             final chunk = payload['chunk'] as String? ?? '';
             if (chunk.isNotEmpty) {
-              _terminal.write(chunk);
+              buffer.terminal.write(chunk);
             }
           }
         }
@@ -873,8 +1165,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
             final snapshot =
                 payload['snapshot'] as String? ?? payload['data'] as String? ?? '';
             if (snapshot.isNotEmpty) {
-              _terminal.write('\x1b[2J\x1b[H');
-              _terminal.write(snapshot);
+              buffer.terminal.write('\x1b[2J\x1b[H');
+              buffer.terminal.write(snapshot);
             }
           }
         }
@@ -887,20 +1179,23 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     }
   }
 
-  /// gap 帧：清屏并重放快照后才能恢复 live（沿用既有 replay 语义）。
-  Future<void> _handleGapFrame(int generation, String sessionId) async {
-    _policy.onNdjsonLine({'type': 'gap'});
-    _policy.beginReplay();
-    final replay = await _sessions.replay(sessionId);
-    if (!mounted || _disposed || generation != _eventsGeneration || _sessionId != sessionId) {
+  /// gap 帧：服务端无法从 afterSequence 增量续传时的兜底——清屏并重放快照后恢复 live。
+  Future<void> _handleGapFrame(int generation, _MountedSession buffer) async {
+    buffer.policy.onNdjsonLine({'type': 'gap'});
+    buffer.policy.beginReplay();
+    final replay = await _sessions.replay(buffer.sessionId);
+    if (!mounted ||
+        _disposed ||
+        generation != _eventsGeneration ||
+        !identical(_active, buffer)) {
       return;
     }
     final snapshot = _replaySnapshotOf(replay);
-    _terminal.write('\x1b[2J\x1b[H');
+    buffer.terminal.write('\x1b[2J\x1b[H');
     if (snapshot.isNotEmpty) {
-      _terminal.write(snapshot);
+      buffer.terminal.write(snapshot);
     }
-    _policy.finishReplay();
+    buffer.policy.finishReplay();
   }
 
   /// 业务逻辑：45 秒无任何帧（含 heartbeat）视为半开连接，主动断开交由循环重连。
@@ -927,10 +1222,17 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   /// 业务逻辑：输入 WS 断开后未确认输入结果未知，必须丢弃不重放；同时自动退避重建让用户继续键入。
   ///
-  /// Code Logic：每次连接递增代数；打开成功后发送 hello 并重置退避；onDone 丢弃未确认输入，
-  /// 按 1s→2s→4s→…上限 10s 重建；代数变化（切会话/页面销毁/更新重建）后旧连接回调全部失效。
+  /// Code Logic：每次连接递增代数；无激活会话时不建立连接。打开成功后先经
+  /// policy.onInputSocketOpened 进入「等待 ready 握手」（open ≠ 就绪），再发送 hello；
+  /// 服务端帧统一交 policy.handleInputFrameText（ready/ack/error），未知类型再探测
+  /// gap 帧交给同步策略；onDone 经 policy.onInputSocketClosed 丢弃未确认输入并区分
+  /// 「是否有未确认输入被丢弃」；按 1s→2s→4s→…上限 10s 重建；代数变化后旧回调全部失效。
   Future<void> _connectInput() async {
     if (!mounted || _disposed) {
+      return;
+    }
+    final buffer = _active;
+    if (buffer == null) {
       return;
     }
     _inputReconnectTimer?.cancel();
@@ -959,32 +1261,43 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     }
     _socket = socket;
     _laneId = 'lane-${DateTime.now().microsecondsSinceEpoch}';
-    socket.add(jsonEncode({
-      'type': 'hello',
-      'clientId': 'mobile-${DateTime.now().microsecondsSinceEpoch}',
-    }));
+    // WS 已建立 ≠ 可发送：先进入 connecting，等服务端 ready 握手后才放行输入。
+    buffer.policy.onInputSocketOpened();
+    try {
+      socket.add(jsonEncode({
+        'type': 'hello',
+        'clientId': 'mobile-${DateTime.now().microsecondsSinceEpoch}',
+      }));
+    } catch (error) {
+      buffer.policy.blockInputLink('终端输入连接建立失败：$error');
+    }
     _inputBackoffAttempt = 0;
-    _inputDown = false;
     _refreshStatus();
     socket.listen((event) {
       if (generation != _inputGeneration || event is! String) {
         return;
       }
-      try {
-        final frame = jsonDecode(event);
-        if (frame is Map && frame['type'] == 'ack') {
-          _policy.onAck('${frame['seq']}');
-        }
-        if (frame is Map && (frame['type'] == 'gap' || frame['kind'] == 'gap')) {
-          _policy.onNdjsonLine({'type': 'gap'});
-        }
-      } catch (_) {}
+      final buffer = _active;
+      if (buffer == null) {
+        return;
+      }
+      final handled = buffer.policy.handleInputFrameText(event);
+      if (!handled) {
+        // 前向兼容：非 ready/ack/error 的帧（如 gap）交给同步策略。
+        try {
+          final frame = jsonDecode(event);
+          if (frame is Map && (frame['type'] == 'gap' || frame['kind'] == 'gap')) {
+            buffer.policy.onNdjsonLine({'type': 'gap'});
+          }
+        } catch (_) {}
+      }
     }, onDone: () {
       if (!mounted || _disposed || generation != _inputGeneration) {
         return;
       }
-      // 未确认输入的结果未知：断线后丢弃且永不重放（controller 既有策略）。
-      _policy.takeUnackedOnDisconnect();
+      // 未确认输入的结果未知：断线后丢弃且永不重放；是否有丢弃由
+      // inputLink.droppedUnackedOnDisconnect 区分文案。
+      _active?.policy.onInputSocketClosed();
       _markInputDown();
       _scheduleInputReconnect(generation);
     }, onError: (Object error) {
@@ -993,7 +1306,6 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   }
 
   void _markInputDown() {
-    _inputDown = true;
     _refreshStatus();
   }
 
@@ -1030,19 +1342,25 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   /// 统一发送出口：xterm onOutput、输入行、extra keys、SGR wheel 都经此进入输入 WS。
   ///
-  /// Code Logic：空帧直接丢弃；replay 门闩未放行（初始进入/切会话后首次 replay 未完成）
-  /// 丢弃不排队（对齐 web shouldForwardMobileTerminalInput = replayReady && gate）；
-  /// 无会话或输入 WS 非 open 时静默丢弃；gap 待重放期间沿用 controller 策略丢弃。
+  /// Code Logic：与输入行同口径的 running/流 ready 全路径门控——空帧、无会话、非
+  /// running、replay 门闩未放行、输入链路未完成 ready 握手、WS 非 open、gap 待重放
+  /// 期间一律丢弃不排队（对齐 web inputEnabled = sessionId && running && 流 ready &&
+  /// !busy，含 SGR wheel）。数据帧必须先经 policy.sendInput 入账（背压/超限拒绝即
+  /// 丢弃并把封锁原因上屏），不绕过 policy 直接 socket.add。
   void _send(String data) {
-    if (data.isEmpty || !_inputGateOpen) {
+    final buffer = _active;
+    if (data.isEmpty || buffer == null || !buffer.policy.replayReady) {
       return;
     }
-    final sessionId = _sessionId;
+    if (_currentSession?.status != 'running') {
+      return;
+    }
+    final sessionId = buffer.sessionId;
     final socket = _socket;
-    if (sessionId == null || socket == null || socket.readyState != WebSocket.open) {
+    if (socket == null || socket.readyState != WebSocket.open) {
       return;
     }
-    if (_policy.sync == TerminalSync.gapReplayRequired) {
+    if (buffer.policy.sync == TerminalSync.gapReplayRequired) {
       return;
     }
     final applied = applyStickyModifier(_sticky, data);
@@ -1050,7 +1368,16 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       _setSticky(null);
     }
     final seq = _seq++;
-    _policy.sendInput(applied.data);
+    final accepted =
+        buffer.policy.sendInput(applied.data, id: '$seq');
+    if (accepted == null) {
+      // policy 拒绝（未 ready/超限/背压）：有封锁原因时上屏错误条。
+      final message = buffer.policy.inputLink.message;
+      if (message != null) {
+        _setPanelError(message);
+      }
+      return;
+    }
     socket.add(jsonEncode({
       'type': 'input',
       'laneId': _laneId,
@@ -1087,15 +1414,18 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     });
   }
 
-  /// 状态行如实反映两条通道：未首连显示连接中；事件流断开重连优先展示；其次输入断开；正常为就绪。
+  /// 状态行如实反映两条通道：未首连显示连接中；事件流断开重连优先展示；其次输入断开
+  /// （按是否有未确认输入被丢弃区分文案）；正常为就绪。
   void _refreshStatus() {
     String next;
     if (!_connectedOnce) {
       next = '连接中';
     } else if (_eventsDown) {
       next = '实时输出已断开，正在重连…';
-    } else if (_inputDown) {
-      next = '输入已断开；未确认输入不会自动重放';
+    } else if (_inputLinkDown) {
+      next = _inputDroppedUnacked
+          ? '输入已断开；未确认输入已丢弃，不会自动重放'
+          : '输入已断开，正在重连…';
     } else {
       next = '就绪';
     }
@@ -1138,17 +1468,18 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// 业务逻辑：新建会话应尽量按当前可见终端区域尺寸建 PTY，避免 TUI 首屏按默认列宽绘制后错位。
   ///
   /// Code Logic：terminal 已完成首帧布局时读实测 cols/rows（clamp 20x6..65535）；
-  /// 未布局则尺寸传 null（后端按默认尺寸）。
+  /// 未布局则尺寸传 null（后端按默认尺寸）；失败写入面板错误条（不再一次性 SnackBar）。
   Future<void> _createSession() async {
     if (_actionBusy != null) {
       return;
     }
     setState(() => _actionBusy = 'create');
+    _setPanelError(null);
     try {
       final session = await _createSessionInternal();
       await _activateSession(session);
-    } catch (_) {
-      _toast('新建会话失败，请稍后重试');
+    } catch (error) {
+      _setPanelError('创建终端失败：$error');
     } finally {
       if (mounted && !_disposed) {
         setState(() => _actionBusy = null);
@@ -1161,9 +1492,14 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     int? cols;
     int? rows;
     final viewport = _viewportSize;
-    if (_terminalMeasured && viewport != null && viewport.height > 0 && viewport.width > 0) {
-      cols = clampTerminalDimension(_terminal.viewWidth, kMinTerminalCols);
-      rows = clampTerminalDimension(_terminal.viewHeight, kMinTerminalRows);
+    if (_terminalMeasured &&
+        viewport != null &&
+        viewport.height > 0 &&
+        viewport.width > 0 &&
+        _lastMeasuredCols != null &&
+        _lastMeasuredRows != null) {
+      cols = _lastMeasuredCols;
+      rows = _lastMeasuredRows;
     }
     return _sessions.create(
       widget.project.id,
@@ -1173,20 +1509,72 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     );
   }
 
-  /// 业务逻辑：长按复制把 xterm 选区写入手机剪贴板，不写 PTY。
+  /// 业务逻辑：划选操作条「复制」把 xterm 选区写入手机剪贴板，不写 PTY；复制后退出划选。
   Future<void> _copySelection() async {
     final selection = _view.selection;
     if (selection == null) {
       return;
     }
-    final text = _terminal.buffer.getText(selection);
+    final text = _active?.terminal.buffer.getText(selection) ?? '';
     if (text.isEmpty) {
       return;
     }
     await Clipboard.setData(ClipboardData(text: text));
     if (mounted && !_disposed) {
       _toast('已复制');
+      _view.clearSelection();
     }
+  }
+
+  /// 业务逻辑：划选操作条「取消」清除 xterm 选区并收起操作条（对齐 web exitSelecting）。
+  void _cancelSelection() {
+    _view.clearSelection();
+  }
+
+  /// 业务逻辑：划选操作条跟随 xterm 选区出现/消失。
+  ///
+  /// Code Logic：监听 xterm TerminalController（选区变化即 notifyListeners），重算
+  /// 「已选 N 行」；并在终端 buffer 变化时同步刷新（选区锚点随 buffer 裁剪会静默
+  /// 脱离，selection getter 为惰性求值，需主动读取才能发现）。
+  void _onViewSelectionChanged() {
+    _refreshSelectionBarState();
+  }
+
+  /// 依据当前选区重算操作条可见性与行数；状态无变化时不触发重建。
+  void _refreshSelectionBarState() {
+    if (_disposed || !mounted) {
+      return;
+    }
+    final selection = _view.selection;
+    final visible = selection != null;
+    final count = visible ? _selectionLineCount(selection) : 0;
+    if (visible != _selectionBarVisible || count != _selectedLineCount) {
+      setState(() {
+        _selectionBarVisible = visible;
+        _selectedLineCount = count;
+      });
+    }
+  }
+
+  /// 选区覆盖的行数（begin/end 无序，取跨度的绝对值 + 1）。
+  int _selectionLineCount(BufferRange range) {
+    return (range.end.y - range.begin.y).abs() + 1;
+  }
+
+  /// 硬件键盘 Esc 退出划选（对齐 web Escape → exitSelecting）。
+  ///
+  /// Code Logic：以 [_selectionBarVisible] 为准而非惰性读取 `_view.selection`——
+  /// xterm 选区锚点可能随 buffer 滚动/裁剪静默脱离（getter 届时才求值为 null），
+  /// 若只读 getter 会漏判「操作条仍显示但锚点已脱离」的中间态。
+  KeyEventResult _handleTerminalKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape &&
+        _selectionBarVisible) {
+      _view.clearSelection();
+      _refreshSelectionBarState();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 
   /// 业务逻辑：收藏 Prompt 快捷输入需要从收藏中挑一条写入当前输入行（不回车）；
@@ -1220,8 +1608,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// 无 session / 无 worktree 的提示文案对齐 web（先选择或创建终端窗口 / 先选择 worktree）。
   ///
   /// Code Logic：弹输入对话框（提交中防重复）；workingDirectory 优先 worktree.path
-  /// （对齐 web MobilePromptOptimizerSheet），为空回退 project.path；成功后关闭对话框、
-  /// 清空输入并 SnackBar「已发送」（2.5s）；失败在对话框内展示可读错误。
+  /// （对齐 web MobilePromptOptimizerSheet），为空回退 project.path；成功后对话框保留
+  /// 并显示「已开始写入当前终端」，2.5s 自动消隐后关闭（对齐 web
+  /// useAutoDismissedStatus 节奏）；失败在对话框内展示可读错误。
   Future<void> _optimize() async {
     final sessionId = _sessionId;
     if (sessionId == null) {
@@ -1244,10 +1633,6 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           sessionId: sessionId,
           workingDirectory:
               (widget.worktreePath?.isNotEmpty ?? false) ? widget.worktreePath : widget.project.path,
-          onSent: () {
-            Navigator.of(dialogContext).pop();
-            _toast('已发送');
-          },
         ),
       );
     } finally {
@@ -1255,12 +1640,14 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     }
   }
 
-  /// 业务逻辑：终端内一键提交（与桌面 Git 历史同口径）：留空 message 由后端 AI 生成。
+  /// 业务逻辑：终端内一键提交（对齐 web FAB commit：message=null 让后端 AI 生成，
+  /// 无输入框）；确认互锁/确认框语义不变（合并仍有确认框）。
   ///
-  /// Code Logic：弹 message 输入对话框（可空提交）→ GitMutationTracker 稳定 clientOperationId
-  /// （unknown/reconciling 复用同 id）+ GitClient.commit；succeeded → SnackBar「提交成功」并回调
-  /// onWorktreesMutated；failedHook → hook 修复卡；unknown/传输异常 → 同 id 对账；确定失败解锁提示。
-  Future<void> _showCommitDialog() async {
+  /// Code Logic：入口点击即发 → GitMutationTracker 稳定 clientOperationId
+  /// （unknown/reconciling 复用同 id）+ GitClient.commit(message: null)；
+  /// succeeded → SnackBar「提交成功」并回调 onWorktreesMutated；failedHook → hook 修复卡；
+  /// unknown/传输异常 → 同 id 对账；确定失败解锁提示。
+  Future<void> _commitFromToolbar() async {
     if (widget.worktreeId == null) {
       _toast('先选择 worktree');
       return;
@@ -1268,14 +1655,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     if (_actionBusy != null) {
       return;
     }
-    final message = await showDialog<String>(
-      context: context,
-      builder: (dialogContext) => const _CommitMessageDialog(),
-    );
-    if (message == null) {
-      return;
-    }
-    await _commitWorktree(message);
+    await _commitWorktree('');
   }
 
   /// 提交动作本体：message 空白传 null（后端 AI 生成，对齐 web message=null 语义）。
@@ -1645,7 +2025,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         children: [
           Expanded(
             child: Text(
-              '$label结果未知，请重新对账。',
+              '$label操作结果未知，请刷新后人工核对',
               style: theme.textTheme.bodySmall,
             ),
           ),
@@ -1659,16 +2039,44 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     );
   }
 
-  /// 业务逻辑：贴图要走现有 paste-image 通道，session 非 running 或输入流未就绪时禁用
-  /// （对齐 web canPasteImage 门控）。
-  bool get _canPasteImage {
-    final session = _currentSession;
-    return _sessionId != null &&
-        session?.status == 'running' &&
-        _socket != null &&
-        _socket!.readyState == WebSocket.open &&
-        _actionBusy == null;
+  /// 面板常驻错误条（对齐 web panelError：role=alert、被覆盖前常驻）；
+  /// 带 action 时附「重试」类入口（如 hydration 失败重试）。
+  Widget _buildPanelErrorBar(ThemeData theme) {
+    final error = _panelError;
+    if (error == null) {
+      return const SizedBox.shrink();
+    }
+    final actionLabel = _panelErrorActionLabel;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.errorContainer,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(error, style: theme.textTheme.bodySmall),
+          ),
+          if (actionLabel != null)
+            TextButton(
+              key: const Key('terminal-panel-error-action'),
+              onPressed: () {
+                final action = _panelErrorAction;
+                _setPanelError(null);
+                action?.call();
+              },
+              child: Text(actionLabel),
+            ),
+        ],
+      ),
+    );
   }
+
+  /// 业务逻辑：贴图要走现有 paste-image 通道，session 非 running 或输入流未就绪时禁用
+  /// （统一为 running + 流 ready + 门闩放行口径，对齐 web canPasteImage）。
+  bool get _canPasteImage => _canUseInputActions && _actionBusy == null;
 
   Future<void> _pasteImage() async {
     final sessionId = _sessionId;
@@ -1684,12 +2092,12 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     final mime = picked.mimeType ?? 'image/jpeg';
     try {
       await _sessions.pasteImage(sessionId, 'data:$mime;base64,$b64');
-    } catch (_) {
-      _toast('粘贴图片失败，请稍后重试');
+    } catch (error) {
+      _setPanelError('粘贴图片失败：$error');
     }
   }
 
-  /// 进入全屏：有可见会话时隐藏 chip 条与工具行并回调壳层。
+  /// 进入全屏：有可见会话时隐藏 chip 条（windowTabs），顶部工具行保留全部动作入口。
   void _enterFullscreen() {
     if (_sessionId == null) {
       return;
@@ -1715,7 +2123,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     return Colors.orange;
   }
 
-  /// 会话 chip 条：横向滚动，每会话一个状态点 + 名称（附 pane 数）+ 关闭 X，末尾「+ 新建」。
+  /// 会话 chip 条：横向滚动，仅展示当前 project + worktree 作用域会话（对齐 web
+  /// scopedSessions）；每会话一个状态点 + 名称（恒附 pane 数，0 也显示）+ 关闭 X，
+  /// 末尾「+ 新建」。
   Widget _buildSessionChipBar() {
     return SizedBox(
       height: 40,
@@ -1723,7 +2133,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 12),
         children: [
-          for (final session in _sessionList)
+          for (final session in _scopedSessions)
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: InputChip(
@@ -1731,9 +2141,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
                   radius: 4,
                   backgroundColor: _sessionStatusColor(session.status),
                 ),
-                label: Text(session.paneCount > 0
-                    ? '${session.displayName} · ${session.paneCount} pane'
-                    : session.displayName),
+                label: Text('${session.displayName} · ${session.paneCount} pane'),
                 onPressed: _actionBusy == null
                     ? () => unawaited(_activateSession(session))
                     : null,
@@ -1791,24 +2199,37 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     );
   }
 
-  /// 终端表面：手势层（SGR 滚轮转发）+ 长按复制 + 尺寸测量 + 滚动条控制。
+  /// 终端表面：手势层（SGR 滚轮转发）+ xterm 长按划选（选区变化驱动底部操作条）+
+  /// 尺寸测量 + 用户拖动取消回前台 pin + 硬件键盘 Esc 退出划选。
   Widget _buildTerminalSurface() {
+    final buffer = _active;
+    if (buffer == null) {
+      return const SizedBox.shrink();
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         _scheduleMeasure(constraints.biggest);
         return ScrollConfiguration(
           behavior: _TerminalScrollBehavior(_forwardWheel),
-          child: Listener(
-            onPointerDown: _onSurfacePointerDown,
-            onPointerMove: _onSurfacePointerMove,
-            onPointerUp: _onSurfacePointerUp,
-            onPointerCancel: _onSurfacePointerUp,
-            child: GestureDetector(
-              onLongPress: _copySelection,
+          child: NotificationListener<ScrollUpdateNotification>(
+            onNotification: (notification) {
+              // 用户拖动滚动 = 主动回看历史：取消回前台跟随 pin（对齐 web）。
+              if (notification.dragDetails != null) {
+                _resumePinUntil = null;
+              }
+              return false;
+            },
+            child: Listener(
+              onPointerDown: _onSurfacePointerDown,
+              onPointerMove: _onSurfacePointerMove,
+              onPointerUp: _onSurfacePointerUp,
+              onPointerCancel: _onSurfacePointerUp,
               child: TerminalView(
-                _terminal,
+                key: const Key('terminal-view'),
+                buffer.terminal,
                 controller: _view,
                 scrollController: _scrollController,
+                onKeyEvent: _handleTerminalKeyEvent,
               ),
             ),
           ),
@@ -1922,6 +2343,55 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         _commitMutation.actionLocked || _mergeMutation.actionLocked;
     final commitEnabled = canUseGitActions && !anyMutationPending;
     final mergeEnabled = canUseGitActions && mergeAllowed && !anyMutationPending;
+    // 输入动作（收藏/优化/贴图/粘贴文本）统一口径：running + 流 ready + 门闩放行。
+    final inputActionsEnabled = _canUseInputActions;
+    // 全屏仅隐藏 chip 条（windowTabs）；顶部工具行保留全部动作入口 +
+    // 退出全屏（对齐 web getMobileTerminalChromeVisibility：paneActions 恒可见）。
+    final toolbarActions = <Widget>[
+      _buildPaneMenuButton(),
+      IconButton(
+        tooltip: '提交',
+        onPressed: commitEnabled ? () => unawaited(_commitFromToolbar()) : null,
+        icon: const Icon(Icons.commit),
+      ),
+      IconButton(
+        tooltip: mergeAllowed ? '合并' : '主工作区默认分支，无需合并',
+        onPressed: mergeEnabled ? () => unawaited(_mergeWorktree()) : null,
+        icon: const Icon(Icons.merge_type),
+      ),
+      IconButton(
+        tooltip: '粘贴文本',
+        onPressed: inputActionsEnabled ? _pasteText : null,
+        icon: const Icon(Icons.content_paste),
+      ),
+      IconButton(
+        tooltip: '收藏 Prompt',
+        onPressed: inputActionsEnabled ? _pickFavorite : null,
+        icon: const Icon(Icons.star_outline),
+      ),
+      IconButton(
+        tooltip: 'Prompt 优化',
+        onPressed: inputActionsEnabled ? _optimize : null,
+        icon: const Icon(Icons.auto_fix_high),
+      ),
+      IconButton(
+        tooltip: '相册贴图',
+        onPressed: _canPasteImage ? () => unawaited(_pasteImage()) : null,
+        icon: const Icon(Icons.photo_outlined),
+      ),
+      if (fullscreen)
+        IconButton(
+          tooltip: '退出全屏',
+          onPressed: _exitFullscreen,
+          icon: const Icon(Icons.fullscreen_exit),
+        )
+      else
+        IconButton(
+          tooltip: '全屏',
+          onPressed: _sessionId != null ? _enterFullscreen : null,
+          icon: const Icon(Icons.fullscreen),
+        ),
+    ];
     return Column(
       children: [
         Padding(
@@ -1935,50 +2405,14 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              if (fullscreen)
-                IconButton(
-                  tooltip: '退出全屏',
-                  onPressed: _exitFullscreen,
-                  icon: const Icon(Icons.fullscreen_exit),
-                )
-              else ...[
-                _buildPaneMenuButton(),
-                IconButton(
-                  tooltip: '提交',
-                  onPressed: commitEnabled ? () => unawaited(_showCommitDialog()) : null,
-                  icon: const Icon(Icons.commit),
+              Flexible(
+                // 动作区横向可滚：窄屏全屏时 8 个入口也不溢出（FAB 语义由工具行承担）。
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  reverse: true,
+                  child: Row(children: toolbarActions),
                 ),
-                IconButton(
-                  tooltip: mergeAllowed ? '合并' : '主工作区默认分支，无需合并',
-                  onPressed: mergeEnabled ? () => unawaited(_mergeWorktree()) : null,
-                  icon: const Icon(Icons.merge_type),
-                ),
-                IconButton(
-                  tooltip: '粘贴文本',
-                  onPressed: _pasteText,
-                  icon: const Icon(Icons.content_paste),
-                ),
-                IconButton(
-                  tooltip: '收藏 Prompt',
-                  onPressed: _sessionId != null ? _pickFavorite : null,
-                  icon: const Icon(Icons.star_outline),
-                ),
-                IconButton(
-                  tooltip: 'Prompt 优化',
-                  onPressed: _sessionId != null ? _optimize : null,
-                  icon: const Icon(Icons.auto_fix_high),
-                ),
-                IconButton(
-                  tooltip: '相册贴图',
-                  onPressed: _canPasteImage ? () => unawaited(_pasteImage()) : null,
-                  icon: const Icon(Icons.photo_outlined),
-                ),
-                IconButton(
-                  tooltip: '全屏',
-                  onPressed: _sessionId != null ? _enterFullscreen : null,
-                  icon: const Icon(Icons.fullscreen),
-                ),
-              ],
+              ),
             ],
           ),
         ),
@@ -1997,15 +2431,21 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           reconcileKey: const Key('terminal-merge-reconcile'),
           onReconcile: () => _reconcileMerge(),
         ),
+        _buildPanelErrorBar(theme),
         if (!fullscreen) _buildSessionChipBar(),
         Expanded(
-          child: _buildTerminalSurface(),
+          child: _active == null
+              ? _buildEmptySessionState(theme)
+              : _buildTerminalSurface(),
         ),
-        ExtraKeysBar(
-          onSend: _send,
-          sticky: _sticky,
-          onSticky: _setSticky,
-        ),
+        if (_selectionBarVisible) _buildSelectionBar(),
+        if (_active != null)
+          ExtraKeysBar(
+            onSend: _send,
+            sticky: _sticky,
+            onSticky: _setSticky,
+            disabled: !_inputSendEnabled,
+          ),
         Padding(
           padding: const EdgeInsets.all(8),
           child: Row(
@@ -2014,10 +2454,10 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
                 child: TextField(
                   key: const Key('terminal-input-field'),
                   controller: _input,
-                  // replay 门闩未放行、会话非 running 或输入 WS 非 ready
-                  // （connecting/blocked/closed）时禁用；任一条件恢复后
+                  // replay 门闩未放行、会话非 running、输入链路未完成 ready 握手
+                  // （connecting/blocked/closed）或 WS 断开时禁用；任一条件恢复后
                   // 经既有 setState 路径自动恢复可用。
-                  enabled: _inputRowEnabled,
+                  enabled: _inputSendEnabled,
                   decoration: const InputDecoration(hintText: '输入后回车发送'),
                   onSubmitted: (value) {
                     if (value.isEmpty) {
@@ -2031,7 +2471,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
               ),
               IconButton(
                 key: const Key('terminal-input-send'),
-                onPressed: _inputRowEnabled
+                onPressed: _inputSendEnabled
                     ? () {
                         final text = _input.text;
                         if (text.isEmpty) {
@@ -2048,6 +2488,56 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           ),
         ),
       ],
+    );
+  }
+
+  /// 空态：当前 worktree 还没有终端窗口 + 手动「新建」入口
+  /// （对齐 web：无会话不再自动创建，改为空态引导）。
+  Widget _buildEmptySessionState(ThemeData theme) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('当前 worktree 还没有终端窗口', style: theme.textTheme.bodyMedium),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            key: const Key('terminal-empty-create'),
+            onPressed: _actionBusy == null ? () => unawaited(_createSession()) : null,
+            icon: const Icon(Icons.add),
+            label: const Text('新建'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 划选操作条：已选 N 行 · 复制 · 取消（对齐 web MobileTerminalPanel selection bar）。
+  Widget _buildSelectionBar() {
+    final enabled = _selectedLineCount > 0;
+    return Container(
+      key: const Key('terminal-selection-bar'),
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text('已选 $_selectedLineCount 行',
+                style: Theme.of(context).textTheme.bodySmall),
+          ),
+          TextButton(
+            onPressed: enabled ? () => unawaited(_copySelection()) : null,
+            child: const Text('复制'),
+          ),
+          TextButton(
+            onPressed: _cancelSelection,
+            child: const Text('取消'),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -2353,55 +2843,8 @@ class _FavoritePromptSheetState extends State<_FavoritePromptSheet> {
   }
 }
 
-/// 提交信息输入对话框（可空提交 = 让 AI 生成 message，对齐 web mobileGitCommit message=null）。
-///
-/// Business Logic（为什么需要）:
-///   终端内一键提交需要与桌面 Git 历史同口径：用户可以留空让后端用 Claude Code 生成
-///   提交信息，也可以手写 message。
-///
-/// Code Logic（做什么）:
-///   输入 message；「提交」返回文本（trim 后可为空串，由调用方转 null）；「取消」返回 null。
-class _CommitMessageDialog extends StatefulWidget {
-  const _CommitMessageDialog();
-
-  @override
-  State<_CommitMessageDialog> createState() => _CommitMessageDialogState();
-}
-
-class _CommitMessageDialogState extends State<_CommitMessageDialog> {
-  final TextEditingController _controller = TextEditingController();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('提交'),
-      content: TextField(
-        controller: _controller,
-        maxLines: 3,
-        autofocus: true,
-        decoration: const InputDecoration(
-          hintText: '提交信息（留空由 AI 生成）',
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop(_controller.text),
-          child: const Text('提交'),
-        ),
-      ],
-    );
-  }
-}
+/// 提交信息输入对话框已移除：终端内提交对齐 web 一键直提（message=null 由后端 AI
+/// 生成，无输入框）；合并仍保留确认对话框。
 
 /// Prompt 优化对话框（对齐 web MobilePromptOptimizerSheet 的提交语义）。
 ///
@@ -2409,20 +2852,19 @@ class _CommitMessageDialogState extends State<_CommitMessageDialog> {
 ///   把原始 Prompt 交给本机 Claude Code 优化并流式写入当前终端，无需离开终端视图。
 ///
 /// Code Logic（做什么）:
-///   输入原始 Prompt；提交中防重复（按钮禁用）；成功经 onSent 关闭对话框并触发
-///   SnackBar「已发送」；失败在对话框内展示可读错误。targetLanguage 固定 'zh'。
+///   输入原始 Prompt；提交中防重复（按钮禁用）；成功后对话框保留并显示
+///   「已开始写入当前终端」（对齐 web promptPanel.sent），2.5s 自动消隐后关闭对话框；
+///   失败在对话框内展示可读错误。targetLanguage 固定 'zh'。
 class _PromptOptimizerDialog extends StatefulWidget {
   const _PromptOptimizerDialog({
     required this.client,
     required this.sessionId,
     required this.workingDirectory,
-    required this.onSent,
   });
 
   final PromptsClient client;
   final String sessionId;
   final String? workingDirectory;
-  final VoidCallback onSent;
 
   @override
   State<_PromptOptimizerDialog> createState() => _PromptOptimizerDialogState();
@@ -2433,13 +2875,18 @@ class _PromptOptimizerDialogState extends State<_PromptOptimizerDialog> {
   bool _submitting = false;
   String? _error;
 
+  /// 成功提示「已开始写入当前终端」；2.5s 后经 Timer 关闭对话框（自动消隐）。
+  String? _status;
+  Timer? _statusTimer;
+
   @override
   void dispose() {
+    _statusTimer?.cancel();
     _controller.dispose();
     super.dispose();
   }
 
-  /// 提交优化请求；提交中防重复，成功清空输入（对话框随后关闭）并回调 onSent。
+  /// 提交优化请求；提交中防重复，成功清空输入并显示 2.5s 成功提示后自动关闭。
   Future<void> _submit() async {
     final prompt = _controller.text.trim();
     if (prompt.isEmpty || _submitting) {
@@ -2448,6 +2895,7 @@ class _PromptOptimizerDialogState extends State<_PromptOptimizerDialog> {
     setState(() {
       _submitting = true;
       _error = null;
+      _status = null;
     });
     try {
       await widget.client.streamOptimizerToSession(
@@ -2456,10 +2904,21 @@ class _PromptOptimizerDialogState extends State<_PromptOptimizerDialog> {
         workingDirectory: widget.workingDirectory,
         targetLanguage: 'zh',
       );
-      _controller.clear();
-      if (mounted) {
-        widget.onSent();
+      if (!mounted) {
+        return;
       }
+      setState(() {
+        _controller.clear();
+        _status = '已开始写入当前终端';
+      });
+      // 2.5s 自动消隐再关（对齐 web useAutoDismissedStatus 节奏后收起 sheet）。
+      _statusTimer?.cancel();
+      _statusTimer = Timer(const Duration(milliseconds: 2500), () {
+        if (!mounted) {
+          return;
+        }
+        Navigator.of(context).pop();
+      });
     } catch (error) {
       if (mounted) {
         setState(() => _error = 'Prompt 优化失败：$error');
@@ -2493,6 +2952,11 @@ class _PromptOptimizerDialogState extends State<_PromptOptimizerDialog> {
                 _error!,
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
+            ),
+          if (_status != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(_status!, style: Theme.of(context).textTheme.bodySmall),
             ),
         ],
       ),

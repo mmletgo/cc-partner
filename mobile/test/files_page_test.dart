@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cc_partner_mobile/address_book/book.dart';
 import 'package:cc_partner_mobile/core/lan_http.dart';
 import 'package:cc_partner_mobile/files/client.dart';
@@ -19,6 +21,9 @@ class _RecordingFilesClient extends FilesClient {
   /// 非 null 时 saveText 抛出该错误（如 baseHash 冲突）。
   Object? saveError;
   int saveCalls = 0;
+
+  /// 非 null 时 saveText 挂起直到测试放行（保存中状态断言用）。
+  Completer<Map<String, dynamic>>? saveGate;
 
   /// 每次保存收到的 baseHash（乐观锁基线回写断言用）。
   final saveBaseHashes = <String>[];
@@ -67,7 +72,8 @@ class _RecordingFilesClient extends FilesClient {
     return openedPayload ??
         {
           'metadata': {'name': 'README.md', 'path': path},
-          'text': {'content': 'hello', 'hash': 'h1'},
+          // 建模真实后端 DTO：WorkbenchTextContent.baseHash（serde camelCase）。
+          'text': {'content': 'hello', 'baseHash': 'h1'},
           // 建模真实后端：files/open 恒返回 capabilities.canEdit。
           'capabilities': {'canEdit': true},
         };
@@ -83,6 +89,10 @@ class _RecordingFilesClient extends FilesClient {
   }) async {
     saveCalls += 1;
     saveBaseHashes.add(baseHash);
+    final gate = saveGate;
+    if (gate != null) {
+      return gate.future;
+    }
     final error = saveError;
     if (error != null) {
       throw error;
@@ -94,11 +104,52 @@ class _RecordingFilesClient extends FilesClient {
   }
 }
 
+/// 竞态守卫测试用假 client：listDir/open 全部挂起，由测试按任意顺序放行。
+class _RacyFilesClient extends FilesClient {
+  _RacyFilesClient() : super(LanHttpClient(), 'http://127.0.0.1:1');
+
+  /// 每次 listDir 的放行门（FIFO 队列，测试按需 complete）。
+  final listGates = <Completer<List<Map<String, dynamic>>>>[];
+
+  /// 每次 listDir 收到的 path（断言请求顺序用）。
+  final listPaths = <String?>[];
+
+  /// 每次 open 的放行门。
+  final openGates = <Completer<Map<String, dynamic>>>[];
+
+  /// 每次 open 收到的 path。
+  final openPaths = <String>[];
+
+  @override
+  Future<List<Map<String, dynamic>>> listDir({
+    required String projectId,
+    String? worktreeId,
+    String? path,
+  }) {
+    listPaths.add(path);
+    final gate = Completer<List<Map<String, dynamic>>>();
+    listGates.add(gate);
+    return gate.future;
+  }
+
+  @override
+  Future<Map<String, dynamic>> open({
+    required String projectId,
+    required String path,
+    String? worktreeId,
+  }) {
+    openPaths.add(path);
+    final gate = Completer<Map<String, dynamic>>();
+    openGates.add(gate);
+    return gate.future;
+  }
+}
+
 class _FilesHarness extends StatefulWidget {
   const _FilesHarness({required this.book, required this.client, this.workspace});
 
   final AddressBook book;
-  final _RecordingFilesClient client;
+  final FilesClient client;
 
   /// 注入共享的 dirty guard，供测试断言 dirty 状态。
   final FileWorkspaceController? workspace;
@@ -177,7 +228,7 @@ void main() {
           'size': 1536,
           'modifiedAt': '2026-09-20T10:00:00',
         },
-        'text': {'content': 'hello', 'hash': 'h1'},
+        'text': {'content': 'hello', 'baseHash': 'h1'},
       },
     );
     await tester.pumpWidget(_FilesHarness(book: book, client: client));
@@ -213,7 +264,7 @@ void main() {
     final client = _RecordingFilesClient(
       openedPayload: {
         'metadata': {'name': 'README.md', 'path': 'README.md'},
-        'text': {'content': 'hello', 'hash': 'h1'},
+        'text': {'content': 'hello', 'baseHash': 'h1'},
         'capabilities': {'canEdit': true},
       },
     )..saveError = LanHttpException(409, '{"message":"baseHash 过期"}');
@@ -251,7 +302,7 @@ void main() {
     final client = _RecordingFilesClient(
       openedPayload: {
         'metadata': {'name': 'README.md', 'path': 'README.md'},
-        'text': {'content': 'hello', 'hash': 'h1'},
+        'text': {'content': 'hello', 'baseHash': 'h1'},
         'capabilities': {'canEdit': true},
       },
     );
@@ -307,7 +358,7 @@ void main() {
     final client = _RecordingFilesClient(
       openedPayload: {
         'metadata': {'name': 'README.md', 'path': 'README.md'},
-        'text': {'content': 'hello', 'hash': 'h1'},
+        'text': {'content': 'hello', 'baseHash': 'h1'},
         'capabilities': {'canEdit': false},
       },
     );
@@ -334,7 +385,7 @@ void main() {
       // 不带 capabilities：对齐 web canEditOpenedFile = text && capabilities.canEdit。
       openedPayload: {
         'metadata': {'name': 'README.md', 'path': 'README.md'},
-        'text': {'content': 'hello', 'hash': 'h1'},
+        'text': {'content': 'hello', 'baseHash': 'h1'},
       },
     );
     await tester.pumpWidget(_FilesHarness(book: book, client: client));
@@ -466,5 +517,317 @@ void main() {
       tester.widget<Text>(find.byKey(const Key('files-path-crumb'))).data,
       'assets/src',
     );
+  });
+
+  testWidgets('首载（无列表数据）才整页 spinner，加载中不渲染 crumb', (tester) async {
+    final client = _RacyFilesClient();
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    await tester.pump();
+
+    // 首载挂起：整页 spinner，无 crumb / 无行内指示。
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byKey(const Key('files-path-crumb')), findsNothing);
+
+    client.listGates.removeAt(0).complete([
+      {'name': 'README.md', 'kind': 'file', 'path': 'README.md'},
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.text('README.md'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
+  testWidgets('刷新不整页替换：保留 crumb 与旧列表，仅显示行内指示', (tester) async {
+    final client = _RacyFilesClient();
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    client.listGates.removeAt(0).complete([
+      {'name': 'README.md', 'kind': 'file', 'path': 'README.md'},
+    ]);
+    await tester.pumpAndSettle();
+
+    // 切换 worktree 触发重载（此时已有列表数据）：新响应挂起期间 crumb 与
+    // 旧列表保留 + 行内细进度条，不整页替换为 spinner。
+    await tester.tap(find.byKey(const Key('switch-worktree')));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const Key('files-refresh-indicator')), findsOneWidget);
+    expect(find.byKey(const Key('files-path-crumb')), findsOneWidget);
+    expect(find.text('README.md'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+
+    client.listGates.removeAt(0).complete([
+      {'name': 'CHANGED.md', 'kind': 'file', 'path': 'CHANGED.md'},
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('files-refresh-indicator')), findsNothing);
+    expect(find.text('CHANGED.md'), findsOneWidget);
+  });
+
+  testWidgets('图片预览不被 canEdit 挡死：无 text 载荷也可达', (tester) async {
+    final client = _RecordingFilesClient(
+      openedPayload: {
+        'detectedType': 'image',
+        'metadata': {'name': 'logo.png', 'path': 'logo.png'},
+        'capabilities': {'canEdit': false},
+        'image': {
+          'mime': 'image/png',
+          'width': 1,
+          'height': 1,
+          'dataUrl':
+              'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        },
+      },
+    );
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('README.md'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(Image), findsOneWidget);
+    expect(find.byKey(const Key('files-readonly-note')), findsNothing);
+    expect(find.byKey(const Key('files-save')), findsNothing);
+  });
+
+  testWidgets('CSV 预览不被 canEdit 挡死，表头读 columns 字段', (tester) async {
+    final client = _RecordingFilesClient(
+      openedPayload: {
+        'detectedType': 'csv',
+        'metadata': {'name': 'data.csv', 'path': 'data.csv'},
+        'capabilities': {'canEdit': false},
+        'csv': {
+          'columns': ['id', 'name'],
+          'rows': [
+            ['1', 'Alice'],
+          ],
+          'truncated': false,
+        },
+      },
+    );
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('README.md'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('id'), findsOneWidget);
+    expect(find.text('name'), findsOneWidget);
+    expect(find.text('1'), findsOneWidget);
+    expect(find.text('Alice'), findsOneWidget);
+    expect(find.byKey(const Key('files-readonly-note')), findsNothing);
+  });
+
+  testWidgets('SQLite 预览不被 canEdit 挡死：无 text 载荷也可达', (tester) async {
+    final client = _RecordingFilesClient(
+      openedPayload: {
+        'detectedType': 'sqlite',
+        'metadata': {'name': 'app.sqlite', 'path': 'app.sqlite'},
+        'capabilities': {'canEdit': false},
+        'sqlite': {
+          'tables': ['users'],
+          'selectedTable': 'users',
+          'columns': ['id'],
+          'rows': [
+            ['Alice'],
+          ],
+          'truncated': false,
+        },
+      },
+    );
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('README.md'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('users'), findsOneWidget);
+    expect(find.text('[Alice]'), findsOneWidget);
+    expect(find.byKey(const Key('files-readonly-note')), findsNothing);
+  });
+
+  testWidgets('未知二进制（无任何预览载荷）落兜底说明', (tester) async {
+    final client = _RecordingFilesClient(
+      openedPayload: {
+        'detectedType': 'binary',
+        'metadata': {'name': 'asset.bin', 'path': 'asset.bin'},
+        'capabilities': {'canEdit': false},
+      },
+    );
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('README.md'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('files-unsupported-note')), findsOneWidget);
+    expect(find.text('binary 文件暂不支持移动端编辑'), findsOneWidget);
+  });
+
+  testWidgets('保存按钮 !dirty||saving 禁用，saving 显示保存中，成功用响应刷新元信息',
+      (tester) async {
+    final workspace = FileWorkspaceController();
+    final client = _RecordingFilesClient(
+      openedPayload: {
+        'detectedType': 'text',
+        'metadata': {
+          'name': 'notes.txt',
+          'path': 'notes.txt',
+          'size': 1536,
+          'modifiedAt': '2026-09-20T10:00:00',
+        },
+        'text': {'content': 'hello', 'baseHash': 'h1'},
+        'capabilities': {'canEdit': true},
+      },
+    )..saveGate = Completer<Map<String, dynamic>>();
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client, workspace: workspace));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('README.md'));
+    await tester.pumpAndSettle();
+
+    // 未编辑：保存按钮禁用（对齐 web disabled={!dirty || saving}）。
+    TextButton saveButton() =>
+        tester.widget<TextButton>(find.byKey(const Key('files-save')));
+    expect(saveButton().onPressed, isNull);
+    // 初始元信息行：text · 1.5 KB · 10:00。
+    expect(find.text('text · 1.5 KB · 2026-9-20 10:00'), findsOneWidget);
+
+    // 编辑后按钮启用。
+    await tester.tap(find.text('源码'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'changed');
+    await tester.pump();
+    expect(saveButton().onPressed, isNotNull);
+
+    // 保存进行中：按钮显示「保存中」并禁用。
+    await tester.tap(find.byKey(const Key('files-save')));
+    await tester.pump();
+    expect(find.text('保存中'), findsOneWidget);
+    expect(saveButton().onPressed, isNull);
+    expect(workspace.snapshot.dirty, isTrue);
+
+    // 放行保存响应：基线回写 + 元信息行按响应 metadata 刷新。
+    client.saveGate!.complete({
+      'metadata': {
+        'name': 'notes.txt',
+        'path': 'notes.txt',
+        'size': 2048,
+        'modifiedAt': '2026-09-20T11:30:00',
+      },
+      'baseHash': 'h2',
+      'baseModifiedAt': '2026-09-20T11:30:00',
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('已保存'), findsOneWidget);
+    expect(find.text('保存中'), findsNothing);
+    expect(find.text('text · 2.0 KB · 2026-9-20 11:30'), findsOneWidget);
+    expect(saveButton().onPressed, isNull);
+    expect(workspace.snapshot.dirty, isFalse);
+    expect(client.saveBaseHashes, ['h1']);
+  });
+
+  testWidgets('listDir 竞态：旧目录响应被丢弃，不覆盖最新导航', (tester) async {
+    final client = _RacyFilesClient();
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    client.listGates.removeAt(0).complete([
+      {'name': 'dirA', 'kind': 'dir', 'path': 'dirA'},
+      {'name': 'dirB', 'kind': 'dir', 'path': 'dirB'},
+    ]);
+    await tester.pumpAndSettle();
+    expect(client.listPaths, [null]);
+
+    // 快速连点两个目录：两次 listDir 相继挂起（请求路径为栈顶节点 path）。
+    await tester.tap(find.text('dirA'));
+    await tester.pump();
+    await tester.tap(find.text('dirB'));
+    await tester.pump();
+    expect(client.listPaths, [null, 'dirA', 'dirB']);
+
+    // 旧响应（dirA）先返回：必须整体丢弃，不得覆盖 UI。
+    client.listGates.removeAt(0).complete([
+      {'name': 'A-file', 'kind': 'file', 'path': 'dirA/A-file'},
+    ]);
+    await tester.pump();
+    expect(find.text('A-file'), findsNothing);
+    // dirB 仍在加载：旧根列表 + 行内指示保留（dirB 同名出现在 crumb 与列表行）。
+    expect(find.byKey(const Key('files-refresh-indicator')), findsOneWidget);
+    expect(find.text('dirA'), findsOneWidget);
+    expect(find.text('dirB'), findsWidgets);
+
+    // 最新响应（dirB）返回：列表更新为 dirB 内容。
+    client.listGates.removeAt(0).complete([
+      {'name': 'B-file', 'kind': 'file', 'path': 'dirB/B-file'},
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.text('B-file'), findsOneWidget);
+    expect(find.text('A-file'), findsNothing);
+    expect(find.byKey(const Key('files-refresh-indicator')), findsNothing);
+  });
+
+  testWidgets('open 竞态：迟到的旧文件响应被丢弃，不导航到旧文件', (tester) async {
+    final client = _RacyFilesClient();
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    client.listGates.removeAt(0).complete([
+      {'name': 'a.txt', 'kind': 'file', 'path': 'a.txt'},
+      {'name': 'b.txt', 'kind': 'file', 'path': 'b.txt'},
+    ]);
+    await tester.pumpAndSettle();
+
+    // 快速连点两个文件。
+    await tester.tap(find.text('a.txt'));
+    await tester.pump();
+    await tester.tap(find.text('b.txt'));
+    await tester.pump();
+    expect(client.openPaths, ['a.txt', 'b.txt']);
+
+    // 最新的 b.txt 响应先返回：进入 b.txt 预览。
+    client.openGates.removeLast().complete({
+      'metadata': {'name': 'b.txt', 'path': 'b.txt'},
+      'text': {'content': 'B', 'baseHash': 'h-b'},
+      'capabilities': {'canEdit': true},
+    });
+    await tester.pumpAndSettle();
+    expect(find.byType(FilePreviewPage), findsOneWidget);
+    expect(find.text('B'), findsOneWidget);
+
+    // 迟到的 a.txt 旧响应：不得再把用户带去旧文件。
+    client.openGates.removeLast().complete({
+      'metadata': {'name': 'a.txt', 'path': 'a.txt'},
+      'text': {'content': 'A', 'baseHash': 'h-a'},
+      'capabilities': {'canEdit': true},
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('B'), findsOneWidget);
+    expect(find.text('A'), findsNothing);
+  });
+
+  testWidgets('worktree 切换失效未完成的 open 请求，旧响应不导航', (tester) async {
+    final client = _RacyFilesClient();
+    await tester.pumpWidget(_FilesHarness(book: _book(), client: client));
+    client.listGates.removeAt(0).complete([
+      {'name': 'a.txt', 'kind': 'file', 'path': 'a.txt'},
+    ]);
+    await tester.pumpAndSettle();
+
+    // open 挂起期间切换 worktree：didUpdateWidget 失效未完成 open + 重载根目录。
+    await tester.tap(find.text('a.txt'));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('switch-worktree')));
+    await tester.pump();
+    expect(client.listPaths.last, isNull);
+
+    // 迟到的旧 open 响应：不得 push 预览页。
+    client.openGates.removeAt(0).complete({
+      'metadata': {'name': 'a.txt', 'path': 'a.txt'},
+      'text': {'content': 'A', 'baseHash': 'h-a'},
+      'capabilities': {'canEdit': true},
+    });
+    await tester.pump();
+    expect(find.byType(FilePreviewPage), findsNothing);
+
+    // 新 worktree 的目录重载放行，回到列表。
+    client.listGates.removeAt(0).complete([
+      {'name': 'a.txt', 'kind': 'file', 'path': 'a.txt'},
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.text('a.txt'), findsOneWidget);
   });
 }

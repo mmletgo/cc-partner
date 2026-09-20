@@ -51,8 +51,16 @@ void main() {
   late String baseUrl;
   final captured = <String, Map<String, dynamic>>{};
 
+  /// /api/health 响应体；各用例可覆盖以模拟旧后端或缺能力（null 还原默认）。
+  Map<String, dynamic>? healthOverride;
+  final defaultHealth = <String, dynamic>{
+    'protocol_version': 1,
+    'capabilities': ['attention.v1', 'attention.v2'],
+  };
+
   setUp(() async {
     captured.clear();
+    healthOverride = null;
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     baseUrl = 'http://127.0.0.1:${server.port}';
     server.listen((request) async {
@@ -63,7 +71,9 @@ void main() {
       }
       captured['${request.method} ${request.uri.path}'] = payload;
       request.response.headers.contentType = ContentType.json;
-      if (request.uri.path == '/api/mobile/attention/v2' && !captured.containsKey('fail-v2')) {
+      if (request.uri.path == '/api/health') {
+        request.response.write(jsonEncode(healthOverride ?? defaultHealth));
+      } else if (request.uri.path == '/api/mobile/attention/v2' && !captured.containsKey('fail-v2')) {
         request.response.write(jsonEncode(snapshot([
           snapshotItem(id: 'unread-1'),
           snapshotItem(id: 'read-1', readAt: '2026-09-19T09:00:00Z'),
@@ -177,6 +187,84 @@ void main() {
     final items = await client.listVisible();
     expect(items, hasLength(1));
     expect(items.single.id, 'v1-1');
+  });
+
+  test('listVisible probes /api/health before loading the snapshot', () async {
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = AttentionClient(http, baseUrl);
+    await client.listVisible();
+    // 能力探测先行（对齐 web assertAttentionCapability）。
+    expect(captured.containsKey('GET /api/health'), isTrue);
+    // 默认 health 带 v2：走 v2，不打 v1。
+    expect(captured.containsKey('GET /api/mobile/attention/v2'), isTrue);
+    expect(captured.containsKey('GET /api/mobile/attention'), isFalse);
+  });
+
+  test('health with attention.v1 only skips v2 and loads v1 directly', () async {
+    healthOverride = {
+      'protocol_version': 1,
+      'capabilities': ['attention.v1'],
+    };
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = AttentionClient(http, baseUrl);
+    final items = await client.listVisible();
+    expect(items.single.id, 'v1-1');
+    expect(captured.containsKey('GET /api/mobile/attention/v2'), isFalse);
+    expect(captured.containsKey('GET /api/mobile/attention'), isTrue);
+  });
+
+  test('health without attention.v1 throws AttentionUnsupportedError', () async {
+    healthOverride = {
+      'protocol_version': 1,
+      'capabilities': ['provider-manager.v1'],
+    };
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = AttentionClient(http, baseUrl);
+    expect(
+      client.listVisible(),
+      throwsA(isA<AttentionUnsupportedError>()),
+    );
+  });
+
+  test('legacy health without protocol fields counts as unsupported', () async {
+    // 旧后端缺 protocol_version/capabilities：安全回落为不支持（fail-closed）。
+    healthOverride = <String, dynamic>{};
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final client = AttentionClient(http, baseUrl);
+    expect(client.listVisible(), throwsA(isA<AttentionUnsupportedError>()));
+  });
+
+  test('AttentionHealthInfo parses tolerantly and matches web gates', () {
+    // v1/v2 判定与 web supportsAttentionV1/V2 同口径：version>=1 且精确包含。
+    const info = AttentionHealthInfo(protocolVersion: 1, capabilities: [
+      attentionCapabilityV1,
+      attentionCapabilityV2,
+    ]);
+    expect(info.supportsV1, isTrue);
+    expect(info.supportsV2, isTrue);
+    expect(
+      const AttentionHealthInfo(protocolVersion: 1, capabilities: ['attention.v1'])
+          .supportsV2,
+      isFalse,
+    );
+    expect(
+      const AttentionHealthInfo(protocolVersion: 0, capabilities: [
+        attentionCapabilityV1,
+      ]).supportsV1,
+      isFalse,
+    );
+    // 宽容解析：缺字段按不支持处理。
+    final legacy = AttentionHealthInfo.fromJson(<String, dynamic>{});
+    expect(legacy.supportsV1, isFalse);
+    expect(legacy.supportsV2, isFalse);
+    final nonListCaps =
+        AttentionHealthInfo.fromJson({'protocol_version': 'x', 'capabilities': 'nope'});
+    expect(nonListCaps.protocolVersion, 0);
+    expect(nonListCaps.capabilities, isEmpty);
   });
 
   test('markRead posts itemIds and returns the updated snapshot items', () async {

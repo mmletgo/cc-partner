@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cc_partner_mobile/core/lan_http.dart';
 import 'package:cc_partner_mobile/git/client.dart';
 import 'package:cc_partner_mobile/prompts/client.dart';
@@ -36,6 +38,63 @@ void main() {
       expect(s.worktreeId, 'w1');
       expect(s.supportsPanes, isTrue);
       expect(s.paneCount, 3);
+    });
+
+    test('cols/rows 宽容解析：num 直读，缺省 null（旧后端不炸 UI）', () {
+      final sized = SessionSummary.fromJson({
+        'id': 's1',
+        'projectId': 'p1',
+        'name': 'main',
+        'status': 'running',
+        'cols': 120,
+        'rows': 40.0,
+      });
+      expect(sized.cols, 120);
+      expect(sized.rows, 40);
+
+      final unsized = SessionSummary.fromJson({'id': 's2'});
+      expect(unsized.cols, isNull);
+      expect(unsized.rows, isNull);
+    });
+  });
+
+  group('worktree 作用域匹配', () {
+    final w1 = SessionSummary(
+        id: 's1', projectId: 'p1', name: 'a', status: 'running', worktreeId: 'w1');
+    final w2SameProject = SessionSummary(
+        id: 's2', projectId: 'p1', name: 'b', status: 'running', worktreeId: 'w2');
+    final otherProject = SessionSummary(
+        id: 's3', projectId: 'p2', name: 'c', status: 'running', worktreeId: 'w1');
+
+    test('projectId 相同且 worktree 匹配才命中（web scopedSessions 同口径）', () {
+      expect(sessionMatchesWorktree(w1, 'w1', projectId: 'p1'), isTrue);
+      expect(sessionMatchesWorktree(w2SameProject, 'w1', projectId: 'p1'), isFalse);
+      expect(sessionMatchesWorktree(otherProject, 'w1', projectId: 'p1'), isFalse);
+    });
+
+    test('worktreeId 为 null 表示该维度不过滤（web `!worktree ||` 兜底）', () {
+      expect(sessionMatchesWorktree(w1, null, projectId: 'p1'), isTrue);
+      expect(sessionMatchesWorktree(otherProject, null, projectId: 'p1'), isFalse);
+      expect(sessionMatchesWorktree(w1, 'w2', projectId: null), isFalse);
+    });
+  });
+
+  group('replay 超时语义', () {
+    test('hydrateScrollback timeout 到期抛 TimeoutException，可重试（对齐 web 10s abort）',
+        () async {
+      final client = SessionsClient(_DelayedHttp(), 'http://test');
+      await expectLater(
+        client.hydrateScrollback('s1', timeout: const Duration(milliseconds: 20)),
+        throwsA(isA<TimeoutException>()),
+      );
+    });
+
+    test('hydrateScrollback 走 refreshHistory=true；不传 timeout 保持无超时', () async {
+      final bodies = <Map<String, dynamic>>[];
+      final client = SessionsClient(_RecordingHttp(bodies), 'http://test');
+      final replay = await client.hydrateScrollback('s1');
+      expect(replay, isEmpty);
+      expect(bodies.single, {'sessionId': 's1', 'refreshHistory': true});
     });
   });
 
@@ -189,5 +248,19 @@ class _RecordingHttp extends LanHttpClient {
   ) async {
     bodies.add(body);
     return <String, dynamic>{};
+  }
+}
+
+/// 永不返回的假 HTTP 通道：验证 replay timeout 语义。
+class _DelayedHttp extends LanHttpClient {
+  _DelayedHttp() : super();
+
+  @override
+  Future<Map<String, dynamic>> postJson(
+    String baseUrl,
+    String path,
+    Map<String, dynamic> body,
+  ) {
+    return Completer<Map<String, dynamic>>().future;
   }
 }

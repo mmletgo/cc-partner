@@ -26,9 +26,28 @@ String? composeWorktreeBranchName(String prefix, String suffix) {
   return '$prefix/$trimmed';
 }
 
-/// worktree 卡片显示名：优先 name，其次 branch / id。
+/// worktree 卡片显示名：分支名优先（对齐 web MobileWorktreeTabs label = `branch ?? name`
+/// 与删除确认框取值），缺失时回退 name / id。
 String worktreeDisplayName(Map<String, dynamic> tree) =>
-    tree['name'] as String? ?? tree['branch'] as String? ?? tree['id'] as String? ?? '';
+    tree['branch'] as String? ??
+    tree['name'] as String? ??
+    tree['id'] as String? ??
+    '';
+
+/// Business Logic: worktrees 页与 Git 页共用「N 处冲突 / N 处改动 / 干净」三态口径
+/// （对齐 web worktrees.status.conflict/dirty 与移动端 worktrees 页既有文案）。
+/// Code Logic: conflicts 优先，其次 !clean 或 changed>0，最后干净；
+/// status 缺失时按干净展示（宽容解析）。
+String worktreeStatusLabel(Map<String, dynamic> tree) {
+  final status = WorktreeGitStatus.of(tree);
+  if (status.conflicts > 0) {
+    return '${status.conflicts} 处冲突';
+  }
+  if (!status.clean || status.changed > 0) {
+    return '${status.changed} 处改动';
+  }
+  return '干净';
+}
 
 /// 工作台 Git 引用标签（本地分支 / 远端分支 / tag），字段对齐 web `WorkbenchGitRef`。
 class WorkbenchGitRef {
@@ -87,12 +106,16 @@ class WorkbenchGitCommit {
     return WorkbenchGitCommit(
       hash: raw['hash'] as String? ?? '',
       shortHash: raw['shortHash'] as String? ?? '',
-      parentHashes: (raw['parentHashes'] as List?)?.whereType<String>().toList() ?? const [],
+      parentHashes:
+          (raw['parentHashes'] as List?)?.whereType<String>().toList() ??
+          const [],
       authorName: raw['authorName'] as String? ?? '',
       authorEmail: raw['authorEmail'] as String? ?? '',
       authoredAt: raw['authoredAt'] as String? ?? '',
       summary: raw['summary'] as String? ?? '',
-      refs: (raw['refs'] as List?)?.map(WorkbenchGitRef.fromJson).toList() ?? const [],
+      refs:
+          (raw['refs'] as List?)?.map(WorkbenchGitRef.fromJson).toList() ??
+          const [],
     );
   }
 
@@ -166,11 +189,10 @@ class GitClient {
     String projectId, {
     bool includeGitStatus = false,
   }) {
-    return _http.postJson(
-      baseUrl,
-      '/api/mobile/workbench/worktrees/list',
-      {'projectId': projectId, 'includeGitStatus': includeGitStatus},
-    );
+    return _http.postJson(baseUrl, '/api/mobile/workbench/worktrees/list', {
+      'projectId': projectId,
+      'includeGitStatus': includeGitStatus,
+    });
   }
 
   /// 当前 worktree 最近提交，对齐 web `git.listCommits`。
@@ -203,15 +225,11 @@ class GitClient {
     required String clientOperationId,
     String? message,
   }) {
-    return _http.postJson(
-      baseUrl,
-      '/api/mobile/workbench/worktrees/commit',
-      {
-        'worktreeId': worktreeId,
-        'clientOperationId': clientOperationId,
-        if (message != null) 'message': message,
-      },
-    );
+    return _http.postJson(baseUrl, '/api/mobile/workbench/worktrees/commit', {
+      'worktreeId': worktreeId,
+      'clientOperationId': clientOperationId,
+      if (message != null) 'message': message,
+    });
   }
 
   Future<Map<String, dynamic>> pull({
@@ -219,15 +237,11 @@ class GitClient {
     required String worktreeId,
     String? clientOperationId,
   }) {
-    return _http.postJson(
-      baseUrl,
-      '/api/mobile/workbench/worktrees/pull',
-      {
-        'projectId': projectId,
-        'worktreeId': worktreeId,
-        if (clientOperationId != null) 'clientOperationId': clientOperationId,
-      },
-    );
+    return _http.postJson(baseUrl, '/api/mobile/workbench/worktrees/pull', {
+      'projectId': projectId,
+      'worktreeId': worktreeId,
+      if (clientOperationId != null) 'clientOperationId': clientOperationId,
+    });
   }
 
   Future<Map<String, dynamic>> push({
@@ -235,15 +249,11 @@ class GitClient {
     required String worktreeId,
     String? clientOperationId,
   }) {
-    return _http.postJson(
-      baseUrl,
-      '/api/mobile/workbench/worktrees/push',
-      {
-        'projectId': projectId,
-        'worktreeId': worktreeId,
-        if (clientOperationId != null) 'clientOperationId': clientOperationId,
-      },
-    );
+    return _http.postJson(baseUrl, '/api/mobile/workbench/worktrees/push', {
+      'projectId': projectId,
+      'worktreeId': worktreeId,
+      if (clientOperationId != null) 'clientOperationId': clientOperationId,
+    });
   }
 
   Future<Map<String, dynamic>> merge({
@@ -251,15 +261,11 @@ class GitClient {
     required String worktreeId,
     required String clientOperationId,
   }) {
-    return _http.postJson(
-      baseUrl,
-      '/api/mobile/workbench/worktrees/merge',
-      {
-        'projectId': projectId,
-        'worktreeId': worktreeId,
-        'clientOperationId': clientOperationId,
-      },
-    );
+    return _http.postJson(baseUrl, '/api/mobile/workbench/worktrees/merge', {
+      'projectId': projectId,
+      'worktreeId': worktreeId,
+      'clientOperationId': clientOperationId,
+    });
   }
 
   Future<Map<String, dynamic>> create({
@@ -267,15 +273,11 @@ class GitClient {
     required String branchName,
     String? baseBranch,
   }) {
-    return _http.postJson(
-      baseUrl,
-      '/api/mobile/workbench/worktrees/create',
-      {
-        'projectId': projectId,
-        'branchName': branchName,
-        'baseBranch': baseBranch,
-      },
-    );
+    return _http.postJson(baseUrl, '/api/mobile/workbench/worktrees/create', {
+      'projectId': projectId,
+      'branchName': branchName,
+      'baseBranch': baseBranch,
+    });
   }
 
   Future<Map<String, dynamic>> remove({
@@ -283,15 +285,11 @@ class GitClient {
     required String clientOperationId,
     bool force = false,
   }) {
-    return _http.postJson(
-      baseUrl,
-      '/api/mobile/workbench/worktrees/remove',
-      {
-        'worktreeId': worktreeId,
-        'clientOperationId': clientOperationId,
-        'force': force,
-      },
-    );
+    return _http.postJson(baseUrl, '/api/mobile/workbench/worktrees/remove', {
+      'worktreeId': worktreeId,
+      'clientOperationId': clientOperationId,
+      'force': force,
+    });
   }
 
   Future<Map<String, dynamic>> repairHookFailure({
@@ -301,10 +299,7 @@ class GitClient {
     return _http.postJson(
       baseUrl,
       '/api/mobile/workbench/worktrees/repair-hook-failure',
-      {
-        'worktreeId': worktreeId,
-        'hookFailure': hookFailure,
-      },
+      {'worktreeId': worktreeId, 'hookFailure': hookFailure},
     );
   }
 
@@ -312,7 +307,9 @@ class GitClient {
   /// 取 intent/state 对账，禁止盲重放（对齐 web git.getMutationOperation）。
   /// Code Logic: POST /api/mobile/workbench/worktrees/mutation-operation {clientOperationId}；
   /// 后端可能返回 null（无记录），非对象响应一律回 null。
-  Future<Map<String, dynamic>?> mutationOperation(String clientOperationId) async {
+  Future<Map<String, dynamic>?> mutationOperation(
+    String clientOperationId,
+  ) async {
     final decoded = await _http.postDynamic(
       baseUrl,
       '/api/mobile/workbench/worktrees/mutation-operation',
@@ -365,8 +362,9 @@ Future<GitMutationReconcile> reconcileWorktreeMutation({
   } catch (_) {}
   List<String>? mainCommitHashes;
   final intent = ledger?['intent'];
-  final kind =
-      parseGitMutationKind(intent is Map ? intent['kind'] as String? : null);
+  final kind = parseGitMutationKind(
+    intent is Map ? intent['kind'] as String? : null,
+  );
   if (kind == GitMutationKind.merge || kind == GitMutationKind.collectMerge) {
     Map<String, dynamic>? main;
     for (final tree in trees) {
@@ -378,7 +376,11 @@ Future<GitMutationReconcile> reconcileWorktreeMutation({
     final mainId = main?['id'] as String?;
     if (main != null && mainId != null && mainId.isNotEmpty) {
       try {
-        final commits = await client.commits(projectId, worktreeId: mainId, limit: 100);
+        final commits = await client.commits(
+          projectId,
+          worktreeId: mainId,
+          limit: 100,
+        );
         mainCommitHashes = [for (final commit in commits) commit.hash];
       } catch (_) {
         mainCommitHashes = null;

@@ -118,7 +118,9 @@ class _FakeGitClient extends GitClient {
   void Function(String worktreeId)? onRemoveApplied;
 
   @override
-  Future<Map<String, dynamic>?> mutationOperation(String clientOperationId) async {
+  Future<Map<String, dynamic>?> mutationOperation(
+    String clientOperationId,
+  ) async {
     mutationOperationIds.add(clientOperationId);
     final ledger = ledgerScript?.call(clientOperationId);
     return ledger == null ? null : Map<String, dynamic>.from(ledger);
@@ -140,7 +142,8 @@ void main() {
     AddressBook addressBook,
     GitClient git, {
     ValueChanged<Map<String, dynamic>>? onSelect,
-    Future<SessionSummary> Function(String projectId, String worktreeId)? onCreateSession,
+    Future<SessionSummary> Function(String projectId, String worktreeId)?
+    onCreateSession,
     String? activeId = 'wt-main',
     Future<bool> Function(String worktreeId)? confirmLeaveDirty,
   }) {
@@ -235,7 +238,8 @@ void main() {
     await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
     await tester.pumpAndSettle();
     expect(find.text('移除 worktree'), findsOneWidget);
-    expect(find.textContaining('未推送的提交可能丢失'), findsOneWidget);
+    // 对齐 web MobileWorktreePanel removeConfirm 文案（列表卡轻口径）。
+    expect(find.textContaining('请先确认不再需要该工作区'), findsOneWidget);
 
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
@@ -257,22 +261,24 @@ void main() {
     expect(git.removeCount, 1);
     expect(git.removedIds, ['wt-1']);
     expect(find.byKey(const Key('worktree-item-wt-1')), findsNothing);
-    expect(find.textContaining('已移除 worktree「feat」'), findsOneWidget);
+    expect(find.textContaining('已移除 worktree「feat/app」'), findsOneWidget);
     await flushSnackbars(tester);
   });
 
   testWidgets('删除激活 worktree 前脏文件预检：取消则不弹删除确认也不调后端', (tester) async {
     final git = seed();
     final preflightIds = <String>[];
-    await tester.pumpWidget(wrap(
-      await book(),
-      git,
-      activeId: 'wt-1',
-      confirmLeaveDirty: (worktreeId) async {
-        preflightIds.add(worktreeId);
-        return false;
-      },
-    ));
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        activeId: 'wt-1',
+        confirmLeaveDirty: (worktreeId) async {
+          preflightIds.add(worktreeId);
+          return false;
+        },
+      ),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
@@ -287,12 +293,14 @@ void main() {
 
   testWidgets('删除激活 worktree 前脏文件预检：丢弃后进入删除确认并成功移除', (tester) async {
     final git = seed();
-    await tester.pumpWidget(wrap(
-      await book(),
-      git,
-      activeId: 'wt-1',
-      confirmLeaveDirty: (_) async => true,
-    ));
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        activeId: 'wt-1',
+        confirmLeaveDirty: (_) async => true,
+      ),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
@@ -303,21 +311,23 @@ void main() {
     expect(git.removeCount, 1);
     expect(git.removedIds, ['wt-1']);
     expect(find.byKey(const Key('worktree-item-wt-1')), findsNothing);
-    expect(find.textContaining('已移除 worktree「feat」'), findsOneWidget);
+    expect(find.textContaining('已移除 worktree「feat/app」'), findsOneWidget);
     await flushSnackbars(tester);
   });
 
   testWidgets('删除非激活 worktree 不触发脏文件预检', (tester) async {
     final git = seed();
     var preflightCalls = 0;
-    await tester.pumpWidget(wrap(
-      await book(),
-      git,
-      confirmLeaveDirty: (_) async {
-        preflightCalls += 1;
-        return true;
-      },
-    ));
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        confirmLeaveDirty: (_) async {
+          preflightCalls += 1;
+          return true;
+        },
+      ),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('worktree-delete-wt-1')));
@@ -353,14 +363,21 @@ void main() {
 
     // 空后缀：创建禁用。
     expect(
-      tester.widget<FilledButton>(find.widgetWithText(FilledButton, '创建')).onPressed,
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, '创建'))
+          .onPressed,
       isNull,
     );
 
-    await tester.enterText(find.byKey(const Key('worktree-suffix-input')), 'my-task');
+    await tester.enterText(
+      find.byKey(const Key('worktree-suffix-input')),
+      'my-task',
+    );
     await tester.pumpAndSettle();
     expect(
-      tester.widget<FilledButton>(find.widgetWithText(FilledButton, '创建')).onPressed,
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, '创建'))
+          .onPressed,
       isNotNull,
     );
 
@@ -379,7 +396,10 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('fix').last);
     await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const Key('worktree-suffix-input')), 'login-crash');
+    await tester.enterText(
+      find.byKey(const Key('worktree-suffix-input')),
+      'login-crash',
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('创建'));
     await tester.pumpAndSettle();
@@ -411,14 +431,20 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byKey(const Key('worktree-suffix-input')), 'auto-term');
+    await tester.enterText(
+      find.byKey(const Key('worktree-suffix-input')),
+      'auto-term',
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('创建'));
     await tester.pumpAndSettle();
 
     expect(createdSessions, ['p1/wt-new']);
     expect(selected, ['wt-new']);
-    expect(find.textContaining('已创建 worktree「feature/auto-term」'), findsOneWidget);
+    expect(
+      find.textContaining('已创建 worktree「feature/auto-term」'),
+      findsOneWidget,
+    );
     expect(find.widgetWithText(TextField, 'auto-term'), findsNothing);
     await flushSnackbars(tester);
   });
@@ -431,12 +457,16 @@ void main() {
         await book(),
         git,
         onSelect: (tree) => selected.add(tree['id'] as String),
-        onCreateSession: (projectId, worktreeId) async => throw Exception('pty boom'),
+        onCreateSession: (projectId, worktreeId) async =>
+            throw Exception('pty boom'),
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byKey(const Key('worktree-suffix-input')), 'term-fail');
+    await tester.enterText(
+      find.byKey(const Key('worktree-suffix-input')),
+      'term-fail',
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('创建'));
     await tester.pumpAndSettle();
@@ -453,7 +483,10 @@ void main() {
     await tester.pumpWidget(wrap(await book(), git));
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byKey(const Key('worktree-suffix-input')), 'feat/x');
+    await tester.enterText(
+      find.byKey(const Key('worktree-suffix-input')),
+      'feat/x',
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('创建'));
     await tester.pumpAndSettle();
@@ -466,13 +499,13 @@ void main() {
   testWidgets('B1 移除返回 unknown → 同 id 对账确认已删 → 横幅消失并提示', (tester) async {
     final git = seed();
     git.mutationEnvelopeScript = (kind) => {
-          'kind': 'unknown',
-          'clientOperationId': 'srv-op-r1',
-        };
+      'kind': 'unknown',
+      'clientOperationId': 'srv-op-r1',
+    };
     git.ledgerScript = (operationId) => {
-          'state': 'running',
-          'intent': {'kind': 'remove', 'worktreeId': 'wt-1'},
-        };
+      'state': 'running',
+      'intent': {'kind': 'remove', 'worktreeId': 'wt-1'},
+    };
     // 服务端实际已删（权威列表移除），ledger 记录 remove intent 进行中 → 对账可确认成功。
     git.onRemoveApplied = (worktreeId) {
       git.trees = git.trees.where((tree) => tree['id'] != worktreeId).toList();
@@ -489,12 +522,13 @@ void main() {
     expect(git.mutationOperationIds, [git.removeOperationIds.first]);
     expect(find.byKey(const Key('worktree-item-wt-1')), findsNothing);
     expect(find.byKey(const Key('worktrees-unknown-banner')), findsNothing);
-    expect(find.textContaining('已移除 worktree「feat」'), findsOneWidget);
+    expect(find.textContaining('已移除 worktree「feat/app」'), findsOneWidget);
     await flushSnackbars(tester);
   });
 
   testWidgets('B1 移除传输异常 → unknown 横幅可重新对账，仍未知时不盲重放', (tester) async {
-    final git = seed()..removeError = const SocketException('network unreachable');
+    final git = seed()
+      ..removeError = const SocketException('network unreachable');
     await tester.pumpWidget(wrap(await book(), git));
     await tester.pumpAndSettle();
 
@@ -520,13 +554,17 @@ void main() {
     final git = seed();
     final selected = <String>[];
     await tester.pumpWidget(
-      wrap(await book(), git, onSelect: (tree) => selected.add(tree['id'] as String)),
+      wrap(
+        await book(),
+        git,
+        onSelect: (tree) => selected.add(tree['id'] as String),
+      ),
     );
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('worktree-merge-wt-1')));
     await tester.pumpAndSettle();
-    expect(find.text('确定把「feat」合并到主工作区？'), findsOneWidget);
+    expect(find.text('确定把「feat/app」合并到主工作区？'), findsOneWidget);
     await tester.tap(find.widgetWithText(FilledButton, '合并'));
     await tester.pumpAndSettle();
 
@@ -537,7 +575,87 @@ void main() {
     await flushSnackbars(tester);
   });
 
-  testWidgets('B14 合并的源树是 active → 成功后 onSelect(主树) 交 shell 兜底', (tester) async {
+  testWidgets('B14 合并激活 worktree：dirty 预检取消则不调后端', (tester) async {
+    final git = seed();
+    final preflightIds = <String>[];
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        activeId: 'wt-1',
+        confirmLeaveDirty: (worktreeId) async {
+          preflightIds.add(worktreeId);
+          return false;
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-merge-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+
+    // 对齐 web runMobileWorktreeMergeFlow：源=激活树先只读预检，取消不调后端。
+    expect(preflightIds, ['wt-1']);
+    expect(git.mergeCount, 0);
+    expect(find.byKey(const Key('worktree-item-wt-1')), findsOneWidget);
+  });
+
+  testWidgets('B14 合并激活 worktree：预检放行后正常合并', (tester) async {
+    final git = seed();
+    final selected = <String>[];
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        onSelect: (tree) => selected.add(tree['id'] as String),
+        activeId: 'wt-1',
+        confirmLeaveDirty: (_) async => true,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-merge-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+
+    expect(git.mergeCount, 1);
+    // 源树被删且正是 active → onSelect(主树) 交 shell 兜底。
+    expect(selected, ['wt-main']);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('B14 合并非激活 worktree 不触发 dirty 预检', (tester) async {
+    final git = seed();
+    var preflightCalls = 0;
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        confirmLeaveDirty: (_) async {
+          preflightCalls += 1;
+          return true;
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('worktree-merge-wt-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+
+    // activeId=wt-main，合并 wt-1 不需要预检（对齐 web requiresActivePreflight）。
+    expect(preflightCalls, 0);
+    expect(git.mergeCount, 1);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('B14 合并的源树是 active → 成功后 onSelect(主树) 交 shell 兜底', (
+    tester,
+  ) async {
     final git = seed();
     final selected = <String>[];
     await tester.pumpWidget(
@@ -563,13 +681,13 @@ void main() {
   testWidgets('B14 合并 unknown → 同 id 对账 ledger 失败 → 提示可重新发起', (tester) async {
     final git = seed();
     git.mutationEnvelopeScript = (kind) => {
-          'kind': 'unknown',
-          'clientOperationId': 'srv-op-m1',
-        };
+      'kind': 'unknown',
+      'clientOperationId': 'srv-op-m1',
+    };
     git.ledgerScript = (operationId) => {
-          'state': 'failed',
-          'intent': {'kind': 'merge', 'sourceWorktreeId': 'wt-1'},
-        };
+      'state': 'failed',
+      'intent': {'kind': 'merge', 'sourceWorktreeId': 'wt-1'},
+    };
     await tester.pumpWidget(wrap(await book(), git));
     await tester.pumpAndSettle();
 

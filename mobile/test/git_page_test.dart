@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cc_partner_mobile/address_book/book.dart';
@@ -16,6 +17,16 @@ class _FakeGitClient extends GitClient {
   List<WorkbenchGitCommit> commitSeed = const [];
   Object? commitsError;
   int commitsRequestCount = 0;
+
+  /// 按 worktreeId 种提交历史；缺省回退 commitSeed（竞态守卫测试用）。
+  Map<String, List<WorkbenchGitCommit>> commitsByWorktree = const {};
+
+  /// 一次性提交请求闸门：非空时下一次 commits 请求挂起直到 complete
+  /// （返回闸门内的提交列表，模拟慢响应）。
+  Completer<List<WorkbenchGitCommit>>? commitsGate;
+
+  /// 一次性 hook 修复闸门：非空时下一次 repairHookFailure 挂起（busy 态测试用）。
+  Completer<Map<String, dynamic>>? repairGate;
 
   /// push/pull/commit/merge 的动作脚本：默认成功 envelope，可改抛错或返回 unknown。
   Object? Function(String kind)? mutationScript;
@@ -49,7 +60,10 @@ class _FakeGitClient extends GitClient {
     String projectId, {
     bool includeGitStatus = false,
   }) async {
-    return {'ok': true, 'worktrees': [for (final tree in trees) Map<String, dynamic>.from(tree)]};
+    return {
+      'ok': true,
+      'worktrees': [for (final tree in trees) Map<String, dynamic>.from(tree)],
+    };
   }
 
   @override
@@ -59,6 +73,15 @@ class _FakeGitClient extends GitClient {
     int limit = 30,
   }) async {
     commitsRequestCount += 1;
+    final gate = commitsGate;
+    if (gate != null) {
+      commitsGate = null;
+      return gate.future;
+    }
+    final seeded = commitsByWorktree[worktreeId ?? ''];
+    if (seeded != null) {
+      return seeded;
+    }
     if (commitsError != null) {
       throw commitsError!;
     }
@@ -107,11 +130,18 @@ class _FakeGitClient extends GitClient {
     required Map<String, dynamic> hookFailure,
   }) async {
     repairCalls += 1;
+    final gate = repairGate;
+    if (gate != null) {
+      repairGate = null;
+      return gate.future;
+    }
     return Map<String, dynamic>.from(repairResult);
   }
 
   @override
-  Future<Map<String, dynamic>?> mutationOperation(String clientOperationId) async {
+  Future<Map<String, dynamic>?> mutationOperation(
+    String clientOperationId,
+  ) async {
     final ledger = ledgerScript?.call(clientOperationId);
     return ledger == null ? null : Map<String, dynamic>.from(ledger);
   }
@@ -160,10 +190,7 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  _FakeGitClient seed({
-    bool featCanPush = true,
-    bool mainCanPush = true,
-  }) =>
+  _FakeGitClient seed({bool featCanPush = true, bool mainCanPush = true}) =>
       _FakeGitClient()
         ..trees = [
           {
@@ -207,7 +234,9 @@ void main() {
             authorName: '韩梅梅',
             authoredAt: '2026-09-19T10:30:00Z',
             summary: 'fix: mobile git history',
-            refs: [WorkbenchGitRef(name: 'feat/app', kind: 'local', isHead: true)],
+            refs: [
+              WorkbenchGitRef(name: 'feat/app', kind: 'local', isHead: true),
+            ],
           ),
         ];
 
@@ -217,7 +246,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('feat/app'), findsWidgets);
-    expect(find.text('有改动（2 个文件）'), findsOneWidget);
+    expect(find.text('2 处改动'), findsOneWidget);
     expect(find.text('领先 1 · 落后 0'), findsOneWidget);
     expect(find.text('可推送'), findsWidgets);
     expect(find.byKey(const Key('git-action-commit')), findsOneWidget);
@@ -287,7 +316,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('确认合并'), findsOneWidget);
-    expect(find.text('确定把「feat」合并到主工作区？'), findsOneWidget);
+    expect(find.text('确定把「feat/app」合并到主工作区？'), findsOneWidget);
 
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
@@ -319,10 +348,7 @@ void main() {
     final git = seed();
     git.mutationScript = (kind) {
       git.mutationCalls.add(kind);
-      return {
-        'kind': 'unknown',
-        'clientOperationId': 'server-op-1',
-      };
+      return {'kind': 'unknown', 'clientOperationId': 'server-op-1'};
     };
 
     await tester.pumpWidget(wrap(await book(), git));
@@ -334,11 +360,15 @@ void main() {
     // unknown 相位：横幅出现 + 全部动作禁用。
     expect(find.byKey(const Key('git-unknown-banner')), findsOneWidget);
     expect(
-      tester.widget<FilledButton>(find.byKey(const Key('git-action-commit'))).onPressed,
+      tester
+          .widget<FilledButton>(find.byKey(const Key('git-action-commit')))
+          .onPressed,
       isNull,
     );
     expect(
-      tester.widget<OutlinedButton>(find.byKey(const Key('git-action-push'))).onPressed,
+      tester
+          .widget<OutlinedButton>(find.byKey(const Key('git-action-push')))
+          .onPressed,
       isNull,
     );
 
@@ -366,7 +396,9 @@ void main() {
     expect(find.byKey(const Key('git-unknown-banner')), findsOneWidget);
     expect(find.textContaining('操作结果未知'), findsNWidgets(2));
     expect(
-      tester.widget<FilledButton>(find.byKey(const Key('git-action-commit'))).onPressed,
+      tester
+          .widget<FilledButton>(find.byKey(const Key('git-action-commit')))
+          .onPressed,
       isNull,
     );
     // SnackBar 没有「推送失败」——传输异常不算确定失败。
@@ -376,11 +408,7 @@ void main() {
   testWidgets('同步按钮：门控满足时推送主分支并逐兄弟拉取，摘要 SnackBar', (tester) async {
     final git = seed()
       ..allProjects = [
-        {
-          'id': 'p1',
-          'deviceId': 'dev-a',
-          'gitRemoteFingerprint': 'fp-1',
-        },
+        {'id': 'p1', 'deviceId': 'dev-a', 'gitRemoteFingerprint': 'fp-1'},
         {
           'id': 'p2',
           'deviceId': 'dev-b',
@@ -416,7 +444,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      tester.widget<OutlinedButton>(find.byKey(const Key('git-action-sync'))).onPressed,
+      tester
+          .widget<OutlinedButton>(find.byKey(const Key('git-action-sync')))
+          .onPressed,
       isNull,
     );
   });
@@ -425,15 +455,17 @@ void main() {
     final git = seed();
     var guardCalls = 0;
     var allowDirty = false;
-    await tester.pumpWidget(wrap(
-      await book(),
-      git,
-      confirmLeaveDirty: (worktreeId) async {
-        guardCalls += 1;
-        expect(worktreeId, 'wt-1');
-        return allowDirty;
-      },
-    ));
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        confirmLeaveDirty: (worktreeId) async {
+          guardCalls += 1;
+          expect(worktreeId, 'wt-1');
+          return allowDirty;
+        },
+      ),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('git-action-merge')));
@@ -455,16 +487,20 @@ void main() {
     await flushSnackbars(tester);
   });
 
-  testWidgets('B3 merge 成功后回写壳层刷新 worktrees（onWorktreesMutated）', (tester) async {
+  testWidgets('B3 merge 成功后回写壳层刷新 worktrees（onWorktreesMutated）', (
+    tester,
+  ) async {
     final git = seed();
     var mutated = 0;
-    await tester.pumpWidget(wrap(
-      await book(),
-      git,
-      onWorktreesMutated: () => mutated += 1,
-      // merge 的源不是激活 worktree（选中的 wt-main ≠ worktreeId wt-1）时不触发 dirty guard。
-      confirmLeaveDirty: (_) async => true,
-    ));
+    await tester.pumpWidget(
+      wrap(
+        await book(),
+        git,
+        onWorktreesMutated: () => mutated += 1,
+        // merge 的源不是激活 worktree（选中的 wt-main ≠ worktreeId wt-1）时不触发 dirty guard。
+        confirmLeaveDirty: (_) async => true,
+      ),
+    );
     await tester.pumpAndSettle();
 
     // 切到主工作区卡片再合并（collect-merge，源 ≠ 激活 worktree）。
@@ -492,25 +528,23 @@ void main() {
         'hookFailure': {'stage': 'prePush', 'stdout': 'denied', 'exitCode': 1},
       };
     };
-    await tester.pumpWidget(wrap(
-      await book(),
-      git,
-      onFocusRepairSession: focused.add,
-    ));
+    await tester.pumpWidget(
+      wrap(await book(), git, onFocusRepairSession: focused.add),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('git-action-push')));
     await tester.pumpAndSettle();
-    expect(find.text('Git hook 失败'), findsOneWidget);
+    expect(find.text('pre-push 钩子阻止 push'), findsOneWidget);
 
     git.mutationScript = null;
-    await tester.tap(find.text('hook-repair'));
+    await tester.tap(find.byKey(const Key('git-hook-repair')));
     await tester.pumpAndSettle();
 
     expect(git.repairCalls, 1);
     expect(focused, ['tmux-repair']);
     // 卡片已清除；聚焦路径下不再重复弹「请在终端查看进度」提示。
-    expect(find.text('Git hook 失败'), findsNothing);
+    expect(find.text('pre-push 钩子阻止 push'), findsNothing);
     await flushSnackbars(tester);
   });
 
@@ -537,7 +571,7 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, '提交').last);
     await tester.pumpAndSettle();
 
-    expect(find.text('Git hook 失败'), findsOneWidget);
+    expect(find.text('pre-commit 钩子阻止 commit'), findsOneWidget);
     expect(find.textContaining('hookFailure'), findsNothing);
     expect(find.textContaining('lint failed'), findsNothing);
     // 默认收起；展开后 stdout/stderr 换行拼接展示。
@@ -548,8 +582,9 @@ void main() {
     await tester.tap(find.text('收起钩子输出'));
     await tester.pumpAndSettle();
     expect(find.text('lint failed\nexit 1'), findsNothing);
-    // 修复按钮仍在。
-    expect(find.text('hook-repair'), findsOneWidget);
+    // 修复按钮仍在（「让 AI 修复」+「忽略」出口）。
+    expect(find.text('让 AI 修复'), findsOneWidget);
+    expect(find.byKey(const Key('git-hook-dismiss')), findsOneWidget);
   });
 
   testWidgets('hook 失败卡空输出给占位文案', (tester) async {
@@ -567,18 +602,141 @@ void main() {
 
     await tester.tap(find.byKey(const Key('git-action-push')));
     await tester.pumpAndSettle();
-    expect(find.text('Git hook 失败'), findsOneWidget);
+    // 空 payload 宽容解析：stage 缺失时标题回退 pre-commit 口径。
+    expect(find.text('pre-commit 钩子阻止 commit'), findsOneWidget);
 
     await tester.tap(find.text('展开钩子输出'));
     await tester.pumpAndSettle();
     expect(find.text('（未捕获到输出）'), findsOneWidget);
   });
 
+  testWidgets('hook 卡「忽略」仅本地清除错误卡，不调用后端修复', (tester) async {
+    final git = seed();
+    git.mutationScript = (kind) {
+      git.mutationCalls.add(kind);
+      return {
+        'kind': 'failedHook',
+        'clientOperationId': 'op-hook',
+        'hookFailure': {
+          'stage': 'preCommit',
+          'stdout': 'lint failed',
+          'exitCode': 1,
+        },
+      };
+    };
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('git-action-commit')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '提交').last);
+    await tester.pumpAndSettle();
+    expect(find.text('pre-commit 钩子阻止 commit'), findsOneWidget);
+
+    // 忽略：本地清卡，不发修复请求（对齐 web dismissButton 语义）。
+    await tester.tap(find.byKey(const Key('git-hook-dismiss')));
+    await tester.pumpAndSettle();
+    expect(find.text('pre-commit 钩子阻止 commit'), findsNothing);
+    expect(git.repairCalls, 0);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('hook 修复进行中：按钮显示「正在启动 AI 修复…」并禁用', (tester) async {
+    final git = seed();
+    final focused = <String>[];
+    git.mutationScript = (kind) {
+      git.mutationCalls.add(kind);
+      return {
+        'kind': 'failedHook',
+        'clientOperationId': 'op-hook',
+        'hookFailure': {
+          'stage': 'preCommit',
+          'stdout': 'lint failed',
+          'exitCode': 1,
+        },
+      };
+    };
+    final gate = Completer<Map<String, dynamic>>();
+    git.repairGate = gate;
+    await tester.pumpWidget(
+      wrap(await book(), git, onFocusRepairSession: focused.add),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('git-action-commit')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '提交').last);
+    await tester.pumpAndSettle();
+    expect(find.text('让 AI 修复'), findsOneWidget);
+
+    // 修复请求挂起期间：busy 文案 + 按钮禁用（对齐 web runButtonBusy + disabled）。
+    await tester.tap(find.byKey(const Key('git-hook-repair')));
+    await tester.pump();
+    expect(find.text('正在启动 AI 修复…'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('git-hook-repair')))
+          .onPressed,
+      isNull,
+    );
+
+    gate.complete({'terminalSessionId': 'tmux-repair'});
+    await tester.pumpAndSettle();
+    expect(git.repairCalls, 1);
+    expect(focused, ['tmux-repair']);
+    expect(find.text('pre-commit 钩子阻止 commit'), findsNothing);
+    await flushSnackbars(tester);
+  });
+
+  testWidgets('切换 worktree 卡：提交历史跟随新选中树，旧树迟到的响应被丢弃', (tester) async {
+    final git = seed();
+    const featCommit = WorkbenchGitCommit(
+      hash: 'f1',
+      shortHash: 'f1',
+      summary: 'feat 树的提交',
+    );
+    const mainCommit = WorkbenchGitCommit(
+      hash: 'm1',
+      shortHash: 'm1',
+      summary: '主工作区的提交',
+    );
+    git.commitsByWorktree = {
+      'wt-1': [featCommit],
+    };
+
+    await tester.pumpWidget(wrap(await book(), git));
+    await tester.pumpAndSettle();
+    expect(find.text('feat 树的提交'), findsOneWidget);
+
+    // 预置慢响应闸门（下一次请求 = 切到主工作区后的提交请求）。
+    final slowMain = Completer<List<WorkbenchGitCommit>>();
+    git.commitsGate = slowMain;
+
+    // 快速切换：先选中主工作区（请求挂起），再切回 wt-1（请求立即返回）。
+    await tester.tap(find.byKey(const Key('git-tree-wt-main')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('git-tree-wt-1')));
+    await tester.pump();
+    expect(find.text('feat 树的提交'), findsOneWidget);
+
+    // 主工作区的慢响应迟到：请求代数已失效，不得覆盖当前 wt-1 的提交历史。
+    slowMain.complete([mainCommit]);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('主工作区的提交'), findsNothing);
+    expect(find.text('feat 树的提交'), findsOneWidget);
+  });
+
   testWidgets('同步 push unknown：锁定并保持未知横幅，重新对账确认成功后解锁', (tester) async {
     final git = seed()
       ..allProjects = [
         {'id': 'p1', 'deviceId': 'dev-a', 'gitRemoteFingerprint': 'fp-1'},
-        {'id': 'p2', 'deviceId': 'dev-b', 'deviceName': '书房', 'gitRemoteFingerprint': 'fp-1'},
+        {
+          'id': 'p2',
+          'deviceId': 'dev-b',
+          'deviceName': '书房',
+          'gitRemoteFingerprint': 'fp-1',
+        },
       ];
     git.mutationScript = (kind) {
       git.mutationCalls.add(kind);
@@ -594,26 +752,37 @@ void main() {
     expect(find.byKey(const Key('git-unknown-banner')), findsOneWidget);
     expect(git.mutationCalls, ['push']);
     expect(
-      tester.widget<FilledButton>(find.byKey(const Key('git-action-commit'))).onPressed,
+      tester
+          .widget<FilledButton>(find.byKey(const Key('git-action-commit')))
+          .onPressed,
       isNull,
     );
     expect(
-      tester.widget<OutlinedButton>(find.byKey(const Key('git-action-sync'))).onPressed,
+      tester
+          .widget<OutlinedButton>(find.byKey(const Key('git-action-sync')))
+          .onPressed,
       isNull,
     );
 
     // ledger 落终态 succeeded → 「重新对账」确认成功解锁；对账不重放 mutation。
-    git.ledgerScript = (_) => {'state': 'succeeded', 'intent': {'kind': 'push'}};
+    git.ledgerScript = (_) => {
+      'state': 'succeeded',
+      'intent': {'kind': 'push'},
+    };
     await tester.tap(find.byKey(const Key('git-retry-reconcile')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('git-unknown-banner')), findsNothing);
     expect(git.mutationCalls, ['push']);
     expect(
-      tester.widget<FilledButton>(find.byKey(const Key('git-action-commit'))).onPressed,
+      tester
+          .widget<FilledButton>(find.byKey(const Key('git-action-commit')))
+          .onPressed,
       isNotNull,
     );
     expect(
-      tester.widget<OutlinedButton>(find.byKey(const Key('git-action-sync'))).onPressed,
+      tester
+          .widget<OutlinedButton>(find.byKey(const Key('git-action-sync')))
+          .onPressed,
       isNotNull,
     );
     await flushSnackbars(tester);
@@ -623,7 +792,12 @@ void main() {
     final git = seed()
       ..allProjects = [
         {'id': 'p1', 'deviceId': 'dev-a', 'gitRemoteFingerprint': 'fp-1'},
-        {'id': 'p2', 'deviceId': 'dev-b', 'deviceName': '书房', 'gitRemoteFingerprint': 'fp-1'},
+        {
+          'id': 'p2',
+          'deviceId': 'dev-b',
+          'deviceName': '书房',
+          'gitRemoteFingerprint': 'fp-1',
+        },
       ];
     git.mutationScript = (kind) {
       git.mutationCalls.add(kind);

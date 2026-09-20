@@ -13,6 +13,7 @@ import 'package:cc_partner_mobile/sessions/client.dart';
 import 'package:cc_partner_mobile/terminal/controller.dart';
 import 'package:cc_partner_mobile/ui/terminal_page.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 SessionSummary _s(
@@ -20,12 +21,18 @@ SessionSummary _s(
   String status = 'running',
   bool panes = false,
   int paneCount = 0,
+  String? worktreeId = 'w1',
+  int? cols,
+  int? rows,
 }) =>
     SessionSummary(
       id: id,
       projectId: 'p1',
       name: id,
       status: status,
+      worktreeId: worktreeId,
+      cols: cols,
+      rows: rows,
       supportsPanes: panes,
       paneCount: paneCount,
     );
@@ -49,14 +56,59 @@ class _FakeSessions extends SessionsClient {
   final List<String> closedIds = [];
   final List<String> replayIds = [];
   final List<String> focusedIds = [];
+  final List<String> hydrateIds = [];
+  final List<(String, int, int)> resizeCalls = [];
+  int createCalls = 0;
   int zoomCalls = 0;
   int splitCalls = 0;
   int switchCalls = 0;
   int closePaneCalls = 0;
   bool closePaneClosesWindow = false;
 
+  /// hydration（refreshHistory replay）失败注入；非 null 时 hydrateScrollback 抛错。
+  Object? hydrateError;
+
   @override
   Future<List<SessionSummary>> list(String projectId) async => sessions;
+
+  @override
+  Future<SessionSummary> create(
+    String projectId, {
+    String? worktreeId,
+    int? initialCols,
+    int? initialRows,
+  }) async {
+    createCalls += 1;
+    final session = SessionSummary(
+      id: 's-new-$createCalls',
+      projectId: projectId,
+      name: 's-new-$createCalls',
+      status: 'running',
+      worktreeId: worktreeId,
+      cols: initialCols,
+      rows: initialRows,
+    );
+    sessions = [...sessions, session];
+    return session;
+  }
+
+  @override
+  Future<void> resize(String sessionId, int cols, int rows) async {
+    resizeCalls.add((sessionId, cols, rows));
+  }
+
+  @override
+  Future<Map<String, dynamic>> hydrateScrollback(
+    String sessionId, {
+    Duration? timeout,
+  }) async {
+    hydrateIds.add(sessionId);
+    final error = hydrateError;
+    if (error != null) {
+      throw error;
+    }
+    return {'sessionId': sessionId, 'buffer': 'hydrated-history', 'lastSeq': 1};
+  }
 
   @override
   Future<void> close(String sessionId) async {
@@ -151,6 +203,8 @@ class _ExitedAfterCloseSessions extends _FakeSessions {
             name: s.name,
             status: 'exited',
             worktreeId: s.worktreeId,
+            cols: s.cols,
+            rows: s.rows,
             supportsPanes: s.supportsPanes,
             paneCount: s.paneCount,
           ),
@@ -188,6 +242,33 @@ class _FakeSocket extends Stream<Uint8List> implements Socket {
   @override
   void add(List<int> bytes) {
     writeCount += 1;
+  }
+
+  /// 模拟服务端下发一条 WS 文本帧（RFC6455 server 帧：FIN+text，不掩码），
+  /// 用于驱动输入链路 ready 握手 / ack 帧测试。
+  void emitServerText(String text) {
+    final payload = utf8.encode(text);
+    final frame = BytesBuilder();
+    frame.addByte(0x81);
+    if (payload.length < 126) {
+      frame.addByte(payload.length);
+    } else if (payload.length <= 0xFFFF) {
+      frame.addByte(126);
+      frame.addByte(payload.length >> 8);
+      frame.addByte(payload.length & 0xFF);
+    } else {
+      frame.addByte(127);
+      for (var shift = 56; shift >= 0; shift -= 8) {
+        frame.addByte((payload.length >> shift) & 0xFF);
+      }
+    }
+    frame.add(payload);
+    _incoming.add(frame.toBytes());
+  }
+
+  /// 便捷方法：下发服务端 ready 握手帧。
+  void emitReady() {
+    emitServerText('{"type":"ready"}');
   }
 
   @override
@@ -403,6 +484,14 @@ IconButton _iconButton(WidgetTester tester, IconData icon) {
   );
 }
 
+/// 通过硬件键盘 Ctrl+A 触发 xterm selectAll（确定性产生选区）。
+Future<void> _selectAll(WidgetTester tester) async {
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.keyA);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.keyA);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+}
+
 Future<void> _pump(
   WidgetTester tester, {
   required SessionsClient sessions,
@@ -446,7 +535,7 @@ void main() {
   testWidgets('会话 chip 关闭：关闭非当前会话仅移除 chip，不触发切换', (tester) async {
     final sessions = _FakeSessions([_s('s0'), _s('s1', status: 'exited')]);
     await _pump(tester, sessions: sessions);
-    expect(find.widgetWithText(InputChip, 's0'), findsOneWidget);
+    expect(find.widgetWithText(InputChip, 's0 · 0 pane'), findsOneWidget);
 
     final chips = find.byType(InputChip);
     expect(chips, findsNWidgets(2));
@@ -534,9 +623,8 @@ void main() {
       };
     await _pump(tester, sessions: sessions, git: git);
 
+    // 一键直提：点提交即发（message=null 由后端 AI 生成），无输入对话框。
     await tester.tap(find.byTooltip('提交'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('提交').last);
     await tester.pumpAndSettle();
 
     expect(git.commitCalls, 1);
@@ -565,14 +653,15 @@ void main() {
       worktreeInfo: const {
         'id': 'w1',
         'name': 'w1',
-        'branch': 'feat/x',
+        'branch': 'feat/app',
         'isMain': false,
       },
     );
 
     await tester.tap(find.byTooltip('合并'));
     await tester.pumpAndSettle();
-    expect(find.text('确定把「w1」合并到主工作区？'), findsOneWidget);
+    // W2 后 worktreeDisplayName 分支名优先：确认文案取 branch（feat/app）而非 name（w1）。
+    expect(find.text('确定把「feat/app」合并到主工作区？'), findsOneWidget);
 
     await tester.tap(find.widgetWithText(FilledButton, '合并'));
     await tester.pumpAndSettle();
@@ -645,9 +734,8 @@ void main() {
     var mutated = 0;
     await _pump(tester, sessions: sessions, git: git, onWorktreesMutated: () => mutated += 1);
 
+    // 一键直提：点提交即发（message=null 由后端 AI 生成），无输入对话框。
     await tester.tap(find.byTooltip('提交'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('提交').last);
     await tester.pumpAndSettle();
 
     // 只发了一次 commit；对账用同一 clientOperationId 查 ledger。
@@ -665,14 +753,13 @@ void main() {
       ..commitResult = {'kind': 'unknown', 'clientOperationId': 'srv-op-1'};
     await _pump(tester, sessions: sessions, git: git);
 
+    // 一键直提：点提交即发（message=null 由后端 AI 生成），无输入对话框。
     await tester.tap(find.byTooltip('提交'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('提交').last);
     await tester.pumpAndSettle();
 
     expect(git.commitCalls, 1);
     expect(find.byKey(const Key('terminal-commit-reconcile')), findsOneWidget);
-    expect(find.text('提交结果未知，请重新对账。'), findsOneWidget);
+    expect(find.text('提交操作结果未知，请刷新后人工核对'), findsOneWidget);
     // unknown 相位提交按钮锁定。
     expect(_iconButton(tester, Icons.commit).onPressed, isNull);
 
@@ -698,9 +785,8 @@ void main() {
     );
     expect(_iconButton(tester, Icons.merge_type).onPressed, isNotNull);
 
+    // 一键直提：点提交即发（message=null 由后端 AI 生成），无输入对话框。
     await tester.tap(find.byTooltip('提交'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('提交').last);
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('terminal-commit-reconcile')), findsOneWidget);
@@ -777,9 +863,8 @@ void main() {
     );
 
     // commit 失败于 hook → 修复卡 → AI 修复成功后卡片出现「重试 commit」。
+    // 一键直提：点提交即发（message=null 由后端 AI 生成），无输入对话框。
     await tester.tap(find.byTooltip('提交'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('提交').last);
     await tester.pumpAndSettle();
     expect(git.commitCalls, 1);
     await tester.tap(find.text('让 AI 修复'));
@@ -843,14 +928,20 @@ void main() {
   });
 
   testWidgets('B12 Prompt 优化 workingDirectory 优先 worktreePath', (tester) async {
+    final socket = _FakeSocket();
     final sessions = _FakeSessions([_s('s0')]);
     final prompts = _FakePrompts();
     await _pump(
       tester,
       sessions: sessions,
       prompts: prompts,
+      http: _StubWebSocketHttp(() => socket),
       worktreePath: '/repo/.worktrees/feat-x',
     );
+    // 收藏/优化/贴图统一门控：running + 流 ready + 门闩放行。
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
 
     await tester.tap(find.byTooltip('Prompt 优化'));
     await tester.pumpAndSettle();
@@ -859,16 +950,26 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(prompts.workingDirectories, ['/repo/.worktrees/feat-x']);
-    await tester.pump(const Duration(milliseconds: 3200));
+    // 成功后对话框保留并 2.5s 自动消隐关闭；泵过该 Timer 避免测试残留。
+    await tester.pump(const Duration(milliseconds: 2600));
   });
 
   testWidgets('收藏 sheet：列表渲染、搜索过滤、选中后关闭', (tester) async {
+    final socket = _FakeSocket();
     final sessions = _FakeSessions([_s('s0')]);
     final prompts = _FakePrompts(favorites: [
       const FavoritePrompt(id: '1', title: '修 bug', content: 'please fix the bug', tags: ['bug']),
       const FavoritePrompt(id: '2', title: '发版', content: 'deploy to prod', tags: []),
     ]);
-    await _pump(tester, sessions: sessions, prompts: prompts);
+    await _pump(
+      tester,
+      sessions: sessions,
+      prompts: prompts,
+      http: _StubWebSocketHttp(() => socket),
+    );
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
 
     await tester.tap(find.byTooltip('收藏 Prompt'));
     await tester.pumpAndSettle();
@@ -889,9 +990,18 @@ void main() {
   });
 
   testWidgets('收藏 sheet：加载失败给错误与重试', (tester) async {
+    final socket = _FakeSocket();
     final sessions = _FakeSessions([_s('s0')]);
     final prompts = _FakePrompts(error: Exception('网络错误'));
-    await _pump(tester, sessions: sessions, prompts: prompts);
+    await _pump(
+      tester,
+      sessions: sessions,
+      prompts: prompts,
+      http: _StubWebSocketHttp(() => socket),
+    );
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
 
     await tester.tap(find.byTooltip('收藏 Prompt'));
     await tester.pumpAndSettle();
@@ -899,10 +1009,19 @@ void main() {
     expect(find.text('重试'), findsOneWidget);
   });
 
-  testWidgets('Prompt 优化：提交成功关闭对话框并提示已发送', (tester) async {
+  testWidgets('Prompt 优化：成功后对话框保留并显示已开始写入，2.5s 后自动关闭', (tester) async {
+    final socket = _FakeSocket();
     final sessions = _FakeSessions([_s('s0')]);
     final prompts = _FakePrompts();
-    await _pump(tester, sessions: sessions, prompts: prompts);
+    await _pump(
+      tester,
+      sessions: sessions,
+      prompts: prompts,
+      http: _StubWebSocketHttp(() => socket),
+    );
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
 
     await tester.tap(find.byTooltip('Prompt 优化'));
     await tester.pumpAndSettle();
@@ -913,9 +1032,16 @@ void main() {
     expect(prompts.optimized, ['帮我优化这段 prompt']);
     // worktreePath 未提供时回退 project.path（B12 回退分支）。
     expect(prompts.workingDirectories, ['/tmp/demo']);
-    expect(find.text('已发送'), findsOneWidget);
+    // 成功后 sheet 保留并显示「已开始写入当前终端」（对齐 web promptPanel.sent），
+    // 不再是旧的一次性 SnackBar「已发送」。
+    expect(find.text('已开始写入当前终端'), findsOneWidget);
+    expect(find.text('已发送'), findsNothing);
+    expect(find.text('Prompt 优化'), findsOneWidget);
+
+    // 2.5s 自动消隐后关闭对话框（再泵过退场动画）。
+    await tester.pump(const Duration(milliseconds: 2600));
+    await tester.pumpAndSettle();
     expect(find.text('Prompt 优化'), findsNothing);
-    await tester.pump(const Duration(milliseconds: 3200));
   });
 
   testWidgets('boot 失败：错误页含文案与重试按钮，重试仍失败可再试，成功后正常进入', (tester) async {
@@ -945,7 +1071,7 @@ void main() {
     expect(sessions.replayIds, ['s0']);
   });
 
-  testWidgets('replay 门闩：完成前输入行/发送/extra keys 全部无效，完成后恢复并经 WS 发出', (tester) async {
+  testWidgets('replay 门闩：完成前输入行/发送/extra keys 全部无效，ready 握手后恢复并经 WS 发出', (tester) async {
     final socket = _FakeSocket();
     final http = _StubWebSocketHttp(() => socket);
     final sessions = _GatedReplaySessions([_s('s0')]);
@@ -959,22 +1085,38 @@ void main() {
     var send = tester.widget<IconButton>(find.byKey(const Key('terminal-input-send')));
     expect(send.onPressed, isNull);
 
-    // 门闩期间 extra keys 也应无效（onSend → _send 被门闩丢弃）。
+    // 门闩期间 extra keys 整条置灰（disabled 透传每键）。
+    expect(
+      tester.widget<OutlinedButton>(find.widgetWithText(OutlinedButton, 'Esc')).onPressed,
+      isNull,
+    );
     final writesWhileGated = socket.writeCount;
     await tester.tap(find.text('Esc'));
     await tester.pump();
     expect(socket.writeCount, writesWhileGated);
 
-    // replay 完成（成功）→ 放行门闩 → 建立输入 WS → 输入恢复可用。
+    // replay 完成（成功）→ 放行门闩 → 建立输入 WS（open ≠ 就绪）。
     sessions.initialReplay.complete({'sessionId': 's0', 'buffer': '', 'lastSeq': 0});
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
 
     expect(http.connectCalls, 1);
+    // WS 已 open 但服务端 ready 握手未到：输入仍然禁用（W3a 新接缝）。
+    field = tester.widget<TextField>(find.byKey(const Key('terminal-input-field')));
+    expect(field.enabled, false);
+
+    // 服务端 ready 握手 → 输入恢复可用。
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
     field = tester.widget<TextField>(find.byKey(const Key('terminal-input-field')));
     expect(field.enabled, true);
     send = tester.widget<IconButton>(find.byKey(const Key('terminal-input-send')));
     expect(send.onPressed, isNotNull);
+    expect(
+      tester.widget<OutlinedButton>(find.widgetWithText(OutlinedButton, 'Esc')).onPressed,
+      isNotNull,
+    );
 
     // 输入行回车经 WS 发出；空输入（裸回车）不发送。
     await tester.enterText(find.byKey(const Key('terminal-input-field')), 'ls');
@@ -989,7 +1131,7 @@ void main() {
     expect(socket.writeCount, writesAfterInput);
   });
 
-  testWidgets('replay 失败：门闩同样放行（对齐 web catch 分支也置 replayReady）', (tester) async {
+  testWidgets('replay 失败：门闩同样放行，ready 握手后输入可用', (tester) async {
     final socket = _FakeSocket();
     final http = _StubWebSocketHttp(() => socket);
     final sessions = _GatedReplaySessions([_s('s0')]);
@@ -999,12 +1141,17 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
 
+    // replay 失败也上屏错误条（对齐 web setPanelError），随后 ready 握手放行输入。
+    expect(find.textContaining('加载终端历史失败'), findsOneWidget);
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
     final field = tester.widget<TextField>(find.byKey(const Key('terminal-input-field')));
     expect(field.enabled, true);
     expect(http.connectCalls, 1);
   });
 
-  testWidgets('输入 WS 断开：输入行禁用（状态行文案保持既有说明）', (tester) async {
+  testWidgets('输入 WS 断开：输入行禁用；有未确认输入时状态行区分提示', (tester) async {
     final socket = _FakeSocket();
     final http = _StubWebSocketHttp(() => socket);
     final sessions = _GatedReplaySessions([_s('s0')]);
@@ -1013,10 +1160,16 @@ void main() {
     sessions.initialReplay.complete({'sessionId': 's0', 'buffer': '', 'lastSeq': 0});
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
     var field = tester.widget<TextField>(find.byKey(const Key('terminal-input-field')));
     expect(field.enabled, true);
 
-    // 对端关闭 → 输入 WS onDone → 输入行禁用。
+    // 对端关闭且此时有未确认输入 → 输入行禁用，状态行提示「未确认输入已丢弃」。
+    await tester.enterText(find.byKey(const Key('terminal-input-field')), 'ls');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
     socket.closePeer();
     await tester.pump();
     await tester.pump();
@@ -1033,6 +1186,9 @@ void main() {
     await _pump(tester, sessions: sessions, http: http);
 
     // s0 running + replay 门闩放行 + 输入 WS ready：输入行可用。
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
     expect(
       tester.widget<TextField>(find.byKey(const Key('terminal-input-field'))).enabled,
       isTrue,
@@ -1066,5 +1222,279 @@ void main() {
       tester.widget<TextField>(find.byKey(const Key('terminal-input-field'))).enabled,
       isTrue,
     );
+  });
+
+  testWidgets('空态：无会话不自动创建，展示空态 + 手动新建', (tester) async {
+    final sessions = _FakeSessions([]);
+    await _pump(tester, sessions: sessions);
+
+    // boot 不再自动 create：显示 web 同款空态文案与「新建」按钮。
+    expect(find.text('当前 worktree 还没有终端窗口'), findsOneWidget);
+    expect(find.byKey(const Key('terminal-empty-create')), findsOneWidget);
+    expect(sessions.createCalls, 0);
+    expect(sessions.replayIds, isEmpty);
+
+    // 手动新建 → 创建并激活。
+    await tester.tap(find.byKey(const Key('terminal-empty-create')));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(sessions.createCalls, 1);
+    expect(sessions.replayIds, ['s-new-1']);
+    expect(find.text('当前 worktree 还没有终端窗口'), findsNothing);
+  });
+
+  testWidgets('全屏保留动作：工具行保留窗格/提交/合并/贴图/收藏/优化/退出全屏', (tester) async {
+    final sessions = _FakeSessions([_s('s0', panes: true, paneCount: 2)]);
+    final git = _FakeGit();
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      worktreeInfo: const {'id': 'w1', 'name': 'w1', 'branch': 'feat/a', 'isMain': false},
+    );
+
+    await tester.tap(find.byTooltip('全屏'));
+    await tester.pump();
+    expect(find.byType(InputChip), findsNothing);
+    // 全屏下动作入口仍在（对齐 web paneActions 恒可见 + FAB 语义）。
+    for (final tooltip in ['窗格', '提交', '合并', '粘贴文本', '收藏 Prompt', 'Prompt 优化', '相册贴图', '退出全屏']) {
+      expect(find.byTooltip(tooltip), findsOneWidget, reason: tooltip);
+    }
+
+    await tester.tap(find.byTooltip('退出全屏'));
+    await tester.pump();
+    expect(find.byTooltip('全屏'), findsOneWidget);
+  });
+
+  testWidgets('closePane 非 closedWindow 分支：zoom-pane 幂等 + 刷新，不移除会话', (tester) async {
+    final sessions = _FakeSessions([_s('s0', panes: true, paneCount: 2)])
+      ..closePaneClosesWindow = false;
+    await _pump(tester, sessions: sessions);
+    final zoomAfterActivate = sessions.zoomCalls;
+
+    await tester.tap(find.byTooltip('窗格'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('关闭窗格'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(sessions.closePaneCalls, 1);
+    // false 分支：zoom 收单 pane（幂等）+ 刷新，会话不消失、不切换。
+    expect(sessions.zoomCalls, greaterThan(zoomAfterActivate));
+    expect(find.byType(InputChip), findsOneWidget);
+    expect(sessions.replayIds, ['s0']);
+  });
+
+  testWidgets('切会话保持全屏：merge 成功后自动切换下一会话不退出全屏', (tester) async {
+    final sessions = _FakeSessions([_s('s0'), _s('s1')]);
+    final git = _FakeGit();
+    final fullscreenEvents = <bool>[];
+    await _pump(
+      tester,
+      sessions: sessions,
+      git: git,
+      onFullscreenChanged: fullscreenEvents.add,
+      worktreeInfo: const {'id': 'w1', 'name': 'w1', 'branch': 'feat/b', 'isMain': false},
+    );
+
+    await tester.tap(find.byTooltip('全屏'));
+    await tester.pump();
+    expect(fullscreenEvents, [true]);
+
+    // merge 成功后权威列表只剩 s1（merge 关闭源分支会话），自动切到 s1 且保持全屏。
+    sessions.sessions = [_s('s1')];
+    await tester.tap(find.byTooltip('合并'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '合并'));
+    await tester.pumpAndSettle();
+
+    expect(git.mergeCalls, 1);
+    expect(sessions.replayIds.contains('s1'), isTrue);
+    expect(fullscreenEvents, [true]);
+    expect(find.byTooltip('退出全屏'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 3200));
+  });
+
+  testWidgets('会话 chip：按 project+worktree 过滤，pane 数恒显示（0 也显示）', (tester) async {
+    final sessions = _FakeSessions([
+      _s('s0', paneCount: 0),
+      _s('s-other', worktreeId: 'w2', paneCount: 3),
+    ]);
+    await _pump(tester, sessions: sessions);
+
+    expect(find.text('s0 · 0 pane'), findsOneWidget);
+    expect(find.text('s-other · 3 pane'), findsNothing);
+  });
+
+  testWidgets('多会话缓冲常驻：切回已缓冲会话不清屏不重放', (tester) async {
+    final sessions = _FakeSessions([_s('s0'), _s('s1')]);
+    await _pump(tester, sessions: sessions);
+    expect(sessions.replayIds, ['s0']);
+
+    // 切到 s1：新 buffer → replay s1。
+    await tester.tap(find.text('s1 · 0 pane'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.replayIds, ['s0', 's1']);
+
+    // 切回 s0：命中常驻缓冲 → 不清屏不重放（增量续传，gap 帧才兜底全量）。
+    await tester.tap(find.text('s0 · 0 pane'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.replayIds, ['s0', 's1']);
+    // focus 仍然每次切换都同步 tmux current window。
+    expect(sessions.focusedIds, ['s0', 's1', 's0']);
+  });
+
+  testWidgets('resize 基线：服务端持久化尺寸相同不回传；切回已缓冲会话不重发', (tester) async {
+    // 阶段 A：无持久化尺寸 → 首帧实测后回传一次 resize。
+    final sessionsA = _FakeSessions([_s('s0'), _s('s1')]);
+    await _pump(tester, sessions: sessionsA);
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(sessionsA.resizeCalls.length, 1);
+    expect(sessionsA.resizeCalls.single.$1, 's0');
+
+    // 切到 s1：新 buffer → s1 首次实测回传。
+    await tester.tap(find.text('s1 · 0 pane'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(sessionsA.resizeCalls.length, 2);
+    expect(sessionsA.resizeCalls.last.$1, 's1');
+
+    // 切回 s0：基线按会话保留，同尺寸不重发（旧实现切会话必重发）。
+    await tester.tap(find.text('s0 · 0 pane'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(sessionsA.resizeCalls.length, 2);
+
+    // 阶段 B：持久化 cols/rows 与实测相同（取阶段 A 实测值）→ 首帧不回传 resize。
+    // worktreeInfo 变化迫使壳层 key 换树，保证注入新的 sessions fake。
+    final persisted = sessionsA.resizeCalls.first;
+    final sessionsB = _FakeSessions([_s('s3', cols: persisted.$2, rows: persisted.$3)]);
+    await _pump(
+      tester,
+      sessions: sessionsB,
+      worktreeInfo: const {'id': 'w1', 'name': 'w1', 'branch': 'feat/c', 'isMain': false},
+    );
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(sessionsB.resizeCalls, isEmpty);
+  });
+
+  testWidgets('hydration：首次上滑即触发 refreshHistory（10s 超时口），成功后不重复触发', (tester) async {
+    final socket = _FakeSocket();
+    final sessions = _FakeSessions([_s('s0')]);
+    await _pump(tester, sessions: sessions, http: _StubWebSocketHttp(() => socket));
+    expect(sessions.hydrateIds, isEmpty);
+
+    // 首次向上拖动（不再要求先滚到顶）即触发 hydration。
+    final terminalCenter = tester.getCenter(find.byKey(const Key('terminal-view')));
+    final gesture = await tester.startGesture(terminalCenter);
+    // 自然滚动：手指向下滑（clientY 增大）= 看更旧内容 = 触发 hydration。
+    await gesture.moveBy(const Offset(0, 120));
+    await tester.pump();
+    await gesture.up();
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.hydrateIds, ['s0']);
+
+    // 已灌历史（owner 未变）：再次拖动不重复触发。
+    final gesture2 = await tester.startGesture(terminalCenter);
+    await gesture2.moveBy(const Offset(0, 120));
+    await tester.pump();
+    await gesture2.up();
+    await tester.pump();
+    expect(sessions.hydrateIds, ['s0']);
+  });
+
+  testWidgets('hydration 失败：错误上屏 + 重试入口，重试成功后清除', (tester) async {
+    final socket = _FakeSocket();
+    final sessions = _FakeSessions([_s('s0')])..hydrateError = Exception(' hydration 超时');
+    await _pump(tester, sessions: sessions, http: _StubWebSocketHttp(() => socket));
+
+    final terminalCenter = tester.getCenter(find.byKey(const Key('terminal-view')));
+    final gesture = await tester.startGesture(terminalCenter);
+    await gesture.moveBy(const Offset(0, 120));
+    await tester.pump();
+    await gesture.up();
+    await tester.pump();
+    await tester.pump();
+
+    expect(sessions.hydrateIds, ['s0']);
+    expect(find.textContaining('加载终端历史失败'), findsOneWidget);
+    expect(find.byKey(const Key('terminal-panel-error-action')), findsOneWidget);
+
+    // 修复后重试：可重灌（失败不标记 hydrated），成功后错误条清除。
+    sessions.hydrateError = null;
+    await tester.tap(find.byKey(const Key('terminal-panel-error-action')));
+    await tester.pump();
+    await tester.pump();
+    expect(sessions.hydrateIds, ['s0', 's0']);
+    expect(find.textContaining('加载终端历史失败'), findsNothing);
+  });
+
+  testWidgets('贴图/收藏/优化门控：exited 权威状态禁用，恢复 running 后可用', (tester) async {
+    final socket = _FakeSocket();
+    final http = _StubWebSocketHttp(() => socket);
+    final sessions = _ExitedAfterCloseSessions([_s('s0'), _s('s1'), _s('s2')]);
+    await _pump(tester, sessions: sessions, http: http);
+    socket.emitReady();
+    await tester.pump();
+    await tester.pump();
+    expect(_iconButton(tester, Icons.star_outline).onPressed, isNotNull);
+    expect(_iconButton(tester, Icons.auto_fix_high).onPressed, isNotNull);
+    expect(_iconButton(tester, Icons.photo_outlined).onPressed, isNotNull);
+
+    sessions.markExited = true;
+    await tester.tap(find.byTooltip('关闭窗口').at(2));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    expect(_iconButton(tester, Icons.star_outline).onPressed, isNull);
+    expect(_iconButton(tester, Icons.auto_fix_high).onPressed, isNull);
+    expect(_iconButton(tester, Icons.photo_outlined).onPressed, isNull);
+  });
+
+  testWidgets('划选操作条：选区出现显示底栏，取消/Esc 均可退出', (tester) async {
+    final socket = _FakeSocket();
+    final sessions = _FakeSessions([_s('s0')]);
+    await _pump(tester, sessions: sessions, http: _StubWebSocketHttp(() => socket));
+
+    // 触点聚焦终端后 Ctrl+A 全选（widget 测试环境下 xterm 手势选区不稳定，
+    // 键盘路径与长按同走 controller.setSelection → 底部操作条）。
+    final surface = find.byKey(const Key('terminal-view'));
+    await tester.tap(surface);
+    await tester.pump();
+    await _selectAll(tester);
+    await tester.pump();
+    expect(find.byKey(const Key('terminal-selection-bar')), findsOneWidget);
+    expect(find.textContaining('已选'), findsOneWidget);
+    expect(find.text('复制'), findsOneWidget);
+    expect(find.text('取消'), findsOneWidget);
+
+    // 取消按钮 → 选区清除、操作条收起。
+    await tester.tap(find.text('取消'));
+    await tester.pump();
+    expect(find.byKey(const Key('terminal-selection-bar')), findsNothing);
+
+    // 再次全选后硬件键盘 Esc 同样退出划选（对齐 web Escape → exitSelecting）。
+    // 先回点终端表面恢复焦点（Esc 经 TerminalView onKeyEvent 钩子消费）。
+    await tester.tap(surface);
+    await tester.pump();
+    await _selectAll(tester);
+    await tester.pump();
+    expect(find.byKey(const Key('terminal-selection-bar')), findsOneWidget);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(find.byKey(const Key('terminal-selection-bar')), findsNothing);
+
+    // 泵过 xterm 内部连击 Timer，避免测试残留 pending Timer。
+    await tester.pump(const Duration(milliseconds: 350));
   });
 }

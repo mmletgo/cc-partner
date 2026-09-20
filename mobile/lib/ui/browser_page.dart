@@ -35,10 +35,15 @@ class _BrowserPageState extends State<BrowserPage> {
   late final BrowserClient _client;
   final _url = TextEditingController(text: 'http://127.0.0.1:5173');
   WebViewController? _web;
+
+  /// 打开/探测共用的门闩（对齐 web 单一 busy）：在途时禁用「重新探测」「打开预览」。
+  bool _busy = false;
   String? _error;
   String? _previewId;
+
+  /// 已打开预览的目标 URL：chip 高亮按 preview.targetUrl 匹配（对齐 web data-active）。
+  String? _previewTargetUrl;
   List<BrowserTarget> _targets = [];
-  String? _selectedTargetId;
   int? _loadProgress;
   String? _loadError;
 
@@ -55,8 +60,17 @@ class _BrowserPageState extends State<BrowserPage> {
     super.dispose();
   }
 
-  /// 进入页面自动探测 dev server 候选；失败静默降级（仅手动输入）。
+  /// Business Logic: dev server 可能随时启停，工具栏「重新探测」要能重新拿候选；
+  /// 探测失败不能再静默，必须上屏错误并可重试（对齐 web loadDiscovery 的 error 区）。
+  /// Code Logic: discover 成功后更新候选列表；若当前没有已打开预览且选中候选来源
+  /// 属于白名单（remembered/terminalOutput/projectConfig），直接创建预览自动打开；
+  /// 已有预览时重新探测不销毁/重建预览（移动端差异：web 每次 discover 都重开，
+  /// 移动端遵守「不销毁已打开预览」仅无预览时自动打开）。失败写入页面错误区。
   Future<void> _discover() async {
+    if (_busy) {
+      return;
+    }
+    setState(() => _busy = true);
     try {
       final discovery = await _client.discover(
         projectId: widget.project.id,
@@ -67,18 +81,57 @@ class _BrowserPageState extends State<BrowserPage> {
       }
       setState(() {
         _targets = discovery.targets;
-        _selectedTargetId = discovery.selectedTargetId;
+        _error = null;
         final selected = discovery.selectedTarget;
         if (selected != null && selected.url.isNotEmpty) {
+          // 输入框填真实 URL（可直接打开）；chip 高亮另行按 preview.targetUrl 口径。
           _url.text = selected.url;
         }
       });
-    } catch (_) {
-      // 静默降级：无候选时仍可手动输入地址打开预览。
+      if (_web != null) {
+        return;
+      }
+      final autoOpen = pickAutoOpenBrowserTarget(discovery);
+      if (autoOpen != null && autoOpen.url.isNotEmpty) {
+        await _openPreview(targetUrl: autoOpen.url);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = '候选探测失败：$error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
     }
   }
 
+  /// Business Logic: 「打开预览」按钮路径；busy 门闩防连点重复建会话，
+  /// 空 URL（纯空白）禁用（对齐 web disabled={!url.trim() || busy}）。
+  /// Code Logic: 有在途请求或 URL 为空直接返回；否则进入 busy 并复用 _openPreview。
   Future<void> _open() async {
+    if (_busy) {
+      return;
+    }
+    final url = _url.text.trim();
+    if (url.isEmpty) {
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await _openPreview(targetUrl: url);
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  /// Business Logic: 打开/自动打开共用同一条建会话路径；失败要上屏错误区，
+  /// 不能只吞掉（对齐 web openTarget 的 catch → setError）。
+  /// Code Logic: createPreview → 组装 WebView 控制器加载代理 URL；
+  /// 成功记录 previewId 与 preview.targetUrl（chip 高亮口径），失败写 _error。
+  Future<void> _openPreview({required String targetUrl}) async {
     setState(() {
       _error = null;
       _loadError = null;
@@ -88,7 +141,7 @@ class _BrowserPageState extends State<BrowserPage> {
       final preview = await _client.createPreview(
         projectId: widget.project.id,
         worktreeId: widget.worktreeId,
-        targetUrl: _url.text.trim(),
+        targetUrl: targetUrl,
       );
       final uri = Uri.parse('${widget.book.active!.baseUrl}${preview.mobileProxyPath}');
       final web = WebViewController()
@@ -121,6 +174,7 @@ class _BrowserPageState extends State<BrowserPage> {
         setState(() {
           _web = web;
           _previewId = preview.previewId;
+          _previewTargetUrl = preview.targetUrl;
         });
       }
     } catch (error) {
@@ -142,6 +196,7 @@ class _BrowserPageState extends State<BrowserPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Column(
       children: [
         Padding(
@@ -151,12 +206,33 @@ class _BrowserPageState extends State<BrowserPage> {
               Expanded(
                 child: TextField(
                   controller: _url,
+                  // 手动输入变化即时刷新「打开预览」可用态（空 URL 禁用）。
+                  onChanged: (_) => setState(() {}),
                   decoration: const InputDecoration(hintText: 'http://127.0.0.1:5173'),
                 ),
               ),
+              IconButton(
+                key: const Key('browser-rediscover'),
+                tooltip: '重新探测',
+                onPressed: _busy ? null : _discover,
+                icon: _busy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.radar),
+              ),
               FilledButton(
-                onPressed: _open,
-                child: Text(_previewId == null ? '打开预览' : '重新打开'),
+                key: const Key('browser-open'),
+                onPressed: (_busy || _url.text.trim().isEmpty) ? null : _open,
+                child: _busy
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Text(_previewId == null ? '打开预览' : '重新打开'),
               ),
             ],
           ),
@@ -175,18 +251,41 @@ class _BrowserPageState extends State<BrowserPage> {
                   for (final target in _targets)
                     ChoiceChip(
                       key: Key('browser-target-chip-${target.id}'),
-                      label: Text(target.label),
-                      selected: target.id == _selectedTargetId,
+                      // 已打开预览时高亮按 preview.targetUrl 匹配（对齐 web data-active），
+                      // 无预览时不亮任何 chip。
+                      selected:
+                          _previewTargetUrl != null && _previewTargetUrl == target.url,
                       onSelected: (_) => setState(() {
-                        _selectedTargetId = target.id;
+                        // 点 chip 先填真实 URL，由「打开预览」发起建会话。
                         _url.text = target.url;
                       }),
+                      label: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (browserTargetSourceLabel(target.source) != null)
+                            Text(
+                              browserTargetSourceLabel(target.source)!,
+                              key: Key('browser-target-source-${target.id}'),
+                              style: theme.textTheme.labelSmall,
+                            ),
+                          Text(target.label),
+                        ],
+                      ),
                     ),
                 ],
               ),
             ),
           ),
-        if (_error != null) Text(_error!),
+        if (_error != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Text(
+              _error!,
+              key: const Key('browser-error'),
+              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+            ),
+          ),
         if (_previewId != null)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),

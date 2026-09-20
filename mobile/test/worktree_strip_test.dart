@@ -6,24 +6,25 @@ Map<String, dynamic> tree(
   String id, {
   bool isMain = false,
   int changed = 0,
+  int ahead = 0,
+  int behind = 0,
   int conflicts = 0,
   bool clean = true,
-}) =>
-    {
-      'id': id,
-      'name': id,
-      'branch': id,
-      'isMain': isMain,
-      'status': {
-        'branch': id,
-        'changed': changed,
-        'ahead': 0,
-        'behind': 0,
-        'conflicts': conflicts,
-        'clean': clean,
-        'canPush': false,
-      },
-    };
+}) => {
+  'id': id,
+  'name': id,
+  'branch': id,
+  'isMain': isMain,
+  'status': {
+    'branch': id,
+    'changed': changed,
+    'ahead': ahead,
+    'behind': behind,
+    'conflicts': conflicts,
+    'clean': clean,
+    'canPush': false,
+  },
+};
 
 void main() {
   Future<void> pump(
@@ -57,12 +58,32 @@ void main() {
     );
   }
 
-  test('worktreeStripToneOf：冲突 > 有改动 > 干净', () {
+  test('worktreeStripToneOf：冲突 > 有改动/领先/落后 > 干净', () {
     expect(worktreeStripToneOf(tree('a')), WorktreeStripTone.clean);
-    expect(worktreeStripToneOf(tree('b', changed: 2, clean: false)), WorktreeStripTone.dirty);
-    expect(worktreeStripToneOf(tree('c', changed: 2, conflicts: 1)), WorktreeStripTone.conflict);
+    expect(
+      worktreeStripToneOf(tree('b', changed: 2, clean: false)),
+      WorktreeStripTone.dirty,
+    );
+    // 补齐 ahead/behind（对齐 web workbenchWorktrees.worktreeStatusTone warning 判定）。
+    expect(worktreeStripToneOf(tree('b2', ahead: 1)), WorktreeStripTone.dirty);
+    expect(worktreeStripToneOf(tree('b3', behind: 2)), WorktreeStripTone.dirty);
+    expect(
+      worktreeStripToneOf(tree('c', changed: 2, conflicts: 1)),
+      WorktreeStripTone.conflict,
+    );
+    expect(
+      worktreeStripToneOf(tree('c2', ahead: 3, conflicts: 1)),
+      WorktreeStripTone.conflict,
+    );
     // status 缺失宽容回干净。
     expect(worktreeStripToneOf({'id': 'd'}), WorktreeStripTone.clean);
+  });
+
+  test('worktreeStripRemoveConfirmText：对齐 web removeConfirmDialog.body 口径', () {
+    expect(
+      worktreeStripRemoveConfirmText('feat/app'),
+      '确定移除 worktree“feat/app”？该操作会同时关闭其终端窗口，且不可撤销。',
+    );
   });
 
   testWidgets('chip 展示状态点与主/linked 后缀；主 chip 无删除按钮', (tester) async {
@@ -76,10 +97,28 @@ void main() {
     );
     expect(find.byKey(const Key('worktree-wt-main')), findsOneWidget);
     expect(find.byKey(const Key('worktree-wt-1')), findsOneWidget);
-    expect(find.text('主'), findsOneWidget);
+    // 对齐 web MobileWorktreeTabs chip 元信息（worktrees.main = 主工作区）。
+    expect(find.text('主工作区'), findsOneWidget);
     expect(find.text('worktree'), findsOneWidget);
     expect(find.byKey(const Key('worktree-remove-wt-main')), findsNothing);
     expect(find.byKey(const Key('worktree-remove-wt-1')), findsOneWidget);
+  });
+
+  testWidgets('chips 水平列表包 FocusTraversalGroup（方向键在 chip 间遍历）', (tester) async {
+    await pump(
+      tester,
+      worktrees: [tree('wt-main', isMain: true), tree('wt-1')],
+      activeId: 'wt-main',
+    );
+    // 结构断言：chips 列表独立成遍历组，策略按 widget 顺序（对齐 web ArrowLeft/Right 循环）。
+    // MaterialApp 自带一个 ReadingOrder 根组，这里断言存在 strip 自己的 WidgetOrder 组。
+    final groups = tester.widgetList<FocusTraversalGroup>(
+      find.byType(FocusTraversalGroup),
+    );
+    expect(
+      groups.any((group) => group.policy is WidgetOrderTraversalPolicy),
+      isTrue,
+    );
   });
 
   testWidgets('非主 chip 的 X 触发 onRemove；busy 时禁用', (tester) async {
@@ -102,7 +141,9 @@ void main() {
       busy: true,
     );
     expect(
-      tester.widget<IconButton>(find.byKey(const Key('worktree-remove-wt-1'))).onPressed,
+      tester
+          .widget<IconButton>(find.byKey(const Key('worktree-remove-wt-1')))
+          .onPressed,
       isNull,
     );
   });
@@ -125,11 +166,16 @@ void main() {
 
     // 空后缀：确认禁用。
     expect(
-      tester.widget<TextButton>(find.byKey(const Key('worktree-create-confirm'))).onPressed,
+      tester
+          .widget<TextButton>(find.byKey(const Key('worktree-create-confirm')))
+          .onPressed,
       isNull,
     );
 
-    await tester.enterText(find.byKey(const Key('worktree-create-suffix')), 'my-task');
+    await tester.enterText(
+      find.byKey(const Key('worktree-create-suffix')),
+      'my-task',
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('worktree-create-confirm')));
     await tester.pumpAndSettle();
@@ -154,7 +200,10 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('fix').last);
     await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const Key('worktree-create-suffix')), 'login-crash');
+    await tester.enterText(
+      find.byKey(const Key('worktree-create-suffix')),
+      'login-crash',
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('worktree-create-confirm')));
     await tester.pumpAndSettle();
@@ -163,7 +212,10 @@ void main() {
     // 再展开后取消：表单收起且不回调。
     await tester.tap(find.byKey(const Key('worktree-create')));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const Key('worktree-create-suffix')), 'dropped');
+    await tester.enterText(
+      find.byKey(const Key('worktree-create-suffix')),
+      'dropped',
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('worktree-create-cancel')));
     await tester.pumpAndSettle();
@@ -180,7 +232,9 @@ void main() {
       busy: true,
     );
     expect(
-      tester.widget<ActionChip>(find.byKey(const Key('worktree-create'))).onPressed,
+      tester
+          .widget<ActionChip>(find.byKey(const Key('worktree-create')))
+          .onPressed,
       isNull,
     );
 
@@ -192,7 +246,9 @@ void main() {
       creating: true,
     );
     expect(
-      tester.widget<ActionChip>(find.byKey(const Key('worktree-create'))).onPressed,
+      tester
+          .widget<ActionChip>(find.byKey(const Key('worktree-create')))
+          .onPressed,
       isNull,
     );
   });
@@ -231,7 +287,11 @@ void main() {
 
     // 空列表（带创建槽）：占位与「+ 新建」并存（对齐 web 空态文案 + 条上创建表单）。
     var created = '';
-    await pump(tester, worktrees: const [], onCreate: (branch) => created = branch);
+    await pump(
+      tester,
+      worktrees: const [],
+      onCreate: (branch) => created = branch,
+    );
     expect(find.text('暂无 worktree'), findsOneWidget);
     expect(find.byKey(const Key('worktree-create')), findsOneWidget);
 

@@ -15,6 +15,7 @@ class ProjectsPage extends StatefulWidget {
     required this.onOpen,
     this.onProjectRemoved,
     this.confirmRemove,
+    this.activeProjectId,
     this.client,
     this.transferApi,
   });
@@ -28,7 +29,12 @@ class ProjectsPage extends StatefulWidget {
   final void Function(String projectId)? onProjectRemoved;
 
   /// 删除前置钩子：返回 false 中止删除（壳层用于激活项目的文件改动预检）。
+  /// 调用时机在移除确认框之后（对齐 web：点「移除」才做 dirty 预检，取消不触发）。
   final Future<bool> Function(ProjectSummary project)? confirmRemove;
+
+  /// 当前激活项目 id：命中的项目行高亮并带 selected 语义（对齐 web
+  /// MobileProjectPanel mobileListItemActive + aria-pressed）；null 时无高亮。
+  final String? activeProjectId;
 
   /// 测试注入的项目接口；为空时按当前主机构造。
   final ProjectsClient? client;
@@ -57,8 +63,8 @@ class _ProjectsPageState extends State<ProjectsPage> {
     final baseUrl = widget.book.active?.baseUrl ?? '';
     _client = widget.client ?? ProjectsClient(widget.http, baseUrl);
     _transfer = widget.transferApi ?? TransferApi(widget.http, baseUrl);
+    // 首载与下拉刷新共用 _reload：fleet 摘要随之一起拉取，不再单独触发。
     _reload();
-    _loadFleet();
   }
 
   /// Business Logic: 项目列表需要一条跨设备 Agent 异常/离线摘要（对齐 web
@@ -77,6 +83,9 @@ class _ProjectsPageState extends State<ProjectsPage> {
   }
 
   Future<void> _reload() async {
+    // 下拉刷新同步重拉 fleet 摘要（对齐 web useLanAgentFleet 可见期轮询的刷新语义；
+    // 不 await，避免拖住列表刷新的主路径）。
+    _loadFleet();
     setState(() {
       _loading = true;
       _error = null;
@@ -112,21 +121,15 @@ class _ProjectsPageState extends State<ProjectsPage> {
     }
   }
 
-  /// Business Logic: 删除前先过可选的 confirmRemove 前置钩子（壳层用于激活项目的
-  /// 文件改动预检，返回 false 时静默中止、不弹确认框），再经确认框确认后才移除；
-  /// 移除中按钮禁用防重复提交。钩子为 null 时行为与无钩子时完全一致。
-  /// Code Logic: removingIds 防重入 → await confirmRemove（false 中止）→ 确认框 →
-  /// client.remove → onProjectRemoved 回调 → reload。
+  /// Business Logic: 删除顺序对齐 web MobileWorkbench——先弹移除确认框，用户点
+  /// 「移除」后才对激活项目做 dirty 预检（confirmRemove 钩子，返回 false 静默中止）；
+  /// 取消路径既不触发预检也不调后端。移除中按钮禁用防重复提交。钩子为 null 时
+  /// 预检步骤整体跳过。
+  /// Code Logic: removingIds 防重入 → 确认框（取消直接返回）→ await confirmRemove
+  /// （false 中止）→ client.remove → onProjectRemoved 回调 → reload。
   Future<void> _remove(ProjectSummary project) async {
     if (_removingIds.contains(project.id)) {
       return;
-    }
-    final confirmRemove = widget.confirmRemove;
-    if (confirmRemove != null) {
-      final allowed = await confirmRemove(project);
-      if (!allowed || !mounted) {
-        return;
-      }
     }
     final confirmed = await showDialog<bool>(
       context: context,
@@ -150,6 +153,14 @@ class _ProjectsPageState extends State<ProjectsPage> {
     );
     if (confirmed != true || !mounted) {
       return;
+    }
+    // 确认后才做 dirty 预检（壳层钩子）；失败静默中止、不调后端。
+    final confirmRemove = widget.confirmRemove;
+    if (confirmRemove != null) {
+      final allowed = await confirmRemove(project);
+      if (!allowed || !mounted) {
+        return;
+      }
     }
     setState(() => _removingIds.add(project.id));
     try {
@@ -304,8 +315,19 @@ class _ProjectsPageState extends State<ProjectsPage> {
                               final isRemote = project.kind == 'remote';
                               final canSelect = _canSelectProject(project);
                               final deviceName = project.deviceName?.trim() ?? '';
-                              return ListTile(
+                              // 激活项目行高亮 + selected 语义（对齐 web
+                              // mobileListItemActive + aria-pressed）。
+                              final active = project.id == widget.activeProjectId;
+                              return Semantics(
+                                selected: active,
+                                key: active
+                                    ? Key('project-row-active-${project.id}')
+                                    : null,
+                                child: ListTile(
                                 key: Key('project-row-${project.id}'),
+                                tileColor: active
+                                    ? theme.colorScheme.secondaryContainer
+                                    : null,
                                 leading: const Icon(Icons.folder),
                                 title: Row(
                                   children: [
@@ -385,6 +407,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
                                       : const Icon(Icons.delete_outline),
                                   onPressed:
                                       removing ? null : () => _remove(project),
+                                ),
                                 ),
                               );
                             },

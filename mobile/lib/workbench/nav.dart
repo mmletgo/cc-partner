@@ -51,20 +51,21 @@ const kExperimentalPanels = <WorkbenchPanel>[
 ];
 
 /// Business Logic: Drawer 分组标题此前直接渲染英文 id（projects/inbox/...），
-/// 中文用户需要可读的分组标题（对齐 web navGroups 文案，inbox 用「待处理」口径）。
+/// 中文用户需要可读的分组标题（文案对齐 web zh workbench.json navGroups：
+/// projects/inbox/tools/system/work/shortcuts）。
 /// Code Logic: 纯函数映射；未知 id 回退原 id，保证旧数据/新分组不炸 UI。
 String workbenchNavGroupLabel(String id) {
   switch (id) {
     case 'projects':
       return '项目';
     case 'inbox':
-      return '待处理';
+      return '收件箱';
     case 'tools':
       return '工具';
     case 'system':
       return '系统';
     case 'work':
-      return '工作';
+      return '工作台';
     case 'shortcuts':
       return '快捷';
     default:
@@ -248,6 +249,9 @@ WorkbenchLocationRestore? resolveWorkbenchLocationRestore({
   );
 }
 
+/// Business Logic: Drawer 与 AppBar 的面板名要和 web /mobile 的 zh 文案逐字对齐
+/// （nav.browser=预览、nav.worktrees=Worktrees、nav.attention=待处理）。
+/// Code Logic: 纯函数映射；文案改动需同步 workbench_shell_test 断言。
 String panelLabel(WorkbenchPanel panel) {
   switch (panel) {
     case WorkbenchPanel.projects:
@@ -263,13 +267,13 @@ String panelLabel(WorkbenchPanel panel) {
     case WorkbenchPanel.terminal:
       return '终端';
     case WorkbenchPanel.browser:
-      return '浏览器';
+      return '预览';
     case WorkbenchPanel.files:
       return '文件';
     case WorkbenchPanel.git:
       return 'Git';
     case WorkbenchPanel.worktrees:
-      return 'worktrees';
+      return 'Worktrees';
     case WorkbenchPanel.automation:
       return '自动化';
   }

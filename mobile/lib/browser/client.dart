@@ -8,6 +8,44 @@ class BrowserPreviewPolicy {
       '/api/mobile/workbench/browser/proxy/$previewId/';
 }
 
+/// Business Logic: 候选 chip 需要区分「上次使用/终端输出/项目配置/端口探测」等来源，
+/// 自动打开默认页也必须按来源白名单判定，不能把端口探测到的无关服务当默认页。
+/// Code Logic: discover 成功后按 selectedTargetId 查候选，且来源必须属于白名单
+/// remembered/terminalOutput/projectConfig（对齐 web pickAutoOpenWorkbenchBrowserTarget）。
+BrowserTarget? pickAutoOpenBrowserTarget(BrowserDiscovery discovery) {
+  final selected = discovery.selectedTarget;
+  if (selected == null || !isAutoOpenBrowserSource(selected.source)) {
+    return null;
+  }
+  return selected;
+}
+
+/// Business Logic: 端口探测会命中本机无关的 3000/5173/8080，discover 后不能自动打开它们。
+/// Code Logic: 仅 remembered / terminalOutput / projectConfig 允许自动打开
+/// （对齐 web isAutoOpenWorkbenchBrowserSource）；缺 source 的旧后端按不可自动打开处理。
+bool isAutoOpenBrowserSource(String? source) =>
+    source == 'remembered' || source == 'terminalOutput' || source == 'projectConfig';
+
+/// Business Logic: 候选来源文案必须用中文展示，不能直接透出后端 DTO 枚举。
+/// Code Logic: source → 中文标签（对齐 web getWorkbenchBrowserTargetSourceLabelKey +
+/// zh i18n）；未知/缺失 source 返回 null，由 UI 决定是否省略该行。
+String? browserTargetSourceLabel(String? source) {
+  switch (source) {
+    case 'remembered':
+      return '上次使用';
+    case 'terminalOutput':
+      return '终端输出';
+    case 'projectConfig':
+      return '项目配置';
+    case 'portProbe':
+      return '端口探测';
+    case 'manual':
+      return '手动输入';
+    default:
+      return null;
+  }
+}
+
 /// discover 返回的单个 dev server 候选（对齐 web WorkbenchBrowserTarget）。
 class BrowserTarget {
   const BrowserTarget({

@@ -36,9 +36,21 @@ class _FakeAttentionClient extends AttentionClient {
   /// 非空时 listVisible 挂起直到 complete，用于捕获「刷新进行中」的中间态。
   Completer<List<AttentionItem>>? holdList;
 
+  /// 置为 true 后 listVisible 抛 AttentionUnsupportedError（后端缺 attention.v1）。
+  bool throwUnsupported = false;
+
+  /// 非空时 markRead 挂起直到 complete，用于捕获「单条标记进行中」的中间态。
+  Completer<List<AttentionItem>>? holdMark;
+
+  /// 置为 true 后下一次 markRead 抛错（点击条目时标记失败 → SnackBar 提示）。
+  bool failNextMarkRead = false;
+
   @override
   Future<List<AttentionItem>> listVisible() async {
     listCalls++;
+    if (throwUnsupported) {
+      throw AttentionUnsupportedError();
+    }
     if (failNextList) {
       failNextList = false;
       throw Exception('快照拉取失败');
@@ -52,6 +64,13 @@ class _FakeAttentionClient extends AttentionClient {
   @override
   Future<List<AttentionItem>> markRead(List<String> itemIds) async {
     readCalls.add(itemIds);
+    if (failNextMarkRead) {
+      failNextMarkRead = false;
+      throw Exception('标记服务不可用');
+    }
+    if (holdMark != null) {
+      await holdMark!.future;
+    }
     return _withReadState(itemIds, read: true);
   }
 
@@ -66,6 +85,9 @@ class _FakeAttentionClient extends AttentionClient {
     allReadCalls++;
     return _withReadState(_items.map((e) => e.id).toList(), read: true);
   }
+
+  /// 测试中直接重置内存条目（unsupported 恢复用例用）。
+  void setItems(List<AttentionItem> items) => _items = List.of(items);
 
   /// 与真实后端一致：返回完整快照，仅被标记条目更新 readAt。
   List<AttentionItem> _withReadState(List<String> ids, {required bool read}) {
@@ -195,8 +217,8 @@ void main() {
     expect(unreadTitle.style?.fontWeight, FontWeight.w600);
     // freshness 徽章（今天两条 live）。
     expect(find.text('实时'), findsNWidgets(2));
-    // meta 含分类、来源与项目·设备。
-    expect(find.text('运行受阻 · agentNeedsInput'), findsNWidgets(2));
+    // meta 含分类、来源动作中文文案与项目·设备（sourceKind 不再拼英文枚举）。
+    expect(find.text('运行受阻 · 打开终端'), findsNWidgets(2));
     expect(find.textContaining('demo · Hans Mac'), findsNWidgets(2));
   });
 
@@ -218,7 +240,8 @@ void main() {
         _item('env-1', category: 'environment'),
         _item('block-1', category: 'blocked'),
         _item('decision-1', category: 'decision'),
-        _item('other-1', category: 'weird'),
+        // 未知分类 + 未知来源：分类归「其他」，来源动作回退原值。
+        _item('other-1', category: 'weird', sourceKind: 'weirdSource'),
       ]),
     );
     // 分组头按固定顺序：决策 → 阻塞 → 环境 → 其他。
@@ -231,8 +254,9 @@ void main() {
     expect(envY, lessThan(otherY));
     // 未知分类条目不丢失，归入「其他」。
     expect(find.text('标题 other-1'), findsOneWidget);
-    // 未知分类条目没有分类 tag（label 行只有 sourceKind）。
-    expect(find.text('agentNeedsInput'), findsOneWidget);
+    // 已知来源（agentNeedsInput）渲染中文动作文案；未知来源回退原值。
+    expect(find.textContaining('打开终端'), findsWidgets);
+    expect(find.text('weirdSource'), findsOneWidget);
   });
 
   testWidgets('tapping an orchestrator task navigates automation with focusTaskId', (tester) async {
@@ -453,5 +477,97 @@ void main() {
     // 全部已读后按钮禁用。
     expect(tester.widget<TextButton>(button).onPressed, isNull);
     expect(find.text('标为已读'), findsNothing);
+  });
+
+  testWidgets('mark-all-read disabled while refreshing or per-item marking pending',
+      (tester) async {
+    final client = _FakeAttentionClient([
+      _item('unread-1'),
+      _item('unread-2'),
+      _item('read-1', readAt: '2026-09-19T09:00:00Z'),
+    ]);
+    await pumpPage(tester, client: client);
+    final button = find.byKey(const Key('attention-mark-all-read'));
+    expect(tester.widget<TextButton>(button).onPressed, isNotNull);
+
+    // 刷新进行中：全部已读禁用（对齐 web refreshing）。
+    client.holdList = Completer<List<AttentionItem>>();
+    await tester.tap(find.byKey(const Key('attention-refresh')));
+    await tester.pump();
+    expect(tester.widget<TextButton>(button).onPressed, isNull);
+    client.holdList!.complete(const <AttentionItem>[]);
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextButton>(button).onPressed, isNotNull);
+
+    // 单条标记进行中：全部已读禁用（对齐 web pendingReadIds.size > 0）。
+    client.holdMark = Completer<List<AttentionItem>>();
+    await tester.tap(find.byKey(const Key('attention-toggle-read-unread-1')));
+    await tester.pump();
+    expect(tester.widget<TextButton>(button).onPressed, isNull);
+    client.holdMark!.complete(const <AttentionItem>[]);
+    await tester.pumpAndSettle();
+    // 标记完成后恢复可用（unread-2 仍未读）。
+    expect(tester.widget<TextButton>(button).onPressed, isNotNull);
+  });
+
+  testWidgets('tapping an unread item keeps navigating when markRead fails and shows a SnackBar',
+      (tester) async {
+    final client = _FakeAttentionClient([
+      _item('unread-1'),
+    ]);
+    final navigated = await pumpPage(
+      tester,
+      projectsClient: _FakeProjectsClient([
+        const ProjectSummary(id: 'p1', name: 'demo'),
+      ]),
+      client: client,
+    );
+    client.failNextMarkRead = true;
+    await tester.tap(find.text('标题 unread-1'));
+    await tester.pumpAndSettle();
+    // 标记失败有明确 SnackBar，不再静默吞掉。
+    expect(find.textContaining('标记失败'), findsOneWidget);
+    // 且不阻断导航。
+    expect(navigated, hasLength(1));
+    expect(navigated.first.panel, 'terminal');
+  });
+
+  testWidgets('unsupported backend shows a dedicated banner and suppresses loading/error/empty',
+      (tester) async {
+    final client = _FakeAttentionClient(const <AttentionItem>[]);
+    client.throwUnsupported = true;
+    await pumpPage(tester, client: client);
+    // 专用横幅文案（对齐 web attention:unsupported）。
+    expect(find.byKey(const Key('attention-unsupported-banner')), findsOneWidget);
+    expect(find.text('当前后端不支持全局 Inbox（缺少 attention.v1）'), findsOneWidget);
+    // 空态与整屏错误被抑制，仅提供重新加载入口。
+    expect(find.text('当前没有阻塞工作的事项'), findsNothing);
+    expect(find.byKey(const Key('attention-retry')), findsNothing);
+    expect(find.byKey(const Key('attention-unsupported-reload')), findsOneWidget);
+
+    // 后端恢复（能力就绪）后重新加载回到正常列表。
+    client.throwUnsupported = false;
+    client.setItems([_item('unread-1')]);
+    await tester.tap(find.byKey(const Key('attention-unsupported-reload')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('attention-unsupported-banner')), findsNothing);
+    expect(find.text('标题 unread-1'), findsOneWidget);
+  });
+
+  testWidgets('unsupported with existing snapshot keeps items and shows the banner',
+      (tester) async {
+    final client = _FakeAttentionClient([
+      _item('unread-1'),
+    ]);
+    await pumpPage(tester, client: client);
+    expect(find.text('标题 unread-1'), findsOneWidget);
+
+    // 会话中途后端能力变化：旧快照保留，顶部出现专用横幅。
+    client.throwUnsupported = true;
+    await tester.tap(find.byKey(const Key('attention-refresh')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('attention-unsupported-banner')), findsOneWidget);
+    expect(find.text('标题 unread-1'), findsOneWidget);
+    expect(find.textContaining('快照拉取失败'), findsNothing);
   });
 }

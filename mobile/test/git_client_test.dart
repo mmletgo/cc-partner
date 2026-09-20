@@ -31,7 +31,12 @@ void main() {
           jsonEncode({
             'ok': true,
             'worktrees': [
-              {'id': 'wt-main', 'name': 'main', 'branch': 'main', 'isMain': true},
+              {
+                'id': 'wt-main',
+                'name': 'main',
+                'branch': 'main',
+                'isMain': true,
+              },
             ],
           }),
         );
@@ -127,27 +132,30 @@ void main() {
     expect(commit.refs.last.isHead, isFalse);
   });
 
-  test('commits parsing tolerates missing fields and a wrapped payload', () async {
-    commitsResponse = {
-      'commits': [
-        {'hash': 'x'},
-      ],
-    };
-    final http = LanHttpClient();
-    addTearDown(http.close);
-    final git = GitClient(http, baseUrl);
-    final commits = await git.commits('p1');
-    expect(lastBody['worktreeId'], isNull);
-    expect(lastBody['limit'], 30);
-    expect(commits, hasLength(1));
-    final commit = commits.single;
-    expect(commit.hash, 'x');
-    expect(commit.shortHash, '');
-    expect(commit.summary, '');
-    expect(commit.authorName, '');
-    expect(commit.parentHashes, isEmpty);
-    expect(commit.refs, isEmpty);
-  });
+  test(
+    'commits parsing tolerates missing fields and a wrapped payload',
+    () async {
+      commitsResponse = {
+        'commits': [
+          {'hash': 'x'},
+        ],
+      };
+      final http = LanHttpClient();
+      addTearDown(http.close);
+      final git = GitClient(http, baseUrl);
+      final commits = await git.commits('p1');
+      expect(lastBody['worktreeId'], isNull);
+      expect(lastBody['limit'], 30);
+      expect(commits, hasLength(1));
+      final commit = commits.single;
+      expect(commit.hash, 'x');
+      expect(commit.shortHash, '');
+      expect(commit.summary, '');
+      expect(commit.authorName, '');
+      expect(commit.parentHashes, isEmpty);
+      expect(commit.refs, isEmpty);
+    },
+  );
 
   test('commits forwards a custom limit and empty payload', () async {
     commitsResponse = const [];
@@ -187,6 +195,47 @@ void main() {
     expect(absent.clean, isTrue);
     expect(absent.canPush, isFalse);
   });
+
+  test(
+    'worktreeDisplayName prefers branch over name/id and label status is shared',
+    () {
+      // 对齐 web MobileWorktreeTabs label = branch ?? name（round4 起分支名优先）。
+      expect(
+        worktreeDisplayName({'id': 'w1', 'name': 'feat', 'branch': 'feat/app'}),
+        'feat/app',
+      );
+      expect(worktreeDisplayName({'id': 'w1', 'name': 'feat'}), 'feat');
+      expect(worktreeDisplayName({'id': 'w1'}), 'w1');
+      expect(worktreeDisplayName(<String, dynamic>{}), '');
+    },
+  );
+
+  test(
+    'worktreeStatusLabel shares the conflict/dirty/clean wording across pages',
+    () {
+      // Git 页与 worktrees 页共用同一口径（N 处冲突 / N 处改动 / 干净）。
+      expect(
+        worktreeStatusLabel({
+          'status': {'conflicts': 2, 'changed': 5, 'clean': false},
+        }),
+        '2 处冲突',
+      );
+      expect(
+        worktreeStatusLabel({
+          'status': {'changed': 3, 'clean': false},
+        }),
+        '3 处改动',
+      );
+      expect(
+        worktreeStatusLabel({
+          'status': {'changed': 0, 'clean': true},
+        }),
+        '干净',
+      );
+      // status 缺失按干净展示（宽容解析）。
+      expect(worktreeStatusLabel({'id': 'wt-1'}), '干净');
+    },
+  );
 
   test('creates a worktree and commits with a message', () async {
     final http = LanHttpClient();

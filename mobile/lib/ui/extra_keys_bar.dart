@@ -16,17 +16,24 @@ import '../terminal/extra_keys.dart';
 ///   repeatable 键长按后立即发一次、延迟 [kExtraKeyRepeatDelayMs] 后按
 ///   [kExtraKeyRepeatIntervalMs] 连发，松手/取消停止；popup 键长按用
 ///   GlobalKey 的 RenderBox 计算屏幕位置弹出 showMenu。
+///   [disabled] 为 true 时整条置灰：不发送、不切换 sticky、不连发、不弹菜单
+///   （对齐 web MobileTerminalPanel：disabled = !sessionId || status!=='running'
+///   || busy || 流未就绪，透传每键置灰）。
 class ExtraKeysBar extends StatefulWidget {
   const ExtraKeysBar({
     super.key,
     required this.onSend,
     required this.sticky,
     required this.onSticky,
+    this.disabled = false,
   });
 
   final ValueChanged<String> onSend;
   final StickyModifier? sticky;
   final ValueChanged<StickyModifier?> onSticky;
+
+  /// 全键禁用：会话缺失/非 running/输入流未就绪等；默认 false（可用）。
+  final bool disabled;
 
   @override
   State<ExtraKeysBar> createState() => _ExtraKeysBarState();
@@ -51,8 +58,12 @@ class _ExtraKeysBarState extends State<ExtraKeysBar> {
     _repeat = null;
   }
 
-  /// 发送一个键位：modifier 键交给页面切换 sticky，payload 键直接发送。
+  /// 发送一个键位：modifier 键交给页面切换 sticky，payload 键直接发送；
+  /// disabled 时一律忽略。
   void _press(ExtraKeyDef key) {
+    if (widget.disabled) {
+      return;
+    }
     if (key.kind == ExtraKeyKind.modifier && key.modifier != null) {
       widget.onSticky(toggleStickyModifier(widget.sticky, key.modifier!).armed);
       return;
@@ -67,8 +78,11 @@ class _ExtraKeysBarState extends State<ExtraKeysBar> {
   /// 业务逻辑：方向键连发先立即发送一次，再经前置延迟后周期连发，避免一次误触翻过多行。
   ///
   /// Code Logic：立即 _press 一次；启动 [kExtraKeyRepeatDelayMs] 前置延迟 Timer，
-  /// 到期后用 [kExtraKeyRepeatIntervalMs] 的周期 Timer 连发。
+  /// 到期后用 [kExtraKeyRepeatIntervalMs] 的周期 Timer 连发；disabled 时不武装。
   void _startRepeat(ExtraKeyDef key) {
+    if (widget.disabled) {
+      return;
+    }
     _press(key);
     _stopRepeat();
     _repeatDelay = Timer(
@@ -107,8 +121,11 @@ class _ExtraKeysBarState extends State<ExtraKeysBar> {
     );
   }
 
-  /// 弹出 `/` 命令菜单并转发所选命令；未选择时不发送。
+  /// 弹出 `/` 命令菜单并转发所选命令；未选择时不发送；disabled 时不弹出。
   Future<void> _openPopup(ExtraKeyDef key) async {
+    if (widget.disabled) {
+      return;
+    }
     final chosen = await showMenu<ExtraKeyDef>(
       context: context,
       position: _popupPosition(),
@@ -127,6 +144,7 @@ class _ExtraKeysBarState extends State<ExtraKeysBar> {
 
   @override
   Widget build(BuildContext context) {
+    final disabled = widget.disabled;
     return SizedBox(
       height: 44,
       child: ListView(
@@ -138,26 +156,30 @@ class _ExtraKeysBarState extends State<ExtraKeysBar> {
               child: extraKeyHasPopup(key)
                   ? GestureDetector(
                       key: _popupAnchorKey,
-                      onLongPress: () => _openPopup(key),
+                      onLongPress: disabled ? null : () => _openPopup(key),
                       child: OutlinedButton(
-                        onPressed: () => _press(key),
+                        onPressed: disabled ? null : () => _press(key),
                         child: Text(key.label),
                       ),
                     )
                   : extraKeyIsRepeatable(key)
                       ? GestureDetector(
-                          onTap: () => _press(key),
-                          onLongPressStart: (_) => _startRepeat(key),
-                          onLongPressEnd: (_) => _stopRepeat(),
-                          onLongPressCancel: () => _stopRepeat(),
+                          onTap: disabled ? null : () => _press(key),
+                          onLongPressStart:
+                              disabled ? null : (_) => _startRepeat(key),
+                          onLongPressEnd:
+                              disabled ? null : (_) => _stopRepeat(),
+                          onLongPressCancel:
+                              disabled ? null : () => _stopRepeat(),
                           child: OutlinedButton(
-                            onPressed: () => _press(key),
+                            onPressed: disabled ? null : () => _press(key),
                             child: Text(key.label),
                           ),
                         )
                       : OutlinedButton(
-                          onPressed: () => _press(key),
-                          style: widget.sticky != null &&
+                          onPressed: disabled ? null : () => _press(key),
+                          style: !disabled &&
+                                  widget.sticky != null &&
                                   key.modifier == widget.sticky
                               ? OutlinedButton.styleFrom(
                                   backgroundColor: Theme.of(context)
