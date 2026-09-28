@@ -93,9 +93,11 @@ pub fn executor_for(target: AgentTarget) -> Box<dyn TargetActionExecutor> {
         AgentTarget::Claude => Box::new(ClaudeTargetExecutor),
         AgentTarget::Codex => Box::new(CodexTargetExecutor),
         AgentTarget::OpenCode => Box::new(OpenCodeTargetExecutor),
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
-            Box::new(OpenCodeTargetExecutor)
-        }
+        AgentTarget::Grok
+        | AgentTarget::Gemini
+        | AgentTarget::Cursor
+        | AgentTarget::Pi
+        | AgentTarget::Zcode => Box::new(OpenCodeTargetExecutor),
     }
 }
 
@@ -123,12 +125,14 @@ pub fn is_file_only_viewing_toggle(
         (target, kind),
         (AgentTarget::Grok, PortableAssetKind::Plugin)
             | (AgentTarget::Codex, PortableAssetKind::Plugin)
+            | (AgentTarget::Zcode, PortableAssetKind::Plugin)
             | (
                 AgentTarget::Grok
                     | AgentTarget::Gemini
                     | AgentTarget::Cursor
                     | AgentTarget::OpenCode
-                    | AgentTarget::Codex,
+                    | AgentTarget::Codex
+                    | AgentTarget::Zcode,
                 PortableAssetKind::Mcp
             )
     )
@@ -154,6 +158,11 @@ pub fn supports_direct_local_action(
     action: PortableAssetActionKind,
 ) -> bool {
     if action.is_portable_store_action() {
+        // ZCode 无 L3：attach/detach/migrate/destroy 保持 blocked。
+        // 确认当前版本与逃逸软链恢复不走这条 allowlist。
+        if target == AgentTarget::Zcode {
+            return false;
+        }
         return kind.supports_portable_store();
     }
     if is_file_only_viewing_toggle(target, kind, action) {
@@ -401,5 +410,43 @@ mod direct_action_support_tests {
             PortableAssetKind::Plugin,
             PortableAssetActionKind::Uninstall,
         ));
+    }
+
+    /// Business Logic: ZCode 无 L3，store 四动作保持 blocked；插件/MCP 启停是配置补丁。
+    #[test]
+    fn zcode_store_mutations_stay_blocked_while_viewing_toggles_are_file_only() {
+        for action in [
+            PortableAssetActionKind::Attach,
+            PortableAssetActionKind::Detach,
+            PortableAssetActionKind::MigrateToStore,
+            PortableAssetActionKind::DestroyStore,
+        ] {
+            assert!(
+                !supports_direct_local_action(AgentTarget::Zcode, PortableAssetKind::Skill, action),
+                "{action:?}"
+            );
+        }
+        assert!(supports_direct_local_action(
+            AgentTarget::Zcode,
+            PortableAssetKind::Plugin,
+            PortableAssetActionKind::Disable,
+        ));
+        assert!(supports_direct_local_action(
+            AgentTarget::Zcode,
+            PortableAssetKind::Mcp,
+            PortableAssetActionKind::Enable,
+        ));
+        assert!(!supports_direct_local_action(
+            AgentTarget::Zcode,
+            PortableAssetKind::Plugin,
+            PortableAssetActionKind::Uninstall,
+        ));
+        assert!(!supports_direct_local_action(
+            AgentTarget::Zcode,
+            PortableAssetKind::Mcp,
+            PortableAssetActionKind::Uninstall,
+        ));
+        assert!(PortableAssetActionKind::ConfirmCurrentVersion.bypasses_target_cli_gates());
+        assert!(PortableAssetActionKind::MaterializeEscapeLink.bypasses_target_cli_gates());
     }
 }

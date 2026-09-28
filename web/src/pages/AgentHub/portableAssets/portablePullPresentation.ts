@@ -148,6 +148,8 @@ export function sameAgentDestinationLabelKey(sourceTarget: AgentTarget): string 
       return 'agentHub:portablePull.destination.sameAsCursor';
     case 'pi':
       return 'agentHub:portablePull.destination.sameAsPi';
+    case 'zcode':
+      return 'agentHub:portablePull.destination.sameAsZcode';
   }
 }
 

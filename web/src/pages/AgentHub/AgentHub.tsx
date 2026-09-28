@@ -336,6 +336,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         gemini: t('agentHub:portable.inventory.borrowedFrom.gemini'),
         cursor: t('agentHub:portable.inventory.borrowedFrom.cursor'),
         pi: t('agentHub:portable.inventory.borrowedFrom.pi'),
+        zcode: t('agentHub:portable.inventory.borrowedFrom.zcode'),
         sharedAgents: t('agentHub:portable.inventory.borrowedFrom.sharedAgents'),
         portableStore: t('agentHub:portable.inventory.borrowedFrom.portableStore'),
         unknown: t('agentHub:portable.inventory.borrowedFrom.unknown'),

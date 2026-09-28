@@ -851,7 +851,7 @@ mod tests {
     fn builtin_manifest_loads_three_targets() {
         let m = builtin_support_manifest().expect("builtin");
         assert_eq!(m.schema_version, 1);
-        assert_eq!(m.targets.len(), 7);
+        assert_eq!(m.targets.len(), 8);
         let names: Vec<_> = m.targets.iter().map(|t| t.target.as_str()).collect();
         assert!(names.contains(&"claude"));
         assert!(names.contains(&"codex"));
@@ -859,6 +859,7 @@ mod tests {
         assert!(names.contains(&"grok"));
         assert!(names.contains(&"gemini"));
         assert!(names.contains(&"cursor"));
+        assert!(names.contains(&"zcode"));
     }
 
     /// Business Logic: null min/current → scan-only，写能力 blocked。

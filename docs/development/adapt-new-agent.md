@@ -2,7 +2,7 @@
 
 > 给下一次「再适配一种 Agent」用。本文是落地清单：先锁身份，再按面接线，最后用编译器与 grep 清漏网。用量面必须同时绑定 `native_session_id` 并对照真实磁盘字段抽取，见 §3.6。
 >
-> 当前已登记：`claude` / `codex` / `opencode` / `grok` / `gemini` / `cursor` / `pi`。`genericTerminal` 只存在于 Runtime，没有 `AgentId` 行。
+> 当前已登记：`claude` / `codex` / `opencode` / `grok` / `gemini` / `cursor` / `pi` / `zcode`。`genericTerminal` 只存在于 Runtime，没有 `AgentId` 行。
 >
 > 相关文档：概念合同 [`docs/superpowers/specs/2026-08-16-agent-capability-catalog-design.md`](../superpowers/specs/2026-08-16-agent-capability-catalog-design.md)；落地计划 [`docs/superpowers/plans/2026-08-16-agent-capability-catalog.md`](../superpowers/plans/2026-08-16-agent-capability-catalog.md)；Hub 写能力门禁 [`docs/development/agent-hub/manifest.md`](agent-hub/manifest.md)。Plugin 启用标记跟 viewing Agent（§3.9，`plugin_enablement.rs`）。Skill/Command 本机一份在 `<data_dir>/portable-store/`（§3.10，`portable_store/`）；MCP 仍是各家配置 native leaf，跨 Agent 走已有 Pull。漂移项「确认当前版本」只改 Hub 账本（§3.11）。逃逸软链「恢复为仓库资产」把源树复制进 store、在 native 路径挂正规软链，不删源树（§3.12）。用户发起的 user-mirror 可写该身份用户级白名单文件与 MCP leaf / viewing Disable，不 spawn 未认证 CLI；新身份必须进入 `all_hub_targets()`，否则镜像缺席要显式失败而不是跳过。不要把概念 spec 改写成「Cursor 一开始就在」；新身份只追加本手册附录。
 
@@ -624,6 +624,29 @@ npx --no-install vitest run src/lib/agentCatalog.test.ts \
 | 优化器 | catalog `hasHeadless`，设置页仍仅 claude+grok |
 | Hub 原生写 | support-manifest 全 blocked（同 Grok/Gemini/Cursor） |
 | cc-switch | 未扩展 |
+
+## 附录：ZCode（2026-09-28）
+
+本轮只做 Agent Hub。身份表：
+
+| 项 | 取值 |
+|----|------|
+| wire / 显示名 / CLI | `zcode` / ZCode / `zcode`（不启动 `ZCode.app`） |
+| 配置根 | `ZCODE_DATA_BASE_DIR` 非空 → `<base>/.zcode`，否则 `~/.zcode`。不认 `ZCODE_HOME` |
+| 用户指令 | `<config_root>/AGENTS.md`。镜像白名单只含这一份，不镜像 `cli/config.json` 或 `v2/**` |
+| 项目公共槽 | 仓库根 `AGENTS.md`（ZCode 会读）。适配器不另写、不追加正文。不把 `CLAUDE.md` 列成 ZCode 会加载的项目文件 |
+| 项目适配 / 独有 | Hub 可见。`renderInstruction` 保持 `blocked`。受管文件名在 `.zcode/cc-partner.{adapted,exclusive}.md`，不得是仓库根 `AGENTS.md`，不得落到 `~/.claude` |
+| Skill native | `<config_root>/skills`、`<project>/.zcode/skills`。本轮不写 native 根 |
+| Skill 借用 | `{home}/.agents/skills`、`<project>/.agents/skills`。`originKind=compatibility`，`ownedBy=sharedAgents`。不扫 `~/.claude/skills`、`~/.codex/skills` |
+| Command native | `<config_root>/commands`、`<project>/.zcode/commands`。没有 `~/.agents/commands` |
+| MCP native | `<config_root>/cli/config.json` 与 `<project>/.zcode/config.json` 的对象 `mcp.servers`。写盘只改这个对象 |
+| MCP 借用 | 同一 scope 的 `.agents/mcp.json`，仅当该 scope 的 zcode 配置没有非空 `mcp.servers`。借用项不可启停、不可卸载 |
+| Plugin | `<config_root>/cli/plugins/installed_plugins.json`，`plugins` 是数组（`id` / `installPath` / `scope`）。只收 `installPath` 在该目录 `cache/` 下的目录。清单优先 `.zcode-plugin/plugin.json`，其次 `.claude-plugin/plugin.json` |
+| Plugin 开关 | `<config_root>/cli/config.json` 的 `plugins.enabledPlugins` 布尔表。未登记的已安装包视为开。不继承 Claude `enabledPlugins`。Enable/Disable 是配置补丁，不 spawn CLI |
+| 安装 / 卸载 / store | `activatePackage` / `deactivatePackage` 与 attach / detach / migrate / destroy 保持 blocked |
+| 确认当前版本 / 逃逸软链恢复 | 不因 mutation blocked 失败 |
+| Runtime / 会话 / 历史 / 用量 / headless | `None` / `false` |
+| 无图形剪贴板贴图 | `atFileMention`。这是未识别命令回退，不是官方贴图语法（官方是剪贴板 Ctrl+V、`/paste-image`、headless `--attach`） |
 
 ## 9. 明确不要做的
 

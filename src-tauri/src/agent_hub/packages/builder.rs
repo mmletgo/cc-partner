@@ -279,7 +279,11 @@ pub fn materialize_package(input: &PackageBuildInput) -> Result<GeneratedTargetP
             write_command_files(&staging, &input.commands, &mut relative_paths)?;
             write_agent_files(&staging, &input.agents, &mut relative_paths)?;
         }
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
+        AgentTarget::Grok
+        | AgentTarget::Gemini
+        | AgentTarget::Cursor
+        | AgentTarget::Pi
+        | AgentTarget::Zcode => {
             write_opencode_native(&staging, &visible, &mut relative_paths, &mut aliases)?;
             write_command_files(&staging, &input.commands, &mut relative_paths)?;
             write_agent_files(&staging, &input.agents, &mut relative_paths)?;

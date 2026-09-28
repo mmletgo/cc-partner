@@ -69,6 +69,7 @@ describe('targetMatrix status table', () => {
       makeCell({ target: 'gemini', verified: true }),
       makeCell({ target: 'cursor', verified: true }),
       makeCell({ target: 'pi', verified: true }),
+      makeCell({ target: 'zcode', verified: true }),
     ]);
     expect(isVerifiedInvocation(asset.aggregateStatus)).toBe(true);
     expect(listPartialReasons(asset)).toEqual([]);

@@ -215,7 +215,8 @@
         "grok": "Grok Build extension",
         "gemini": "Gemini CLI extension",
         "cursor": "Cursor CLI extension",
-        "pi": "Pi extension"
+        "pi": "Pi extension",
+        "zcode": "ZCode extension"
       },
       "placeholders": {
         "common": "Instructions every managed agent should follow…",
@@ -225,7 +226,8 @@
         "grok": "Extra instructions only Grok Build needs…",
         "gemini": "Extra instructions only Gemini CLI needs…",
         "cursor": "Extra instructions only Cursor CLI needs…",
-        "pi": "Extra instructions only Pi needs…"
+        "pi": "Extra instructions only Pi needs…",
+        "zcode": "Extra instructions only ZCode needs…"
       }
     },
     "target": {
@@ -366,7 +368,8 @@
     "grok": "Grok Build",
     "gemini": "Gemini CLI",
     "cursor": "Cursor CLI",
-    "pi": "Pi"
+    "pi": "Pi",
+    "zcode": "ZCode"
   },
   "kinds": {
     "instruction": "Instruction",
@@ -664,6 +667,7 @@
         "gemini": "From Gemini CLI",
         "cursor": "From Cursor CLI",
         "pi": "From Pi",
+        "zcode": "From ZCode",
         "sharedAgents": "Shared ~/.agents",
         "portableStore": "Store",
         "unknown": "From unknown owner"
@@ -676,7 +680,8 @@
         "grok": "Grok Build",
         "gemini": "Gemini CLI",
         "cursor": "Cursor CLI",
-        "pi": "Pi"
+        "pi": "Pi",
+        "zcode": "ZCode"
       },
       "scopeFilter": {
         "all": "All scopes",
@@ -841,7 +846,8 @@
       "grok": "Grok Build",
       "gemini": "Gemini CLI",
       "cursor": "Cursor CLI",
-      "pi": "Pi"
+      "pi": "Pi",
+      "zcode": "ZCode"
     },
     "destination": {
       "sameAsClaude": "Destination: Claude (same agent)",
@@ -850,7 +856,8 @@
       "sameAsGrok": "Destination: Grok Build (same agent)",
       "sameAsGemini": "Destination: Gemini CLI (same agent)",
       "sameAsCursor": "Destination: Cursor CLI (same agent)",
-      "sameAsPi": "Destination: Pi (same agent)"
+      "sameAsPi": "Destination: Pi (same agent)",
+      "sameAsZcode": "Destination: ZCode (same agent)"
     },
     "policy": {
       "skipExisting": "Skip existing",

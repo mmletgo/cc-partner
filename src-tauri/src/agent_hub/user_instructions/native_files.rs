@@ -129,6 +129,7 @@ fn declared_native_paths(homes: &TargetHomes) -> Vec<PathBuf> {
         homes.grok.config_root.join("CLAUDE.md"),
         homes.pi.config_root.join("AGENTS.md"),
         homes.pi.config_root.join("CLAUDE.md"),
+        homes.zcode.config_root.join("AGENTS.md"),
     ]
 }
 
@@ -175,6 +176,8 @@ pub(crate) fn user_level_mirror_native_paths(
                 AgentTarget::Grok
             } else if parent == homes.pi.config_root {
                 AgentTarget::Pi
+            } else if parent == homes.zcode.config_root {
+                AgentTarget::Zcode
             } else {
                 return None;
             };
@@ -407,6 +410,39 @@ mod tests {
         assert!(resolve_allowed_native_path(cursor_rule.to_str().unwrap(), &homes).is_err());
         assert!(resolve_allowed_native_path("/etc/passwd", &homes).is_err());
         assert!(resolve_allowed_native_path("AGENTS.md", &homes).is_err());
+    }
+
+    /// Business Logic: 用户级镜像只白名单 ZCode 的 AGENTS.md，不镜像 cli/config.json 或 v2。
+    #[test]
+    fn zcode_mirror_whitelist_is_agents_md_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut vars = BTreeMap::new();
+        let base = tmp.path().join("base");
+        vars.insert(
+            "ZCODE_DATA_BASE_DIR".into(),
+            base.to_string_lossy().into_owned(),
+        );
+        let env = TargetEnvironment {
+            home: tmp.path().join("home"),
+            vars,
+            path_entries: Vec::new(),
+        };
+        let homes = TargetPathResolver::resolve_all(&env);
+        let agents = homes.zcode.config_root.join("AGENTS.md");
+        assert_eq!(agents, base.join(".zcode").join("AGENTS.md"));
+        assert!(resolve_allowed_native_path(agents.to_str().unwrap(), &homes).is_ok());
+        let config = homes.zcode.config_root.join("cli").join("config.json");
+        let provider = homes.zcode.config_root.join("v2").join("provider.json");
+        assert!(resolve_allowed_native_path(config.to_str().unwrap(), &homes).is_err());
+        assert!(resolve_allowed_native_path(provider.to_str().unwrap(), &homes).is_err());
+        let mirrored = user_level_mirror_native_paths(&homes);
+        assert!(mirrored.iter().any(|(target, id, path)| {
+            *target == AgentTarget::Zcode && id == "zcode.native.AGENTS.md" && path == &agents
+        }));
+        assert!(mirrored.iter().all(|(_, _, path)| {
+            let text = path.to_string_lossy();
+            !text.contains("config.json") && !text.contains("/v2/")
+        }));
     }
 
     #[test]

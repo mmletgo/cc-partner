@@ -50,6 +50,7 @@ use crate::{
             CodexInstructionAdapter, CursorInstructionAdapter, GeminiInstructionAdapter,
             GrokInstructionAdapter, LocalScopeMapping, OpenCodeInstructionAdapter,
             PiInstructionAdapter, TargetEnvironment, TargetPathResolver, TargetProbe,
+            ZcodeInstructionAdapter,
         },
     },
     error::AppError,
@@ -151,7 +152,8 @@ pub(crate) fn evaluate_current_portable_target_support(
         | AgentTarget::Grok
         | AgentTarget::Gemini
         | AgentTarget::Cursor
-        | AgentTarget::Pi => crate::agent_hub::targets::probe_target(target, &env),
+        | AgentTarget::Pi
+        | AgentTarget::Zcode => crate::agent_hub::targets::probe_target(target, &env),
     }?;
     evaluate_probe_support(target, &probe)
 }
@@ -301,6 +303,7 @@ pub fn scan_portable_inventory_facts_query(
         Box::new(GeminiInstructionAdapter),
         Box::new(CursorInstructionAdapter),
         Box::new(PiInstructionAdapter),
+        Box::new(ZcodeInstructionAdapter),
     ];
     let homes = TargetPathResolver::resolve_all(env);
     let mut target_dtos = Vec::with_capacity(adapters.len());
@@ -587,6 +590,7 @@ fn target_dto_from_probe(
         AgentTarget::Gemini => homes.gemini.config_root.display().to_string(),
         AgentTarget::Cursor => homes.cursor.config_root.display().to_string(),
         AgentTarget::Pi => homes.pi.config_root.display().to_string(),
+        AgentTarget::Zcode => homes.zcode.config_root.display().to_string(),
     };
     let installed = probe.executable.is_some();
     let manifest = builtin_support_manifest()?;

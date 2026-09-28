@@ -339,6 +339,83 @@
       ]
     },
     {
+      "target": "zcode",
+      "roots": [
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{zcodeConfigRoot}/skills",
+          "originKind": "native",
+          "ownedBy": "zcode"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.zcode/skills",
+          "originKind": "native",
+          "ownedBy": "zcode"
+        },
+        {
+          "kind": "skill",
+          "scope": "user",
+          "pathPattern": "{home}/.agents/skills",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents"
+        },
+        {
+          "kind": "skill",
+          "scope": "project",
+          "pathPattern": "{project}/.agents/skills",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents"
+        },
+        {
+          "kind": "command",
+          "scope": "user",
+          "pathPattern": "{zcodeConfigRoot}/commands",
+          "originKind": "native",
+          "ownedBy": "zcode"
+        },
+        {
+          "kind": "command",
+          "scope": "project",
+          "pathPattern": "{project}/.zcode/commands",
+          "originKind": "native",
+          "ownedBy": "zcode"
+        },
+        {
+          "kind": "mcp",
+          "scope": "user",
+          "pathPattern": "{zcodeConfigRoot}/cli/config.json",
+          "originKind": "native",
+          "ownedBy": "zcode"
+        },
+        {
+          "kind": "mcp",
+          "scope": "project",
+          "pathPattern": "{project}/.zcode/config.json",
+          "originKind": "native",
+          "ownedBy": "zcode"
+        },
+        {
+          "kind": "mcp",
+          "scope": "user",
+          "pathPattern": "{home}/.agents/mcp.json",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents",
+          "gatedBy": { "type": "zcodeNativeMcpEmpty" }
+        },
+        {
+          "kind": "mcp",
+          "scope": "project",
+          "pathPattern": "{project}/.agents/mcp.json",
+          "originKind": "compatibility",
+          "ownedBy": "sharedAgents",
+          "gatedBy": { "type": "zcodeNativeMcpEmpty" }
+        }
+      ]
+    },
+    {
       "target": "opencode",
       "roots": [
         {

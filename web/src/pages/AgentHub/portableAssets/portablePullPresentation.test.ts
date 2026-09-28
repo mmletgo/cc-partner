@@ -145,6 +145,7 @@ describe('portablePullPresentation labels and plan helpers', () => {
     expect(sameAgentDestinationLabelKey('gemini')).toBe('agentHub:portablePull.destination.sameAsGemini');
     expect(sameAgentDestinationLabelKey('cursor')).toBe('agentHub:portablePull.destination.sameAsCursor');
     expect(sameAgentDestinationLabelKey('pi')).toBe('agentHub:portablePull.destination.sameAsPi');
+    expect(sameAgentDestinationLabelKey('zcode')).toBe('agentHub:portablePull.destination.sameAsZcode');
   });
 
   test('maps canonical-only install mode changes explicitly', () => {

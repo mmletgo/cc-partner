@@ -329,31 +329,36 @@ pub fn discover_plugin_source_for_target(
     let mut name = dir_name;
     let mut version = None;
     let mut description = None;
-    let manifest_rel = match target {
-        AgentTarget::Claude => Some(".claude-plugin/plugin.json"),
-        AgentTarget::Codex => Some(".codex-plugin/plugin.json"),
-        AgentTarget::OpenCode => Some("package.json"),
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => None,
+    let manifest_rels: &[&str] = match target {
+        AgentTarget::Claude => &[".claude-plugin/plugin.json"],
+        AgentTarget::Codex => &[".codex-plugin/plugin.json"],
+        AgentTarget::OpenCode => &["package.json"],
+        // ZCode 清单优先 `.zcode-plugin/plugin.json`，其次才借用 Claude 清单文件名。
+        AgentTarget::Zcode => &[".zcode-plugin/plugin.json", ".claude-plugin/plugin.json"],
+        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => &[],
     };
-    if let Some(rel) = manifest_rel {
-        if let Ok(text) = fs::read_to_string(root.join(rel)) {
-            if let Ok(val) = parse_json_or_jsonc(&text) {
-                if let Some(n) = val.get("name").and_then(|v| v.as_str()) {
-                    if !n.trim().is_empty() {
-                        plugin_id = n.to_string();
-                        name = n.to_string();
-                    }
-                }
-                version = val
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                description = val
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+    for rel in manifest_rels {
+        let Ok(text) = fs::read_to_string(root.join(rel)) else {
+            continue;
+        };
+        let Ok(val) = parse_json_or_jsonc(&text) else {
+            continue;
+        };
+        if let Some(n) = val.get("name").and_then(|v| v.as_str()) {
+            if !n.trim().is_empty() {
+                plugin_id = n.to_string();
+                name = n.to_string();
             }
         }
+        version = val
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        description = val
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        break;
     }
     Ok(DiscoveredPluginSource {
         plugin_id,
@@ -563,7 +568,11 @@ pub async fn inspect_plugin_source(
             )
             .await?;
         }
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
+        AgentTarget::Grok
+        | AgentTarget::Gemini
+        | AgentTarget::Cursor
+        | AgentTarget::Pi
+        | AgentTarget::Zcode => {
             collect_portable_children(source, &mut components, &mut claimed, objects).await?;
             collect_residual_groups(
                 source,

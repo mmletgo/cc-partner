@@ -129,6 +129,8 @@ pub enum PortableAssetOwner {
     Cursor,
     /// Pi Coding Agent
     Pi,
+    /// ZCode CLI
+    Zcode,
     /// 共享 `~/.agents` 根
     SharedAgents,
     /// Hub portable-store 真树（各 Agent 仅挂软链/投影）
@@ -149,6 +151,7 @@ impl PortableAssetOwner {
             Self::Gemini => "gemini",
             Self::Cursor => "cursor",
             Self::Pi => "pi",
+            Self::Zcode => "zcode",
             Self::SharedAgents => "sharedAgents",
             Self::PortableStore => "portableStore",
             Self::Unknown => "unknown",
@@ -171,6 +174,7 @@ impl PortableAssetOwner {
             AgentTarget::Gemini => Self::Gemini,
             AgentTarget::Cursor => Self::Cursor,
             AgentTarget::Pi => Self::Pi,
+            AgentTarget::Zcode => Self::Zcode,
         }
     }
 
@@ -184,6 +188,7 @@ impl PortableAssetOwner {
             Self::Gemini => Some(AgentTarget::Gemini),
             Self::Cursor => Some(AgentTarget::Cursor),
             Self::Pi => Some(AgentTarget::Pi),
+            Self::Zcode => Some(AgentTarget::Zcode),
             Self::SharedAgents | Self::PortableStore | Self::Unknown => None,
         }
     }

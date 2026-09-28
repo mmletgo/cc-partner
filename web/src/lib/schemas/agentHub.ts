@@ -97,6 +97,7 @@ export const agentTargetDecoder: Decoder<AgentTarget> = enumDecoder('AgentTarget
   'gemini',
   'cursor',
   'pi',
+  'zcode',
 ] as const);
 
 /**

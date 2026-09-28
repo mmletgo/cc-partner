@@ -85,6 +85,7 @@ pub(super) fn scan_plugin_packages(
         &homes.claude.config_root,
         &codex_config_root,
         &homes.grok.config_root,
+        &homes.zcode.config_root,
     );
     for candidate in roots {
         let root = candidate.path.clone();
@@ -422,6 +423,7 @@ pub(super) fn plugin_roots_for(
                 .map(PluginRootCandidate::path_only)
                 .collect()
         }
+        (AgentTarget::Zcode, ScopeKind::User) => zcode_user_plugin_roots(&homes.zcode.config_root),
         (AgentTarget::Grok, _) => {
             direct_manifest_plugin_roots(&scope.absolute_path.join(".grok").join("plugins"), target)
                 .into_iter()
@@ -448,6 +450,8 @@ pub(super) fn plugin_roots_for(
                 .map(PluginRootCandidate::path_only)
                 .collect()
         }
+        // ZCode 安装权威只在用户配置根的 installed_plugins.json，项目 scope 不另扫。
+        (AgentTarget::Zcode, _) => Vec::new(),
     };
     roots.sort_by(|a, b| a.path.cmp(&b.path));
     roots.dedup_by(|a, b| a.path == b.path);
@@ -484,6 +488,7 @@ pub(crate) fn user_plugin_package_root_paths(
                 .map(PluginRootCandidate::path_only)
                 .collect()
         }
+        AgentTarget::Zcode => zcode_user_plugin_roots(config_root),
     };
     candidates.into_iter().map(|c| c.path).collect()
 }
@@ -564,6 +569,69 @@ fn claude_marketplace_plugin_roots_for_grok(claude_config_root: &Path) -> Vec<Pl
             owned_by: PortableAssetOwner::Claude,
         })
         .collect()
+}
+
+/// ZCode `installed_plugins.json` 的 `plugins` 是数组，不是 Claude 的 object map。
+///
+/// Business Logic（为什么需要这个函数）:
+///     安装权威在 `<config_root>/cli/plugins/installed_plugins.json`。只接受
+///     `installPath` 落在该 plugins 目录 `cache/` 下的目录。不得把这份文件塞进
+///     `claude_user_plugin_roots`（那是 object map）。
+///
+/// Code Logic（这个函数做什么）:
+///     读 JSON 数组；`scope` 缺省或 `user` 才收录；`id` 作为 registry key。
+pub(super) fn zcode_user_plugin_roots(config_root: &Path) -> Vec<PluginRootCandidate> {
+    let plugins_root = config_root.join("cli").join("plugins");
+    let cache_root = plugins_root.join("cache");
+    let Ok(raw) = fs::read_to_string(plugins_root.join("installed_plugins.json")) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(plugins) = value.get("plugins").and_then(|item| item.as_array()) else {
+        return Vec::new();
+    };
+    let mut roots = Vec::new();
+    for install in plugins {
+        let scope = install.get("scope").and_then(|item| item.as_str());
+        if scope.is_some_and(|scope| scope != "user") {
+            continue;
+        }
+        let Some(path) = install.get("installPath").and_then(|item| item.as_str()) else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        if !path.is_dir() || !path.starts_with(&cache_root) {
+            continue;
+        }
+        if crate::agent_hub::portable_inventory::plugin_paths::is_plugin_infrastructure_path(&path)
+        {
+            continue;
+        }
+        let id = install
+            .get("id")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        let registry_plugin_id = id.as_deref().and_then(|full| {
+            full.split('@')
+                .next()
+                .map(str::trim)
+                .filter(|short| !short.is_empty())
+                .map(str::to_string)
+        });
+        let registry_key = id.filter(|full| full.contains('@'));
+        roots.push(PluginRootCandidate {
+            path,
+            registry_plugin_id,
+            registry_key,
+            origin_kind: PortableOriginKind::Native,
+            owned_by: PortableAssetOwner::Zcode,
+        });
+    }
+    roots
 }
 
 /// Claude 的 installed_plugins.json 是安装状态权威；cache/marketplaces/data 本身不是插件。
@@ -687,6 +755,7 @@ fn direct_manifest_plugin_roots(base: &Path, target: AgentTarget) -> Vec<PathBuf
         AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
             "plugin.json"
         }
+        AgentTarget::Zcode => ".zcode-plugin/plugin.json",
     };
     let Ok(read) = fs::read_dir(base) else {
         return Vec::new();

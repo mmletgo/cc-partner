@@ -24,7 +24,7 @@ use crate::agent_hub::targets::{
     AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
     GeminiInstructionAdapter, GrokInstructionAdapter, InstructionRenderContext,
     OpenCodeInstructionAdapter, PiInstructionAdapter, TargetEnvironment, TargetPathResolver,
-    TargetProbe,
+    TargetProbe, ZcodeInstructionAdapter,
 };
 use crate::config_runtime::update_config_transactionally;
 use crate::error::AppError;
@@ -530,7 +530,11 @@ async fn resolve_target_path(
                 AgentTarget::Gemini => homes.gemini.config_root,
                 AgentTarget::Cursor => homes.cursor.config_root.join("rules"),
                 AgentTarget::Pi => homes.pi.config_root,
+                AgentTarget::Zcode => homes.zcode.config_root,
             };
+            if target == AgentTarget::Zcode {
+                return Ok(root.join("AGENTS.md"));
+            }
             Ok(root.join(file_name))
         }
         ScopeKind::Project | ScopeKind::Directory => {
@@ -541,6 +545,9 @@ async fn resolve_target_path(
             } else {
                 project_root.join(rel)
             };
+            if target == AgentTarget::Zcode {
+                return Ok(dir.join(".zcode").join("cc-partner.exclusive.md"));
+            }
             Ok(dir.join(file_name))
         }
     }
@@ -637,6 +644,7 @@ fn instruction_file_name(target: AgentTarget) -> &'static str {
         AgentTarget::Gemini => "GEMINI.md",
         AgentTarget::Cursor => "cc-partner.exclusive.mdc",
         AgentTarget::Pi => "cc-partner.exclusive.md",
+        AgentTarget::Zcode => "cc-partner.exclusive.md",
     }
 }
 
@@ -871,6 +879,14 @@ fn probe_target_for_support(target: AgentTarget, env: &TargetEnvironment) -> Tar
             executable: None,
             version: None,
             config_root: homes.pi.config_root,
+            support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
+            fingerprint: String::new(),
+        }),
+        AgentTarget::Zcode => ZcodeInstructionAdapter.probe(env).unwrap_or(TargetProbe {
+            target,
+            executable: None,
+            version: None,
+            config_root: homes.zcode.config_root,
             support: crate::agent_hub::targets::AdapterSupportLevel::ScanOnly,
             fingerprint: String::new(),
         }),

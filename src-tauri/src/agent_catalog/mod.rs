@@ -29,6 +29,8 @@ pub enum AgentId {
     Cursor,
     /// Pi Coding Agent（可执行 `pi`）
     Pi,
+    /// ZCode CLI（可执行 `zcode`）
+    Zcode,
 }
 
 /// owning device 没有图形剪贴板时，Workbench 贴图往 PTY 注入的语法。
@@ -168,6 +170,21 @@ const IDENTITIES: &[AgentIdentity] = &[
         executable_names: &["pi"],
         headless_image_paste: HeadlessImagePasteKind::TypedAbsolutePath,
     },
+    AgentIdentity {
+        id: AgentId::Zcode,
+        wire: "zcode",
+        display_name: "ZCode",
+        hub_target: Some(AgentTarget::Zcode),
+        // 本轮只做 Hub。Runtime / 会话搜索 / Prompt 历史缺席。
+        runtime_provider: None,
+        session_source: None,
+        history_source: None,
+        has_usage: false,
+        has_headless: false,
+        executable_names: &["zcode"],
+        // 未识别命令回退，不是 ZCode 官方贴图语法（官方是剪贴板 Ctrl+V、/paste-image、headless --attach）。
+        headless_image_paste: HeadlessImagePasteKind::AtFileMention,
+    },
 ];
 
 impl AgentId {
@@ -275,10 +292,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_registers_seven_agent_ids() {
-        assert_eq!(all_identities().len(), 7);
+    fn catalog_registers_eight_agent_ids() {
+        assert_eq!(all_identities().len(), 8);
         for wire in [
-            "claude", "codex", "opencode", "grok", "gemini", "cursor", "pi",
+            "claude", "codex", "opencode", "grok", "gemini", "cursor", "pi", "zcode",
         ] {
             assert!(AgentId::parse(wire).is_some(), "{wire}");
         }
@@ -294,7 +311,7 @@ mod tests {
     #[test]
     fn generic_terminal_has_no_hub_or_product_id() {
         assert!(identity_by_runtime(AgentProviderId::GenericTerminal).is_none());
-        assert_eq!(all_hub_targets().count(), 7);
+        assert_eq!(all_hub_targets().count(), 8);
     }
 
     #[test]
@@ -339,6 +356,24 @@ mod tests {
         assert!(pi.has_usage);
         assert!(pi.has_headless);
         assert_eq!(pi.executable_names, &["pi"]);
+
+        let zcode = AgentId::Zcode.identity();
+        assert_eq!(zcode.hub_target, Some(AgentTarget::Zcode));
+        assert!(zcode.runtime_provider.is_none());
+        assert!(zcode.session_source.is_none());
+        assert!(zcode.history_source.is_none());
+        assert!(!zcode.has_usage);
+        assert!(!zcode.has_headless);
+        assert_eq!(zcode.executable_names, &["zcode"]);
+        assert_eq!(zcode.display_name, "ZCode");
+        assert!(!all_identities()
+            .iter()
+            .filter(|row| row.session_source.is_some())
+            .any(|row| row.id == AgentId::Zcode));
+        assert!(!all_identities()
+            .iter()
+            .filter(|row| row.history_source.is_some())
+            .any(|row| row.id == AgentId::Zcode));
     }
 
     #[test]
@@ -379,6 +414,11 @@ mod tests {
             AgentId::Pi.identity().headless_image_paste,
             TypedAbsolutePath
         );
+        // ZCode 官方贴图不是 @路径；这里只登记未识别命令回退。
+        assert_eq!(
+            AgentId::Zcode.identity().headless_image_paste,
+            AtFileMention
+        );
         assert_eq!(
             headless_image_paste_kind(None),
             HeadlessImagePasteKind::AtFileMention
@@ -408,6 +448,14 @@ mod tests {
         assert_eq!(
             identity_by_executable_name("agent").map(|r| r.id),
             Some(AgentId::Cursor)
+        );
+        assert_eq!(
+            identity_by_executable_name("zcode").map(|r| r.id),
+            Some(AgentId::Zcode)
+        );
+        assert_eq!(
+            identity_by_executable_name("/usr/local/bin/zcode.exe").map(|r| r.id),
+            Some(AgentId::Zcode)
         );
         assert!(identity_by_executable_name("node").is_none());
         assert!(identity_by_executable_name("bash").is_none());

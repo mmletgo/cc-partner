@@ -218,6 +218,32 @@
       },
       "capabilityEvidenceIds": {},
       "evidenceIds": []
+    },
+    {
+      "target": "zcode",
+      "adapterSchemaVersion": 1,
+      "minTestedVersion": null,
+      "currentTestedVersion": null,
+      "guardedMajor": 0,
+      "executableProbe": {
+        "commandNames": ["zcode"],
+        "versionArgs": ["--version"],
+        "versionPrefix": null,
+        "versionSuffix": null,
+        "helpFingerprint": null
+      },
+      "activationCommandFingerprints": {},
+      "capabilities": {
+        "scanInstruction": "readOnly",
+        "renderInstruction": "blocked",
+        "scanPortableAssets": "readOnly",
+        "renderPortableAssets": "blocked",
+        "activatePackage": "blocked",
+        "deactivatePackage": "blocked",
+        "liveReload": "blocked"
+      },
+      "capabilityEvidenceIds": {},
+      "evidenceIds": []
     }
   ],
   "hookMappings": []

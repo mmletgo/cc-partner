@@ -834,7 +834,8 @@ fn status_probe_uses_evaluate_target_support_not_raw_supported() {
             | crate::agent_hub::models::AgentTarget::Grok
             | crate::agent_hub::models::AgentTarget::Gemini
             | crate::agent_hub::models::AgentTarget::Cursor
-            | crate::agent_hub::models::AgentTarget::Pi => {
+            | crate::agent_hub::models::AgentTarget::Pi
+            | crate::agent_hub::models::AgentTarget::Zcode => {
                 assert!(
                     matches!(p.support.as_str(), "supported" | "scanOnly" | "unsupported"),
                     "unexpected support={} for {}",

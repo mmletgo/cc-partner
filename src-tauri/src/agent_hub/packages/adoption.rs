@@ -1376,9 +1376,11 @@ fn activator_for(
         AgentTarget::OpenCode => Box::new(OpenCodePackageActivator::new(runner)),
         // Grok/Gemini marketplace 激活未认证：走 OpenCode NativeVerify 骨架会误写 opencode 路径。
         // 此处仍返回 OpenCode activator 仅用于编译；build_plan 会被 support-manifest 挡成 scan-only。
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
-            Box::new(OpenCodePackageActivator::new(runner))
-        }
+        AgentTarget::Grok
+        | AgentTarget::Gemini
+        | AgentTarget::Cursor
+        | AgentTarget::Pi
+        | AgentTarget::Zcode => Box::new(OpenCodePackageActivator::new(runner)),
     }
 }
 
@@ -1435,22 +1437,24 @@ fn build_unblocked_plan(
             activation_required: false,
             target_binding_id: binding.id.clone(),
         },
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
-            ActivationPlan {
-                target,
-                package_root: pkg.package_root.clone(),
-                plugin_selector: String::new(),
-                marketplace_name: String::new(),
-                desired_enabled: binding.desired_enabled,
-                desired_presence: binding.desired_presence,
-                commands: vec![],
-                steps: vec![ActivationStep::NativeVerify],
-                blocked: true,
-                blocked_reason: Some("activate_package_unsupported_target".into()),
-                activation_required: false,
-                target_binding_id: binding.id.clone(),
-            }
-        }
+        AgentTarget::Grok
+        | AgentTarget::Gemini
+        | AgentTarget::Cursor
+        | AgentTarget::Pi
+        | AgentTarget::Zcode => ActivationPlan {
+            target,
+            package_root: pkg.package_root.clone(),
+            plugin_selector: String::new(),
+            marketplace_name: String::new(),
+            desired_enabled: binding.desired_enabled,
+            desired_presence: binding.desired_presence,
+            commands: vec![],
+            steps: vec![ActivationStep::NativeVerify],
+            blocked: true,
+            blocked_reason: Some("activate_package_unsupported_target".into()),
+            activation_required: false,
+            target_binding_id: binding.id.clone(),
+        },
         AgentTarget::Claude | AgentTarget::Codex => {
             let program = PathBuf::from(target.executable_name());
             let pkg_s = pkg.package_root.to_string_lossy().into_owned();
@@ -1626,7 +1630,11 @@ fn post_activate_discovery_gate(
                 return Err("post_activate_opencode_not_present".into());
             }
         }
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
+        AgentTarget::Grok
+        | AgentTarget::Gemini
+        | AgentTarget::Cursor
+        | AgentTarget::Pi
+        | AgentTarget::Zcode => {
             return Err("post_activate_unsupported_target".into());
         }
         AgentTarget::Claude | AgentTarget::Codex => {
@@ -1820,22 +1828,24 @@ fn build_reverse_plan(
                 target_binding_id: binding.id.clone(),
             }
         }
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
-            ActivationPlan {
-                target,
-                package_root: pkg.package_root.clone(),
-                plugin_selector: String::new(),
-                marketplace_name: String::new(),
-                desired_enabled: false,
-                desired_presence: binding.desired_presence,
-                commands: vec![],
-                steps: vec![ActivationStep::NativeVerify],
-                blocked: true,
-                blocked_reason: Some("deactivate_package_unsupported_target".into()),
-                activation_required: false,
-                target_binding_id: binding.id.clone(),
-            }
-        }
+        AgentTarget::Grok
+        | AgentTarget::Gemini
+        | AgentTarget::Cursor
+        | AgentTarget::Pi
+        | AgentTarget::Zcode => ActivationPlan {
+            target,
+            package_root: pkg.package_root.clone(),
+            plugin_selector: String::new(),
+            marketplace_name: String::new(),
+            desired_enabled: false,
+            desired_presence: binding.desired_presence,
+            commands: vec![],
+            steps: vec![ActivationStep::NativeVerify],
+            blocked: true,
+            blocked_reason: Some("deactivate_package_unsupported_target".into()),
+            activation_required: false,
+            target_binding_id: binding.id.clone(),
+        },
     }
 }
 

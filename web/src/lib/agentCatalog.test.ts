@@ -11,8 +11,8 @@ import {
 } from './agentCatalog';
 
 describe('agentCatalog', () => {
-  it('registers seven product identities', () => {
-    expect(allAgentIdentities()).toHaveLength(7);
+  it('registers eight product identities', () => {
+    expect(allAgentIdentities()).toHaveLength(8);
     expect(allHubTargets()).toEqual([
       'claude',
       'codex',
@@ -21,6 +21,7 @@ describe('agentCatalog', () => {
       'gemini',
       'cursor',
       'pi',
+      'zcode',
     ]);
     expect(allSessionSources()).toEqual([
       'claude',
@@ -45,6 +46,8 @@ describe('agentCatalog', () => {
   it('accepts grok and gemini as hub targets', () => {
     expect(parseAgentId('grok')).toBe('grok');
     expect(isHubTarget('gemini')).toBe(true);
+    expect(isHubTarget('zcode')).toBe(true);
+    expect(parseAgentId('zcode')).toBe('zcode');
     expect(isHubTarget('genericTerminal')).toBe(false);
   });
 
@@ -77,6 +80,7 @@ describe('agentCatalog', () => {
       gemini: 'atFileMention',
       cursor: 'atFileMention',
       pi: 'typedAbsolutePath',
+      zcode: 'atFileMention',
     });
   });
 });
