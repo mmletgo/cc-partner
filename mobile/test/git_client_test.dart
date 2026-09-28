@@ -12,11 +12,28 @@ void main() {
   Map<String, dynamic> lastBody = const {};
   // /git/commits 的响应体；后端返回裸数组，测试里也覆盖包一层 commits 的形态。
   Object commitsResponse = const [];
+  // /worktrees/list 的响应体。真实后端返回裸数组；旧假数据包一层 worktrees。
+  Object worktreesResponse = const [
+    {
+      'id': 'wt-main',
+      'name': 'main',
+      'branch': 'main',
+      'isMain': true,
+    },
+  ];
 
   setUp(() async {
     lastPath = null;
     lastBody = const {};
     commitsResponse = const [];
+    worktreesResponse = const [
+      {
+        'id': 'wt-main',
+        'name': 'main',
+        'branch': 'main',
+        'isMain': true,
+      },
+    ];
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     baseUrl = 'http://127.0.0.1:${server.port}';
     server.listen((request) async {
@@ -27,19 +44,7 @@ void main() {
       }
       request.response.headers.contentType = ContentType.json;
       if (request.uri.path.endsWith('/worktrees/list')) {
-        request.response.write(
-          jsonEncode({
-            'ok': true,
-            'worktrees': [
-              {
-                'id': 'wt-main',
-                'name': 'main',
-                'branch': 'main',
-                'isMain': true,
-              },
-            ],
-          }),
-        );
+        request.response.write(jsonEncode(worktreesResponse));
       } else if (request.uri.path.endsWith('/worktrees/create')) {
         request.response.write(
           jsonEncode({
@@ -67,9 +72,33 @@ void main() {
     addTearDown(http.close);
     final git = GitClient(http, baseUrl);
     final body = await git.listWorktrees('p1');
-    expect(body['ok'], isTrue);
     expect(lastPath, '/api/mobile/workbench/worktrees/list');
     expect(lastBody['includeGitStatus'], isFalse);
+    // 后端返回裸数组；客户端归一成 {worktrees: [...]}，供壳层 asObjectList 使用。
+    final trees = body['worktrees'] as List;
+    expect(trees, hasLength(1));
+    expect((trees.first as Map)['id'], 'wt-main');
+  });
+
+  test('lists worktrees wrapped in an object', () async {
+    worktreesResponse = {
+      'ok': true,
+      'worktrees': [
+        {
+          'id': 'wt-main',
+          'name': 'main',
+          'branch': 'main',
+          'isMain': true,
+        },
+      ],
+    };
+    final http = LanHttpClient();
+    addTearDown(http.close);
+    final git = GitClient(http, baseUrl);
+    final body = await git.listWorktrees('p1');
+    expect(body['ok'], isTrue);
+    final trees = body['worktrees'] as List;
+    expect((trees.first as Map)['id'], 'wt-main');
   });
 
   test('lists worktrees with git status when requested', () async {

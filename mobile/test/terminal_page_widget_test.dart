@@ -12,6 +12,8 @@ import 'package:cc_partner_mobile/projects/client.dart';
 import 'package:cc_partner_mobile/sessions/client.dart';
 import 'package:cc_partner_mobile/terminal/controller.dart';
 import 'package:cc_partner_mobile/ui/terminal_page.dart';
+import 'package:cc_partner_mobile/ui/workbench_shell.dart';
+import 'package:cc_partner_mobile/workbench/nav.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -766,6 +768,48 @@ Future<void> _pump(
   await tester.pump(const Duration(milliseconds: 150));
 }
 
+/// 复刻工作台壳层：全屏回调会 setState 收起标题栏。用来确认这次重建不会把全屏层拆掉。
+class _FullscreenShellHost extends StatefulWidget {
+  const _FullscreenShellHost({required this.sessions});
+
+  final SessionsClient sessions;
+
+  @override
+  State<_FullscreenShellHost> createState() => _FullscreenShellHostState();
+}
+
+class _FullscreenShellHostState extends State<_FullscreenShellHost> {
+  bool _fullscreen = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return WorkbenchShell(
+      mode: WorkbenchNavMode.project,
+      panel: WorkbenchPanel.terminal,
+      projectLabel: 'demo',
+      onSelect: (_) {},
+      hideAppBar: _fullscreen,
+      hideWorktreeStrip: _fullscreen,
+      worktreeStrip: const Text('wt-strip'),
+      child: TerminalPage(
+        key: const ValueKey('terminal'),
+        book: _book(),
+        http: LanHttpClient(),
+        project: _project,
+        worktreeId: 'w1',
+        sessionsClient: widget.sessions,
+        backgroundTimersDisabled: true,
+        onFullscreenChanged: (fullscreen) {
+          if (!mounted) {
+            return;
+          }
+          setState(() => _fullscreen = fullscreen);
+        },
+      ),
+    );
+  }
+}
+
 void main() {
   testWidgets('会话 chip 关闭：关闭非当前会话仅移除 chip，不触发切换', (tester) async {
     final sessions = _FakeSessions([_s('s0'), _s('s1', status: 'exited')]);
@@ -797,6 +841,90 @@ void main() {
 
     expect(sessions.closedIds, ['s0']);
     expect(sessions.replayIds.contains('s1'), isTrue);
+  });
+
+  testWidgets('全屏覆盖：手机尺寸下终端画面占屏幕大部分且按钮在屏内', (tester) async {
+    tester.view.physicalSize = const Size(402 * 3, 874 * 3);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final sessions = _FakeSessions([_s('s0')]);
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        appBar: AppBar(title: const Text('项目标题')),
+        body: TerminalPage(
+          book: _book(),
+          http: LanHttpClient(),
+          project: _project,
+          worktreeId: 'w1',
+          sessionsClient: sessions,
+          backgroundTimersDisabled: true,
+        ),
+      ),
+    ));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+
+    final screen = tester.getSize(find.byType(Scaffold));
+    final fullscreenButton = find.byTooltip('全屏');
+    final buttonTopLeft = tester.getTopLeft(fullscreenButton);
+    expect(buttonTopLeft.dx, greaterThanOrEqualTo(0));
+    expect(buttonTopLeft.dx + 24, lessThan(screen.width));
+
+    final before = tester.getSize(find.byKey(const Key('terminal-view')));
+    final resizeBefore = sessions.resizeCalls.length;
+    await tester.tap(fullscreenButton);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+
+    expect(find.byKey(const Key('terminal-fullscreen-overlay')), findsOneWidget);
+    final overlay = tester.getSize(find.byKey(const Key('terminal-fullscreen-overlay')));
+    final after = tester.getSize(find.byKey(const Key('terminal-view')));
+    expect(overlay.width, screen.width);
+    expect(overlay.height, screen.height);
+    expect(after.height, greaterThan(before.height));
+    expect(
+      after.height,
+      greaterThan(screen.height * 0.62),
+      reason: '全屏后终端画面应盖住标题栏并占屏幕大部分，'
+          '画面 ${after.height.toStringAsFixed(0)} / 屏幕 ${screen.height.toStringAsFixed(0)}，'
+          '全屏前 ${before.height.toStringAsFixed(0)}',
+    );
+    // 标题栏还在树里，但必须被全屏层盖住：全屏层从屏幕顶开始。
+    expect(tester.getTopLeft(find.byKey(const Key('terminal-fullscreen-overlay'))), Offset.zero);
+    expect(sessions.resizeCalls.length, greaterThan(resizeBefore));
+    final fullscreenResize = sessions.resizeCalls.last;
+    expect(
+      fullscreenResize.$3,
+      greaterThan(20),
+      reason: '全屏后必须把更大的行数交给远端 PTY，实际 rows=${fullscreenResize.$3}',
+    );
+  });
+
+  testWidgets('壳层重建后全屏层仍盖住标题栏', (tester) async {
+    tester.view.physicalSize = const Size(402 * 3, 874 * 3);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final sessions = _FakeSessions([_s('s0')]);
+    await tester.pumpWidget(MaterialApp(home: _FullscreenShellHost(sessions: sessions)));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(find.text('demo'), findsWidgets);
+    await tester.tap(find.byTooltip('全屏'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(find.byKey(const Key('terminal-fullscreen-overlay')), findsOneWidget);
+    expect(find.byType(AppBar), findsNothing);
+    final screen = tester.getSize(find.byType(Scaffold).first);
+    final terminal = tester.getSize(find.byKey(const Key('terminal-view')));
+    expect(terminal.height, greaterThan(screen.height * 0.62));
   });
 
   testWidgets('全屏：隐藏 chip 条并回调壳层，退出恢复', (tester) async {

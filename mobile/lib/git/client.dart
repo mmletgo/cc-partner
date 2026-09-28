@@ -185,14 +185,34 @@ class GitClient {
   /// 列出项目 worktrees；includeGitStatus 控制是否附带运行期 Git 状态。
   ///
   /// 默认 false 与既有调用方（workbench_home 等）行为一致；Git 面板传 true。
+  ///
+  /// Business Logic（为什么需要这个函数）:
+  ///   终端壳层、Git 页和 worktrees 页都靠这份列表决定当前工作区。解析失败时
+  ///   壳层会把整页标成离线，终端上方一直挂着错误，全屏也盖不住这条状态。
+  ///
+  /// Code Logic（这个函数做什么）:
+  ///   POST `/api/mobile/workbench/worktrees/list`。后端返回裸数组（与 web
+  ///   `workbenchWorktreesDecoder` 一致）；旧假数据仍可能包一层 `{worktrees}`。
+  ///   两种都归一成带 `worktrees` 键的对象，供调用方 `asObjectList` 使用。
   Future<Map<String, dynamic>> listWorktrees(
     String projectId, {
     bool includeGitStatus = false,
-  }) {
-    return _http.postJson(baseUrl, '/api/mobile/workbench/worktrees/list', {
-      'projectId': projectId,
-      'includeGitStatus': includeGitStatus,
-    });
+  }) async {
+    final decoded = await _http.postDynamic(
+      baseUrl,
+      '/api/mobile/workbench/worktrees/list',
+      {
+        'projectId': projectId,
+        'includeGitStatus': includeGitStatus,
+      },
+    );
+    if (decoded is List) {
+      return <String, dynamic>{'worktrees': decoded};
+    }
+    if (decoded is Map) {
+      return Map<String, dynamic>.from(decoded);
+    }
+    throw const FormatException('expected JSON object');
   }
 
   /// 当前 worktree 最近提交，对齐 web `git.listCommits`。

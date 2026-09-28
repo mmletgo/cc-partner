@@ -167,10 +167,12 @@ export default defineConfig({
   },
   server: {
     // 桌面 Tauri devUrl 与 backend 开发态 /mobile 反代共用本端口。
-    // 必须同时可被 IPv4 loopback 访问：macOS 上默认只绑 [::1] 时，
-    // backend 代理到 http://127.0.0.1:5173 会失败并静默回落 dist。
-    // host:true → 0.0.0.0（含 127.0.0.1）；手机扫码仍走 backend 端口 /mobile。
-    host: true,
+    // 显式绑 IPv4 loopback：macOS 上默认只绑 [::1] 时，backend 代理到
+    // http://127.0.0.1:5173 会失败并静默回落 dist，所以这里必须是 127.0.0.1。
+    // 不再绑 0.0.0.0（曾用 host:true）：dev server 会把完整源码暴露给
+    // 局域网/公网（2026-09 发现外部 IP 对 5173 连续探测 signer.js/.wasm）。
+    // 手机扫码仍走 backend 端口 /mobile，无需直连 5173。
+    host: '127.0.0.1',
     port: 5173,
     strictPort: true,
   },

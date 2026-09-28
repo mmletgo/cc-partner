@@ -108,16 +108,22 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// Files 草稿控制器（测试可注入）：dirty 预检、清快照与 FilesPage 共用同一实例。
   late final FileWorkspaceController _files =
       widget.filesWorkspace ?? FileWorkspaceController();
-  late final GitClient _gitClient =
-      GitClient(widget.http, widget.book.active!.baseUrl);
+  late final GitClient _gitClient = GitClient(
+    widget.http,
+    widget.book.active!.baseUrl,
+  );
 
   /// 壳层共享的会话客户端：终端 unfocus 与创建 worktree 自动开窗共用同一实例。
-  late final SessionsClient _sessionsClient =
-      SessionsClient(widget.http, widget.book.active!.baseUrl);
+  late final SessionsClient _sessionsClient = SessionsClient(
+    widget.http,
+    widget.book.active!.baseUrl,
+  );
 
   /// 壳层共享的 Attention 客户端：徽章轮询与 needsInput 自动已读共用同一实例。
-  late final AttentionClient _attentionClient =
-      AttentionClient(widget.http, widget.book.active!.baseUrl);
+  late final AttentionClient _attentionClient = AttentionClient(
+    widget.http,
+    widget.book.active!.baseUrl,
+  );
 
   /// 「待处理」未读徽章（与列表同口径：只统计今天未读）。
   int _attentionUnread = 0;
@@ -328,7 +334,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     if (id == null || id.isEmpty) {
       return;
     }
-    unawaited(_sessionsClient.focus(id, streamActive: false).catchError((_) {}));
+    unawaited(
+      _sessionsClient.focus(id, streamActive: false).catchError((_) {}),
+    );
   }
 
   /// Business Logic: 进入工作台时 Drawer「待处理」要显示未读数，且数字必须与列表一致。
@@ -481,7 +489,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   Future<void> _restoreLastLocation() async {
     final location = _server.lastLocation;
     try {
-      final projects = await ProjectsClient(widget.http, _server.baseUrl).listRecent();
+      final projects = await ProjectsClient(
+        widget.http,
+        _server.baseUrl,
+      ).listRecent();
       if (!mounted) {
         return;
       }
@@ -501,9 +512,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         resumeWorktreeId: restore.worktreeId,
       );
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已恢复上次的工作位置')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('已恢复上次的工作位置')));
       }
     } catch (error) {
       if (!mounted) {
@@ -533,7 +544,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     _worktreesLoadSeq += 1;
     final seq = _worktreesLoadSeq;
     try {
-      final body = await _gitClient.listWorktrees(project.id, includeGitStatus: true);
+      final body = await _gitClient.listWorktrees(
+        project.id,
+        includeGitStatus: true,
+      );
       if (seq != _worktreesLoadSeq || !mounted) {
         return;
       }
@@ -564,8 +578,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
       final message = error.toString();
       setState(() {
         _projectDetailStatus = _ProjectDetailStatus.error;
-        _projectDetailError =
-            message.length > 160 ? '${message.substring(0, 160)}…' : message;
+        _projectDetailError = message.length > 160
+            ? '${message.substring(0, 160)}…'
+            : message;
       });
     }
   }
@@ -577,7 +592,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// 触发一次当前项目的 _loadWorktrees（该请求成功后 prev 已是 online，不会递归）。
   void _noteConnectionSuccess() {
     final prev = _connection;
-    final next = WorkbenchConnectionState.online(lastSucceededAt: DateTime.now());
+    final next = WorkbenchConnectionState.online(
+      lastSucceededAt: DateTime.now(),
+    );
     final recovered = shouldRefreshWorkbenchOnReconnect(prev, next);
     setState(() => _connection = next);
     if (recovered) {
@@ -625,8 +642,14 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         title: const Text('未保存的文件'),
         content: const Text('切换工作区前请保存或丢弃当前文件。'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, 'cancel'), child: const Text('取消')),
-          TextButton(onPressed: () => Navigator.pop(context, 'discard'), child: const Text('丢弃')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'cancel'),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'discard'),
+            child: const Text('丢弃'),
+          ),
         ],
       ),
     );
@@ -762,9 +785,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         _stripMutation.actionLocked ||
         _externalWorktreeOpBusy) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('正在处理 worktree 操作，请稍候')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('正在处理 worktree 操作，请稍候')));
       }
       return;
     }
@@ -783,7 +806,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     _scheduleSaveLastLocation();
     final project = _project;
     if (project != null) {
-      unawaited(_loadWorktrees(project, projectChanged: false, resumeWorktreeId: id));
+      unawaited(
+        _loadWorktrees(project, projectChanged: false, resumeWorktreeId: id),
+      );
     }
   }
 
@@ -820,7 +845,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         title: const Text('移除 worktree'),
         content: Text(worktreeStripRemoveConfirmText(name)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
           FilledButton(
             style: FilledButton.styleFrom(
               backgroundColor: Theme.of(context).colorScheme.error,
@@ -938,7 +966,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// Business Logic: 切换条要能就地新建 worktree 并自动开绑定终端（对齐 web MobileWorktreeTabs
@@ -1090,7 +1120,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         // backgroundSessions 跨项目保留输出缓冲），页面经 didUpdateWidget 自行
         // 断开旧上下文并按新项目重新 boot，切回原项目时命中缓冲不清屏不重放。
         _visitedPanels.removeAll(
-          kProjectBoundPanels.where((panel) => panel != WorkbenchPanel.terminal),
+          kProjectBoundPanels.where(
+            (panel) => panel != WorkbenchPanel.terminal,
+          ),
         );
       }
       _gotoPanel(gated);
@@ -1109,7 +1141,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// Code Logic: 仅在有激活项目且非 loading 中时响应；置 loading 清错误后重跑加载。
   void _retryProjectDetail() {
     final project = _project;
-    if (project == null || _projectDetailStatus == _ProjectDetailStatus.loading) {
+    if (project == null ||
+        _projectDetailStatus == _ProjectDetailStatus.loading) {
       return;
     }
     setState(() {
@@ -1137,7 +1170,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   void _select(WorkbenchPanel next) {
     _attentionFocusTaskId = null;
     _attentionFocusOutboxId = null;
-    final panel = selectPanelForProject(hasProject: _project != null, next: next);
+    final panel = selectPanelForProject(
+      hasProject: _project != null,
+      next: next,
+    );
     final gated = resolvePanelForFeatures(
       panel: panel,
       hasProject: _project != null,
@@ -1192,7 +1228,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
           activeProjectId: _project?.id,
           // worktrees 详情 error 态：项目列表上方错误条 + 重试（对齐 web
           // projectDetailRetry；仅当前项目可见）。
-          detailError: _project != null &&
+          detailError:
+              _project != null &&
                   _projectDetailStatus == _ProjectDetailStatus.error
               ? (_projectDetailError ?? '加载失败')
               : null,
@@ -1202,26 +1239,30 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         return AttentionPage(
           book: widget.book,
           http: widget.http,
-          onNavigate: (
-            project,
-            panel,
-            sessionId, {
-            String? focusTaskId,
-            String? focusOutboxId,
-          }) {
-            setState(() {
-              _attentionFocusTaskId = focusTaskId;
-              _attentionFocusOutboxId = focusOutboxId;
-            });
-            _openProject(
-              project,
-              panel: parseWorkbenchPanel(panel) ?? WorkbenchPanel.terminal,
-              sessionId: sessionId,
-            );
-          },
+          onNavigate:
+              (
+                project,
+                panel,
+                sessionId, {
+                String? focusTaskId,
+                String? focusOutboxId,
+              }) {
+                setState(() {
+                  _attentionFocusTaskId = focusTaskId;
+                  _attentionFocusOutboxId = focusOutboxId;
+                });
+                _openProject(
+                  project,
+                  panel: parseWorkbenchPanel(panel) ?? WorkbenchPanel.terminal,
+                  sessionId: sessionId,
+                );
+              },
           onItemsChanged: (items) {
             setState(() {
-              _attentionUnread = countTodayUnreadAttentionItems(items, DateTime.now());
+              _attentionUnread = countTodayUnreadAttentionItems(
+                items,
+                DateTime.now(),
+              );
             });
           },
         );
@@ -1247,6 +1288,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
           worktreeInfo: worktreeInfo,
           worktreePath: worktreeInfo?['path'] as String?,
           onFullscreenChanged: (fullscreen) {
+            if (!mounted) {
+              return;
+            }
             setState(() => _terminalFullscreen = fullscreen);
           },
           onWorktreesMutated: _handleWorktreesMutated,
@@ -1335,7 +1379,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   /// （接缝契约：B8 放宽后 onFocusSession 允许单边为空，必须容忍）。
   /// Code Logic: dirty guard 不过则放弃；有 worktreeId 才 resume；有 sessionId 才切换；
   /// 双空直接忽略，不 crash、不丢当前上下文。
-  Future<void> _focusAutomationSession(String? worktreeId, String? sessionId) async {
+  Future<void> _focusAutomationSession(
+    String? worktreeId,
+    String? sessionId,
+  ) async {
     final project = _project;
     if (project == null) {
       return;
@@ -1355,11 +1402,13 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
         _sessionId = sessionId;
       }
     });
-    unawaited(_loadWorktrees(
-      project,
-      projectChanged: false,
-      resumeWorktreeId: worktreeId,
-    ));
+    unawaited(
+      _loadWorktrees(
+        project,
+        projectChanged: false,
+        resumeWorktreeId: worktreeId,
+      ),
+    );
   }
 
   /// Business Logic: Git 页 hook AI 修复会在 owning device 新建绑定 worktree 的终端，
@@ -1404,9 +1453,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
   Future<void> _focusMissingAttentionItem() async {
     setState(() => _gotoPanel(WorkbenchPanel.attention));
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('该事项已解决或已变化')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('该事项已解决或已变化')));
     }
     await _refreshAttentionUnread();
   }
@@ -1458,7 +1507,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome>
                   unawaited(_selectWorktree(tree));
                 },
                 onRemove: _removeTreeFromStrip,
-                busy: _removingTree || _creatingTree || _stripMutation.actionLocked,
+                busy:
+                    _removingTree ||
+                    _creatingTree ||
+                    _stripMutation.actionLocked,
                 onCreate: _createTreeFromStrip,
                 creating: _creatingTree,
                 mutationError: _stripMutation.phase == GitMutationPhase.unknown

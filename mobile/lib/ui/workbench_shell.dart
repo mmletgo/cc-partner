@@ -15,18 +15,23 @@ enum WorkbenchConnectionKind { online, reconnecting, offline }
 /// Code Logic: 不可变值对象；offline 在 web 基础上额外保留 cachedSince，
 /// 供「缓存于 HH:mm」提示（web 的 offline 无缓存时间，这里按移动端壳层需要保留）。
 class WorkbenchConnectionState {
-  const WorkbenchConnectionState.online({required DateTime this.lastSucceededAt})
-      : kind = WorkbenchConnectionKind.online,
-        cachedSince = null,
-        lastError = null;
+  const WorkbenchConnectionState.online({
+    required DateTime this.lastSucceededAt,
+  }) : kind = WorkbenchConnectionKind.online,
+       cachedSince = null,
+       lastError = null;
 
-  const WorkbenchConnectionState.reconnecting({this.cachedSince, this.lastError})
-      : kind = WorkbenchConnectionKind.reconnecting,
-        lastSucceededAt = null;
+  const WorkbenchConnectionState.reconnecting({
+    this.cachedSince,
+    this.lastError,
+  }) : kind = WorkbenchConnectionKind.reconnecting,
+       lastSucceededAt = null;
 
-  const WorkbenchConnectionState.offline({required this.lastError, this.cachedSince})
-      : kind = WorkbenchConnectionKind.offline,
-        lastSucceededAt = null;
+  const WorkbenchConnectionState.offline({
+    required this.lastError,
+    this.cachedSince,
+  }) : kind = WorkbenchConnectionKind.offline,
+       lastSucceededAt = null;
 
   final WorkbenchConnectionKind kind;
 
@@ -50,8 +55,13 @@ WorkbenchConnectionState markWorkbenchConnectionFailure(
 ) {
   final cachedSince = prev == null
       ? null
-      : (prev.kind == WorkbenchConnectionKind.online ? prev.lastSucceededAt : prev.cachedSince);
-  return WorkbenchConnectionState.offline(lastError: lastError, cachedSince: cachedSince);
+      : (prev.kind == WorkbenchConnectionKind.online
+            ? prev.lastSucceededAt
+            : prev.cachedSince);
+  return WorkbenchConnectionState.offline(
+    lastError: lastError,
+    cachedSince: cachedSince,
+  );
 }
 
 /// Business Logic: 从 offline/reconnecting 恢复 online 时要刷新当前面板权威数据
@@ -243,19 +253,30 @@ class WorkbenchShell extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                   if (subtitle != null)
-                    Text(subtitle!, style: Theme.of(context).textTheme.bodySmall),
+                    Text(
+                      subtitle!,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                 ],
               ),
             )
           : null,
-      body: showAppBar ? body : SafeArea(child: body),
+      // body 的父级类型必须保持不变。全屏时如果从 Column 换成 SafeArea，
+      // 终端页会被拆掉重建，dispose 里又把全屏关掉，看起来就像按钮没反应。
+      body: SafeArea(
+        top: !showAppBar,
+        bottom: !showAppBar,
+        maintainBottomViewPadding: !showAppBar,
+        child: body,
+      ),
       drawer: Drawer(
         child: SafeArea(
           child: _DrawerOpenedProbe(
             onOpened: onDrawerOpened,
             child: ListView(
               children: [
-                if (mode == WorkbenchNavMode.project && onBackToProjects != null)
+                if (mode == WorkbenchNavMode.project &&
+                    onBackToProjects != null)
                   ListTile(
                     key: const Key('nav-back-projects'),
                     leading: const Icon(Icons.arrow_back),
@@ -314,8 +335,8 @@ class WorkbenchShell extends StatelessWidget {
     final pillText = connectionText == null
         ? null
         : (cachedAt == null
-            ? connectionText
-            : '$connectionText · 缓存于 ${formatWorkbenchCachedTime(cachedAt)}');
+              ? connectionText
+              : '$connectionText · 缓存于 ${formatWorkbenchCachedTime(cachedAt)}');
     final theme = Theme.of(context);
     Widget? errorLine;
     if (connection != null &&
@@ -326,7 +347,9 @@ class WorkbenchShell extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
         child: Text(
           '最后错误：${connection.lastError}',
-          style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.error,
+          ),
           overflow: TextOverflow.ellipsis,
         ),
       );
@@ -343,16 +366,24 @@ class WorkbenchShell extends StatelessWidget {
             children: [
               _statusPill(
                 context,
-                (worktreeLabel == null || worktreeLabel!.isEmpty) ? 'worktree' : worktreeLabel!,
+                (worktreeLabel == null || worktreeLabel!.isEmpty)
+                    ? 'worktree'
+                    : worktreeLabel!,
                 key: const Key('shell-status-worktree'),
               ),
               _statusPill(
                 context,
-                (sessionLabel == null || sessionLabel!.isEmpty) ? 'session' : sessionLabel!,
+                (sessionLabel == null || sessionLabel!.isEmpty)
+                    ? 'session'
+                    : sessionLabel!,
                 key: const Key('shell-status-session'),
               ),
               if (pillText != null)
-                _statusPill(context, pillText, key: const Key('shell-status-connection')),
+                _statusPill(
+                  context,
+                  pillText,
+                  key: const Key('shell-status-connection'),
+                ),
             ],
           ),
         ),
@@ -408,7 +439,9 @@ class WorkbenchShell extends StatelessWidget {
       ),
       child: Text(
         label,
-        style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onPrimary),
+        style: theme.textTheme.labelSmall?.copyWith(
+          color: theme.colorScheme.onPrimary,
+        ),
       ),
     );
   }

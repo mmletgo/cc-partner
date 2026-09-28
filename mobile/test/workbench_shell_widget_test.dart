@@ -77,6 +77,10 @@ class _RoutingHttp extends LanHttpClient {
 
   @override
   Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    // listWorktrees 走 postDynamic（后端裸数组）；测试仍由 postJson 提供包裹对象。
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return postJson(baseUrl, path, body);
+    }
     // mutation-operation 走 postDynamic（宽容解析通道）。
     if (path == '/api/mobile/workbench/worktrees/mutation-operation') {
       return {
@@ -134,6 +138,14 @@ class _WorktreeSeqHttp extends LanHttpClient {
           {'id': 'p1', 'name': 'demo', 'path': '/repo', 'kind': 'local'},
         ],
       };
+    }
+    throw LanHttpException(404, 'not found: $path');
+  }
+
+  @override
+  Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return postJson(baseUrl, path, body);
     }
     throw LanHttpException(404, 'not found: $path');
   }
@@ -214,6 +226,10 @@ class _PanelHttp extends LanHttpClient {
 
   @override
   Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    // listWorktrees 走 postDynamic（后端裸数组）；测试仍由 postJson 提供包裹对象。
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return postJson(baseUrl, path, body);
+    }
     if (path == '/api/mobile/workbench/sessions/list') {
       sessionsListCalls += 1;
       return [
@@ -340,6 +356,10 @@ class _CtxHttp extends LanHttpClient {
 
   @override
   Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    // listWorktrees 走 postDynamic（后端裸数组）；测试仍由 postJson 提供包裹对象。
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return postJson(baseUrl, path, body);
+    }
     if (path == '/api/mobile/workbench/sessions/list') {
       sessionsListCalls += 1;
       return [
@@ -462,6 +482,10 @@ class _WorktreesMutationHttp extends LanHttpClient {
 
   @override
   Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    // listWorktrees 走 postDynamic（后端裸数组）；测试仍由 postJson 提供包裹对象。
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return postJson(baseUrl, path, body);
+    }
     if (path == '/api/mobile/workbench/sessions/list') {
       sessionsListCalls += 1;
       return [
@@ -572,6 +596,10 @@ class _AutoReadHttp extends LanHttpClient {
 
   @override
   Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    // listWorktrees 走 postDynamic（后端裸数组）；测试仍由 postJson 提供包裹对象。
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return postJson(baseUrl, path, body);
+    }
     if (path == '/api/mobile/workbench/sessions/list') {
       return [
         {'id': 's1', 'projectId': 'p1', 'name': 's1', 'status': 'running', 'worktreeId': 'wt-main'},
@@ -674,6 +702,10 @@ class _TerminalMergeHttp extends LanHttpClient {
 
   @override
   Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    // listWorktrees 走 postDynamic（后端裸数组）；测试仍由 postJson 提供包裹对象。
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return postJson(baseUrl, path, body);
+    }
     if (path == '/api/mobile/workbench/sessions/list') {
       return [
         {'id': 's1', 'projectId': 'p1', 'name': 's1', 'status': 'running', 'worktreeId': 'wt-1'},
@@ -786,6 +818,10 @@ class _GitMutationShellHttp extends LanHttpClient {
 
   @override
   Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    // listWorktrees 走 postDynamic（后端裸数组）；测试仍由 postJson 提供包裹对象。
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return postJson(baseUrl, path, body);
+    }
     if (path == '/api/mobile/workbench/sessions/list') {
       sessionsListCalls += 1;
       return [
@@ -914,6 +950,10 @@ class _CrossProjectHttp extends LanHttpClient {
 
   @override
   Future<dynamic> postDynamic(String baseUrl, String path, Map<String, dynamic> body) async {
+    // listWorktrees 走 postDynamic（后端裸数组）；测试仍由 postJson 提供包裹对象。
+    if (path == '/api/mobile/workbench/worktrees/list') {
+      return postJson(baseUrl, path, body);
+    }
     if (path == '/api/mobile/workbench/sessions/list') {
       final projectId = body['projectId'] as String? ?? 'p1';
       listedProjectIds.add(projectId);

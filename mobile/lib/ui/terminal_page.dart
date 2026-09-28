@@ -51,8 +51,8 @@ class _MountedSession {
     this.sessionId, {
     required this.projectId,
     required void Function(String) onOutput,
-  })  : policy = TerminalController(sessionId: sessionId),
-        terminal = Terminal(maxLines: 5000, onOutput: onOutput);
+  }) : policy = TerminalController(sessionId: sessionId),
+       terminal = Terminal(maxLines: 5000, onOutput: onOutput);
 
   /// 会话 id（与 policy.sessionId 一致，供 LRU 键与日志使用）。
   final String sessionId;
@@ -98,7 +98,8 @@ class _MountedSession {
   /// Code Logic: 在途标志复用 [hydrating]；events 循环写 chunk 前检查该标志，在途则
   /// 追加到此列表而不写 terminal；快照返回后由页面按序补写「seq > 快照 lastSeq 且
   /// owner 一致」的 chunk，失败/切走路径全部按序补写。
-  final List<(int?, String?, String)> heldLiveChunks = <(int?, String?, String)>[];
+  final List<(int?, String?, String)> heldLiveChunks =
+      <(int?, String?, String)>[];
 }
 
 /// 局域网远端项目终端页。
@@ -208,7 +209,8 @@ class TerminalPage extends StatefulWidget {
   State<TerminalPage> createState() => _TerminalPageState();
 }
 
-class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver {
+class _TerminalPageState extends State<TerminalPage>
+    with WidgetsBindingObserver {
   late final SessionsClient _sessions;
   late final PromptsClient _prompts;
   late final GitClient _git;
@@ -261,9 +263,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   final GitMutationTracker _commitMutation = GitMutationTracker();
   final GitMutationTracker _mergeMutation = GitMutationTracker();
 
-  // 全屏状态：隐藏 chip 条；顶部工具行保留全部动作入口（对齐 web
-  // getMobileTerminalChromeVisibility：全屏仅隐藏 windowTabs/worktreeStrip）。
+  // 全屏状态：终端列放到根 Overlay，盖住壳层标题栏（对齐 web position:fixed 100dvh）。
   bool _fullscreen = false;
+  final OverlayPortalController _fullscreenPortal = OverlayPortalController();
 
   // 收藏 Prompt 快捷输入：筛选条件跨打开保留（对齐 web 外层 state）。
   String _favoriteTag = _kFavoriteAllTag;
@@ -318,9 +320,13 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   /// 会话 chip 条的作用域列表：projectId + worktreeId 过滤（对齐 web scopedSessions）。
   List<SessionSummary> get _scopedSessions => _sessionList
-      .where((session) =>
-          sessionMatchesWorktree(session, widget.worktreeId,
-              projectId: widget.project.id))
+      .where(
+        (session) => sessionMatchesWorktree(
+          session,
+          widget.worktreeId,
+          projectId: widget.project.id,
+        ),
+      )
       .toList();
 
   /// 输入发送全路径门控（对齐 web inputEnabled + replayReady 门闩）：
@@ -356,11 +362,14 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _sessions = widget.sessionsClient ??
+    _sessions =
+        widget.sessionsClient ??
         SessionsClient(widget.http, widget.book.active!.baseUrl);
-    _prompts = widget.promptsClient ??
+    _prompts =
+        widget.promptsClient ??
         PromptsClient(widget.http, widget.book.active!.baseUrl);
-    _git = widget.gitClient ?? GitClient(widget.http, widget.book.active!.baseUrl);
+    _git =
+        widget.gitClient ?? GitClient(widget.http, widget.book.active!.baseUrl);
     // 划选操作条跟随 xterm 选区出现/消失。
     _view.addListener(_onViewSelectionChanged);
     _boot();
@@ -370,9 +379,15 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   void dispose() {
     _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
+    if (_fullscreenPortal.isShowing) {
+      _fullscreenPortal.hide();
+    }
     if (_fullscreen) {
-      // 销毁时若仍处于全屏必须通知壳层恢复，避免壳层停留在全屏布局。
-      widget.onFullscreenChanged?.call(false);
+      // 不能在 unmount 里直接 setState 壳层（树已锁）。下一帧再通知恢复标题栏。
+      final notify = widget.onFullscreenChanged;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        notify?.call(false);
+      });
     }
     // 销毁时对当前会话补发 unfocus：停止旧远端窗口正文流（对齐 web effect cleanup
     // 的 compare-and-clear；fire-and-forget，失败静默）。
@@ -466,8 +481,10 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     if (activeId != null && staleIds.contains(activeId)) {
       // 激活会话被外部删除：与关闭当前会话同款收敛路径。
       _sessionId = null;
-      final nextSession =
-          pickPreferredSession(sessions, worktreeId: widget.worktreeId);
+      final nextSession = pickPreferredSession(
+        sessions,
+        worktreeId: widget.worktreeId,
+      );
       if (nextSession != null) {
         await _activateSession(nextSession);
       } else {
@@ -554,8 +571,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     // 回前台跟随最新输出：划选/有选区时不抢滚动（对齐 web
     // shouldFollowMobileTerminalToLatest）。
     if (_active != null && _view.selection == null && !_selectionBarVisible) {
-      _resumePinUntil =
-          DateTime.now().add(const Duration(milliseconds: _kResumeFollowMs));
+      _resumePinUntil = DateTime.now().add(
+        const Duration(milliseconds: _kResumeFollowMs),
+      );
       _jumpToBottom();
     }
     // 回前台后静默刷新会话列表；刷新失败静默（_refreshSessions 自吞异常）。
@@ -609,7 +627,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// （对齐 web cleanup 里 sessions.focus(sessionId, false)；失败静默，
   /// 下一次 focus 会以当前窗口重新建立过滤目标）。
   void _unfocusSession(String sessionId) {
-    unawaited(_sessions.focus(sessionId, streamActive: false).catchError((_) {}));
+    unawaited(
+      _sessions.focus(sessionId, streamActive: false).catchError((_) {}),
+    );
   }
 
   /// 业务逻辑：切换会话时新画面来自目标会话的常驻缓冲——首次激活清屏 + replay 快照
@@ -623,7 +643,10 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   Future<void> _activateSession(SessionSummary session) async {
     final nextId = session.id;
     if (nextId.isEmpty ||
-        !shouldResetSessionView(currentSessionId: _sessionId, nextSessionId: nextId)) {
+        !shouldResetSessionView(
+          currentSessionId: _sessionId,
+          nextSessionId: nextId,
+        )) {
       // 同一会话重复点击不重复清屏重放。
       return;
     }
@@ -654,13 +677,14 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     var buffer = _mounted[nextId];
     final isNewBuffer = buffer == null;
     if (buffer == null) {
-      buffer = _MountedSession(
-        nextId,
-        projectId: widget.project.id,
-        onOutput: _handleTerminalOutput,
-      )
-        ..persistedCols = session.cols
-        ..persistedRows = session.rows;
+      buffer =
+          _MountedSession(
+              nextId,
+              projectId: widget.project.id,
+              onOutput: _handleTerminalOutput,
+            )
+            ..persistedCols = session.cols
+            ..persistedRows = session.rows;
       _mounted[nextId] = buffer;
       _evictMountedBuffers();
     } else {
@@ -758,7 +782,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     if (!mounted || _disposed) {
       return;
     }
-    if (status.state == TerminalInputLinkState.blocked && status.message != null) {
+    if (status.state == TerminalInputLinkState.blocked &&
+        status.message != null) {
       _setPanelError(status.message!);
       return;
     }
@@ -771,7 +796,11 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
 
   /// 面板常驻错误条：写入可读错误（对齐 web panelError = 前缀 + getErrorMessage，
   /// 被覆盖前常驻）；message 为 null 时清除。可选附带一个动作用户（如 hydration 重试）。
-  void _setPanelError(String? message, {String? actionLabel, VoidCallback? action}) {
+  void _setPanelError(
+    String? message, {
+    String? actionLabel,
+    VoidCallback? action,
+  }) {
     if (_disposed) {
       return;
     }
@@ -921,8 +950,10 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         });
         if (_sessionId == result.sessionId) {
           _sessionId = null;
-          final nextSession =
-              pickPreferredSession(next, worktreeId: widget.worktreeId);
+          final nextSession = pickPreferredSession(
+            next,
+            worktreeId: widget.worktreeId,
+          );
           if (nextSession != null) {
             await _activateSession(nextSession);
           } else {
@@ -972,8 +1003,10 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       });
       if (_sessionId == session.id) {
         _sessionId = null;
-        final nextSession =
-            pickPreferredSession(next, worktreeId: widget.worktreeId);
+        final nextSession = pickPreferredSession(
+          next,
+          worktreeId: widget.worktreeId,
+        );
         if (nextSession != null) {
           await _activateSession(nextSession);
         } else {
@@ -997,6 +1030,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       return;
     }
     final wasFullscreen = _fullscreen;
+    if (wasFullscreen && _fullscreenPortal.isShowing) {
+      _fullscreenPortal.hide();
+    }
     setState(() {
       _active = null;
       _status = '连接中';
@@ -1041,8 +1077,14 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         return;
       }
       final sessionId = buffer.sessionId;
-      final cols = clampTerminalDimension(buffer.terminal.viewWidth, kMinTerminalCols);
-      final rows = clampTerminalDimension(buffer.terminal.viewHeight, kMinTerminalRows);
+      final cols = clampTerminalDimension(
+        buffer.terminal.viewWidth,
+        kMinTerminalCols,
+      );
+      final rows = clampTerminalDimension(
+        buffer.terminal.viewHeight,
+        kMinTerminalRows,
+      );
       _lastMeasuredCols = cols;
       _lastMeasuredRows = rows;
       if (buffer.lastSentResize == null &&
@@ -1056,7 +1098,10 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         );
       }
       final last = buffer.lastSentResize;
-      if (last != null && last.$1 == sessionId && last.$2 == cols && last.$3 == rows) {
+      if (last != null &&
+          last.$1 == sessionId &&
+          last.$2 == cols &&
+          last.$3 == rows) {
         return;
       }
       _resizeDebounce?.cancel();
@@ -1065,20 +1110,24 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           return;
         }
         buffer.lastSentResize = (sessionId, cols, rows);
-        unawaited(_sessions.resize(sessionId, cols, rows).then<void>(
-          (_) {},
-          onError: (Object error) {
-            if (_disposed || !mounted) {
-              return;
-            }
-            // 会话已关闭（404/not-found 类）属预期：静默吞掉（对齐 web
-            // isExpectedClosedSessionError）；其余失败上屏常驻错误条。
-            if (_isClosedSessionError(error)) {
-              return;
-            }
-            _setPanelError('调整终端尺寸失败：$error');
-          },
-        ));
+        unawaited(
+          _sessions
+              .resize(sessionId, cols, rows)
+              .then<void>(
+                (_) {},
+                onError: (Object error) {
+                  if (_disposed || !mounted) {
+                    return;
+                  }
+                  // 会话已关闭（404/not-found 类）属预期：静默吞掉（对齐 web
+                  // isExpectedClosedSessionError）；其余失败上屏常驻错误条。
+                  if (_isClosedSessionError(error)) {
+                    return;
+                  }
+                  _setPanelError('调整终端尺寸失败：$error');
+                },
+              ),
+        );
       });
     });
   }
@@ -1119,7 +1168,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         !_disposed &&
         DateTime.now().isBefore(pinUntil) &&
         _scrollController.hasClients &&
-        _scrollController.position.pixels < _scrollController.position.maxScrollExtent) {
+        _scrollController.position.pixels <
+            _scrollController.position.maxScrollExtent) {
       _jumpToBottom();
     }
   }
@@ -1185,7 +1235,11 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         cols: clampTerminalDimension(terminal.viewWidth, kMinTerminalCols),
         rows: clampTerminalDimension(terminal.viewHeight, kMinTerminalRows),
       );
-      final wheel = encodeSgrWheelReports(result.lines, col: cell.col, row: cell.row);
+      final wheel = encodeSgrWheelReports(
+        result.lines,
+        col: cell.col,
+        row: cell.row,
+      );
       if (wheel.isNotEmpty) {
         _send(wheel);
       }
@@ -1196,7 +1250,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     if (result.lines >= 0) {
       return;
     }
-    final hydrated = buffer.policy.isHistoryHydrated(ownerInstanceId: buffer.owner);
+    final hydrated = buffer.policy.isHistoryHydrated(
+      ownerInstanceId: buffer.owner,
+    );
     if (hydrated || buffer.hydrating) {
       return;
     }
@@ -1239,8 +1295,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     buffer.hydrating = true;
     final sessionId = buffer.sessionId;
     final scroll = _scrollController;
-    final distFromBottom =
-        scroll.hasClients ? scroll.position.maxScrollExtent - scroll.position.pixels : null;
+    final distFromBottom = scroll.hasClients
+        ? scroll.position.maxScrollExtent - scroll.position.pixels
+        : null;
     try {
       final replay = await _sessions.hydrateScrollback(
         sessionId,
@@ -1276,8 +1333,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       }
       // 本次触发手势的滚动意图随灌入生效：视口至少上滚 1 行进入历史
       // （对齐 web Math.min(-1, pendingHydratedScrollLines)）。
-      final scrollUpLines =
-          buffer.hydrationIntent < -1 ? -buffer.hydrationIntent : 1;
+      final scrollUpLines = buffer.hydrationIntent < -1
+          ? -buffer.hydrationIntent
+          : 1;
       buffer.policy.markHistoryHydrated(ownerInstanceId: buffer.owner);
       buffer.hydrationIntent = 0;
       _setPanelError(null);
@@ -1338,7 +1396,10 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
   /// [extraUpLines] > 0 时在锚点基础上再上滚对应行数（首滑触发 hydration 后视口
   /// 随本次手势进入刚灌入的历史，至少 1 行，对齐 web scrollWhenHydrationParsed 的
   /// scrollTerminalBufferLines(Math.min(-1, pendingHydratedScrollLines))）。
-  void _anchorViewportFromBottom(double distFromBottom, {int extraUpLines = 0}) {
+  void _anchorViewportFromBottom(
+    double distFromBottom, {
+    int extraUpLines = 0,
+  }) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final scroll = _scrollController;
       if (_disposed || !scroll.hasClients) {
@@ -1533,7 +1594,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           final payload = frame['payload'];
           if (payload is Map) {
             final snapshot =
-                payload['snapshot'] as String? ?? payload['data'] as String? ?? '';
+                payload['snapshot'] as String? ??
+                payload['data'] as String? ??
+                '';
             if (snapshot.isNotEmpty) {
               buffer.terminal.write('\x1b[2J\x1b[H');
               buffer.terminal.write(snapshot);
@@ -1653,12 +1716,15 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       return;
     }
     _eventsIdleTimer?.cancel();
-    _eventsIdleTimer = Timer(const Duration(milliseconds: kEventsIdleTimeoutMs), () {
-      if (!mounted || _disposed || generation != _eventsGeneration) {
-        return;
-      }
-      _eventsClient?.close(force: true);
-    });
+    _eventsIdleTimer = Timer(
+      const Duration(milliseconds: kEventsIdleTimeoutMs),
+      () {
+        if (!mounted || _disposed || generation != _eventsGeneration) {
+          return;
+        }
+        _eventsClient?.close(force: true);
+      },
+    );
   }
 
   /// 打开输入 WS（切会话/首启时调用）：重置退避后立即连接。
@@ -1713,45 +1779,53 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     // WS 已建立 ≠ 可发送：先进入 connecting，等服务端 ready 握手后才放行输入。
     buffer.policy.onInputSocketOpened();
     try {
-      socket.add(jsonEncode({
-        'type': 'hello',
-        'clientId': 'mobile-${DateTime.now().microsecondsSinceEpoch}',
-      }));
+      socket.add(
+        jsonEncode({
+          'type': 'hello',
+          'clientId': 'mobile-${DateTime.now().microsecondsSinceEpoch}',
+        }),
+      );
     } catch (error) {
       buffer.policy.blockInputLink('终端输入连接建立失败：$error');
     }
     _inputBackoffAttempt = 0;
     _refreshStatus();
-    socket.listen((event) {
-      if (generation != _inputGeneration || event is! String) {
-        return;
-      }
-      final buffer = _active;
-      if (buffer == null) {
-        return;
-      }
-      final handled = buffer.policy.handleInputFrameText(event);
-      if (!handled) {
-        // 前向兼容：非 ready/ack/error 的帧（如 gap）交给同步策略。
-        try {
-          final frame = jsonDecode(event);
-          if (frame is Map && (frame['type'] == 'gap' || frame['kind'] == 'gap')) {
-            buffer.policy.onNdjsonLine({'type': 'gap'});
-          }
-        } catch (_) {}
-      }
-    }, onDone: () {
-      if (!mounted || _disposed || generation != _inputGeneration) {
-        return;
-      }
-      // 未确认输入的结果未知：断线后丢弃且永不重放；是否有丢弃由
-      // inputLink.droppedUnackedOnDisconnect 区分文案。
-      _active?.policy.onInputSocketClosed();
-      _markInputDown();
-      _scheduleInputReconnect(generation);
-    }, onError: (Object error) {
-      // onDone 会随后触发，统一由 onDone 处理。
-    }, cancelOnError: false);
+    socket.listen(
+      (event) {
+        if (generation != _inputGeneration || event is! String) {
+          return;
+        }
+        final buffer = _active;
+        if (buffer == null) {
+          return;
+        }
+        final handled = buffer.policy.handleInputFrameText(event);
+        if (!handled) {
+          // 前向兼容：非 ready/ack/error 的帧（如 gap）交给同步策略。
+          try {
+            final frame = jsonDecode(event);
+            if (frame is Map &&
+                (frame['type'] == 'gap' || frame['kind'] == 'gap')) {
+              buffer.policy.onNdjsonLine({'type': 'gap'});
+            }
+          } catch (_) {}
+        }
+      },
+      onDone: () {
+        if (!mounted || _disposed || generation != _inputGeneration) {
+          return;
+        }
+        // 未确认输入的结果未知：断线后丢弃且永不重放；是否有丢弃由
+        // inputLink.droppedUnackedOnDisconnect 区分文案。
+        _active?.policy.onInputSocketClosed();
+        _markInputDown();
+        _scheduleInputReconnect(generation);
+      },
+      onError: (Object error) {
+        // onDone 会随后触发，统一由 onDone 处理。
+      },
+      cancelOnError: false,
+    );
   }
 
   void _markInputDown() {
@@ -1831,8 +1905,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       _setSticky(null);
     }
     final seq = _seq++;
-    final accepted =
-        buffer.policy.sendInput(applied.data, id: '$seq');
+    final accepted = buffer.policy.sendInput(applied.data, id: '$seq');
     if (accepted == null) {
       // policy 拒绝（未 ready/超限/背压）：有封锁原因时上屏错误条。
       final message = buffer.policy.inputLink.message;
@@ -1841,13 +1914,15 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       }
       return;
     }
-    socket.add(jsonEncode({
-      'type': 'input',
-      'laneId': _laneId,
-      'sessionId': sessionId,
-      'seq': seq,
-      'data': applied.data,
-    }));
+    socket.add(
+      jsonEncode({
+        'type': 'input',
+        'laneId': _laneId,
+        'sessionId': sessionId,
+        'seq': seq,
+        'data': applied.data,
+      }),
+    );
   }
 
   /// 业务逻辑：sticky 武装后 3 秒无后续输入应自动解除，避免误改写普通输入。
@@ -1886,9 +1961,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     } else if (_eventsDown) {
       next = '实时输出已断开，正在重连…';
     } else if (_inputLinkDown) {
-      next = _inputDroppedUnacked
-          ? '输入已断开；未确认输入已丢弃，不会自动重放'
-          : '输入已断开，正在重连…';
+      next = _inputDroppedUnacked ? '输入已断开；未确认输入已丢弃，不会自动重放' : '输入已断开，正在重连…';
     } else {
       next = '就绪';
     }
@@ -1906,10 +1979,12 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     }
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(message),
-        duration: const Duration(milliseconds: 2500),
-      ));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration: const Duration(milliseconds: 2500),
+        ),
+      );
   }
 
   /// 业务逻辑：手机上需要把剪贴板文本写入当前会话输入行（不带回车），方便粘贴后再编辑或手动回车。
@@ -2094,8 +2169,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         builder: (dialogContext) => _PromptOptimizerDialog(
           client: _prompts,
           sessionId: sessionId,
-          workingDirectory:
-              (widget.worktreePath?.isNotEmpty ?? false) ? widget.worktreePath : widget.project.path,
+          workingDirectory: (widget.worktreePath?.isNotEmpty ?? false)
+              ? widget.worktreePath
+              : widget.project.path,
         ),
       );
     } finally {
@@ -2180,13 +2256,18 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           setState(() {
             _hookRepair = _HookRepairState(
               failure: outcome.hookFailure ?? const HookFailureView(),
-              raw: envelope['hookFailure'] ?? envelope['hook_failure'] ?? const {},
+              raw:
+                  envelope['hookFailure'] ??
+                  envelope['hook_failure'] ??
+                  const {},
               clientOperationId: outcome.clientOperationId ?? operationId,
             );
           });
           break;
         case GitMutationOutcomeKind.unknown:
-          await _reconcileCommit(envelopeOperationId: outcome.clientOperationId ?? operationId);
+          await _reconcileCommit(
+            envelopeOperationId: outcome.clientOperationId ?? operationId,
+          );
           break;
         case GitMutationOutcomeKind.malformed:
           _commitMutation.markIdle();
@@ -2272,7 +2353,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       if (!mounted || _disposed) {
         return;
       }
-      final terminalSessionId = result['terminalSessionId'] as String? ??
+      final terminalSessionId =
+          result['terminalSessionId'] as String? ??
           result['terminal_session_id'] as String?;
       setState(() {
         _hookRepair = _HookRepairState(
@@ -2357,7 +2439,8 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     if (!mounted || _disposed) {
       return;
     }
-    final confirmTree = widget.worktreeInfo ??
+    final confirmTree =
+        widget.worktreeInfo ??
         <String, dynamic>{'id': worktreeId, 'name': worktreeId};
     final confirmed = await showDialog<bool>(
       context: context,
@@ -2400,7 +2483,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         _mergeMutation.markIdle();
         await _afterMergeSuccess();
       } else if (outcome.kind == GitMutationOutcomeKind.unknown) {
-        await _reconcileMerge(envelopeOperationId: outcome.clientOperationId ?? operationId);
+        await _reconcileMerge(
+          envelopeOperationId: outcome.clientOperationId ?? operationId,
+        );
       } else if (outcome.kind == GitMutationOutcomeKind.malformed) {
         _mergeMutation.markIdle();
         _toast('合并失败，请稍后重试');
@@ -2547,9 +2632,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       ),
       child: Row(
         children: [
-          Expanded(
-            child: Text(error, style: theme.textTheme.bodySmall),
-          ),
+          Expanded(child: Text(error, style: theme.textTheme.bodySmall)),
           if (actionLabel != null)
             TextButton(
               key: const Key('terminal-panel-error-action'),
@@ -2605,17 +2688,23 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     }
   }
 
-  /// 进入全屏：有可见会话时隐藏 chip 条（windowTabs），顶部工具行保留全部动作入口。
+  /// 进入全屏：把终端列挂到根 Overlay，盖住整个壳层（对齐 web fixed 100dvh）。
+  ///
+  /// 只藏壳层标题栏时，终端仍留在页面流里，手机上看起来几乎没变大。
   void _enterFullscreen() {
     if (_sessionId == null) {
       return;
     }
+    _fullscreenPortal.show();
     setState(() => _fullscreen = true);
     widget.onFullscreenChanged?.call(true);
   }
 
-  /// 退出全屏并回调壳层。
+  /// 退出全屏：卸下根 Overlay，并让壳层把标题栏和 worktree 条放回来。
   void _exitFullscreen() {
+    if (_fullscreenPortal.isShowing) {
+      _fullscreenPortal.hide();
+    }
     setState(() => _fullscreen = false);
     widget.onFullscreenChanged?.call(false);
   }
@@ -2649,7 +2738,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
                   radius: 4,
                   backgroundColor: _sessionStatusColor(session.status),
                 ),
-                label: Text('${session.displayName} · ${session.paneCount} pane'),
+                label: Text(
+                  '${session.displayName} · ${session.paneCount} pane',
+                ),
                 // 对齐 web MobileTerminalPanel：chip 选择不随通用动作 busy 整体
                 // 禁用（commit/merge 在途仍可切换查看其它会话）；仅关闭 X 保持 gated。
                 onPressed: () => unawaited(_activateSession(session)),
@@ -2664,8 +2755,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
             child: ActionChip(
               avatar: const Icon(Icons.add, size: 16),
               label: const Text('新建'),
-              onPressed:
-                  _actionBusy == null ? () => unawaited(_createSession()) : null,
+              onPressed: _actionBusy == null
+                  ? () => unawaited(_createSession())
+                  : null,
             ),
           ),
         ],
@@ -2758,7 +2850,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: isPush ? theme.colorScheme.errorContainer : theme.colorScheme.surfaceContainerHighest,
+        color: isPush
+            ? theme.colorScheme.errorContainer
+            : theme.colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(8),
       ),
       child: Column(
@@ -2773,14 +2867,19 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
                 ),
               ),
               if (repair.failure.exitCode != null)
-                Text('退出码 ${repair.failure.exitCode}', style: theme.textTheme.bodySmall),
+                Text(
+                  '退出码 ${repair.failure.exitCode}',
+                  style: theme.textTheme.bodySmall,
+                ),
             ],
           ),
           if (repair.terminalSessionId != null)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: Text('修复已在新的终端 tab 里运行，切换过去查看进度。',
-                  style: theme.textTheme.bodySmall),
+              child: Text(
+                '修复已在新的终端 tab 里运行，切换过去查看进度。',
+                style: theme.textTheme.bodySmall,
+              ),
             ),
           const SizedBox(height: 4),
           _HookOutputToggle(output: output),
@@ -2790,14 +2889,19 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
             children: [
               if (repair.terminalSessionId != null)
                 FilledButton(
-                  onPressed: _actionBusy == null ? _retryCommitAfterRepair : null,
+                  onPressed: _actionBusy == null
+                      ? _retryCommitAfterRepair
+                      : null,
                   child: const Text('重试 commit'),
                 )
               else
                 FilledButton(
-                  onPressed:
-                      _actionBusy == null ? () => unawaited(_repairHook()) : null,
-                  child: Text(_actionBusy == 'repair' ? '正在启动 AI 修复…' : '让 AI 修复'),
+                  onPressed: _actionBusy == null
+                      ? () => unawaited(_repairHook())
+                      : null,
+                  child: Text(
+                    _actionBusy == 'repair' ? '正在启动 AI 修复…' : '让 AI 修复',
+                  ),
                 ),
               TextButton(
                 onPressed: () => setState(() => _hookRepair = null),
@@ -2820,10 +2924,7 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           children: [
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Text(
-                _error!,
-                textAlign: TextAlign.center,
-              ),
+              child: Text(_error!, textAlign: TextAlign.center),
             ),
             const SizedBox(height: 12),
             FilledButton.icon(
@@ -2850,11 +2951,12 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
     final anyMutationPending =
         _commitMutation.actionLocked || _mergeMutation.actionLocked;
     final commitEnabled = canUseGitActions && !anyMutationPending;
-    final mergeEnabled = canUseGitActions && mergeAllowed && !anyMutationPending;
+    final mergeEnabled =
+        canUseGitActions && mergeAllowed && !anyMutationPending;
     // 输入动作（收藏/优化/贴图/粘贴文本）统一口径：running + 流 ready + 门闩放行。
     final inputActionsEnabled = _canUseInputActions;
-    // 全屏仅隐藏 chip 条（windowTabs）；顶部工具行保留全部动作入口 +
-    // 退出全屏（对齐 web getMobileTerminalChromeVisibility：paneActions 恒可见）。
+    // 全屏时壳层已经拿掉标题栏、状态行和 worktree 条；这里再拿掉会话 chip。
+    // 动作入口仍留在工具行（对齐 web paneActions 恒可见），但全屏按钮钉在滚动区外。
     final toolbarActions = <Widget>[
       _buildPaneMenuButton(),
       IconButton(
@@ -2887,40 +2989,46 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
         onPressed: _canPasteImage ? () => unawaited(_pasteImage()) : null,
         icon: const Icon(Icons.photo_outlined),
       ),
-      if (fullscreen)
-        IconButton(
-          tooltip: '退出全屏',
-          onPressed: _exitFullscreen,
-          icon: const Icon(Icons.fullscreen_exit),
-        )
-      else
-        IconButton(
-          tooltip: '全屏',
-          onPressed: _sessionId != null ? _enterFullscreen : null,
-          icon: const Icon(Icons.fullscreen),
-        ),
     ];
-    return Column(
+    // 全屏按钮必须钉在滚动区外面。它原先是横滑 Row 的最后一项，
+    // 手指稍一移动就被滚动手势吃掉，点下去壳层不隐藏，终端看起来完全没变。
+    final fullscreenButton = fullscreen
+        ? IconButton(
+            tooltip: '退出全屏',
+            onPressed: _exitFullscreen,
+            icon: const Icon(Icons.fullscreen_exit),
+          )
+        : IconButton(
+            tooltip: '全屏',
+            onPressed: _sessionId != null ? _enterFullscreen : null,
+            icon: const Icon(Icons.fullscreen),
+          );
+    final terminalColumn = Column(
       children: [
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          padding: EdgeInsets.symmetric(
+            horizontal: 4,
+            vertical: fullscreen ? 0 : 4,
+          ),
           child: Row(
             children: [
-              Expanded(
-                child: Text(
-                  _status,
-                  style: theme.textTheme.bodySmall,
-                  overflow: TextOverflow.ellipsis,
+              if (!fullscreen)
+                Expanded(
+                  child: Text(
+                    _status,
+                    style: theme.textTheme.bodySmall,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
-              ),
               Flexible(
-                // 动作区横向可滚：窄屏全屏时 8 个入口也不溢出（FAB 语义由工具行承担）。
+                // 动作区横向可滚：窄屏全屏时入口也不溢出（FAB 语义由工具行承担）。
                 child: SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   reverse: true,
                   child: Row(children: toolbarActions),
                 ),
               ),
+              fullscreenButton,
             ],
           ),
         ),
@@ -2954,48 +3062,69 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
             onSticky: _setSticky,
             disabled: !_inputSendEnabled,
           ),
-        Padding(
-          padding: const EdgeInsets.all(8),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  key: const Key('terminal-input-field'),
-                  controller: _input,
-                  // replay 门闩未放行、会话非 running、输入链路未完成 ready 握手
-                  // （connecting/blocked/closed）或 WS 断开时禁用；任一条件恢复后
-                  // 经既有 setState 路径自动恢复可用。
-                  enabled: _inputSendEnabled,
-                  decoration: const InputDecoration(hintText: '输入后回车发送'),
-                  onSubmitted: (value) {
-                    if (value.isEmpty) {
-                      // 空输入不发送（不向 PTY 发裸回车）。
-                      return;
-                    }
-                    _send('$value\r');
-                    _input.clear();
-                  },
-                ),
-              ),
-              IconButton(
-                key: const Key('terminal-input-send'),
-                onPressed: _inputSendEnabled
-                    ? () {
-                        final text = _input.text;
-                        if (text.isEmpty) {
-                          // 空输入不发送。
-                          return;
-                        }
-                        _send('$text\r');
-                        _input.clear();
+        // 全屏时收起底部输入框，把高度让给终端画面。输入改由点终端唤起键盘，
+        // 控制键仍走上面的快捷键条；退出全屏后输入框回来。
+        if (!fullscreen)
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    key: const Key('terminal-input-field'),
+                    controller: _input,
+                    // replay 门闩未放行、会话非 running、输入链路未完成 ready 握手
+                    // （connecting/blocked/closed）或 WS 断开时禁用；任一条件恢复后
+                    // 经既有 setState 路径自动恢复可用。
+                    enabled: _inputSendEnabled,
+                    decoration: const InputDecoration(hintText: '输入后回车发送'),
+                    onSubmitted: (value) {
+                      if (value.isEmpty) {
+                        // 空输入不发送（不向 PTY 发裸回车）。
+                        return;
                       }
-                    : null,
-                icon: const Icon(Icons.send),
-              ),
-            ],
+                      _send('$value\r');
+                      _input.clear();
+                    },
+                  ),
+                ),
+                IconButton(
+                  key: const Key('terminal-input-send'),
+                  onPressed: _inputSendEnabled
+                      ? () {
+                          final text = _input.text;
+                          if (text.isEmpty) {
+                            // 空输入不发送。
+                            return;
+                          }
+                          _send('$text\r');
+                          _input.clear();
+                        }
+                      : null,
+                  icon: const Icon(Icons.send),
+                ),
+              ],
+            ),
           ),
-        ),
       ],
+    );
+    // 全屏时终端列只出现在根 Overlay 里，页面本身留空，避免同一个 xterm 挂两次。
+    return OverlayPortal(
+      controller: _fullscreenPortal,
+      overlayLocation: OverlayChildLocation.rootOverlay,
+      overlayChildBuilder: (overlayContext) {
+        return Material(
+          key: const Key('terminal-fullscreen-overlay'),
+          color: Theme.of(overlayContext).colorScheme.surface,
+          child: Padding(
+            padding: MediaQuery.viewInsetsOf(overlayContext),
+            child: SafeArea(child: terminalColumn),
+          ),
+        );
+      },
+      child: _fullscreen && _sessionId != null
+          ? const SizedBox.shrink()
+          : terminalColumn,
     );
   }
 
@@ -3010,7 +3139,9 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
           const SizedBox(height: 12),
           FilledButton.icon(
             key: const Key('terminal-empty-create'),
-            onPressed: _actionBusy == null ? () => unawaited(_createSession()) : null,
+            onPressed: _actionBusy == null
+                ? () => unawaited(_createSession())
+                : null,
             icon: const Icon(Icons.add),
             label: const Text('新建'),
           ),
@@ -3033,17 +3164,16 @@ class _TerminalPageState extends State<TerminalPage> with WidgetsBindingObserver
       child: Row(
         children: [
           Expanded(
-            child: Text('已选 $_selectedLineCount 行',
-                style: Theme.of(context).textTheme.bodySmall),
+            child: Text(
+              '已选 $_selectedLineCount 行',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
           ),
           TextButton(
             onPressed: enabled ? () => unawaited(_copySelection()) : null,
             child: const Text('复制'),
           ),
-          TextButton(
-            onPressed: _cancelSelection,
-            child: const Text('取消'),
-          ),
+          TextButton(onPressed: _cancelSelection, child: const Text('取消')),
         ],
       ),
     );
@@ -3112,7 +3242,9 @@ class _HookOutputToggleState extends State<_HookOutputToggle> {
             color: theme.colorScheme.surface,
             child: Text(
               widget.output.isEmpty ? '（未捕获到输出）' : widget.output,
-              style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: 'monospace',
+              ),
             ),
           ),
       ],
@@ -3153,7 +3285,9 @@ class _FavoritePromptSheetState extends State<_FavoritePromptSheet> {
   bool _loading = true;
   String? _error;
   late String _selectedTag = widget.initialTag;
-  late final TextEditingController _search = TextEditingController(text: widget.initialQuery);
+  late final TextEditingController _search = TextEditingController(
+    text: widget.initialQuery,
+  );
 
   @override
   void initState() {
@@ -3225,7 +3359,12 @@ class _FavoritePromptSheetState extends State<_FavoritePromptSheet> {
             children: [
               Row(
                 children: [
-                  Expanded(child: Text('收藏的 Prompt', style: theme.textTheme.titleMedium)),
+                  Expanded(
+                    child: Text(
+                      '收藏的 Prompt',
+                      style: theme.textTheme.titleMedium,
+                    ),
+                  ),
                   IconButton(
                     tooltip: '刷新',
                     onPressed: _loading ? null : _load,
@@ -3464,7 +3603,10 @@ class _PromptOptimizerDialogState extends State<_PromptOptimizerDialog> {
           if (_status != null)
             Padding(
               padding: const EdgeInsets.only(top: 8),
-              child: Text(_status!, style: Theme.of(context).textTheme.bodySmall),
+              child: Text(
+                _status!,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             ),
         ],
       ),
