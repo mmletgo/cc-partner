@@ -22,6 +22,8 @@ pub(crate) struct ViewingPluginEnablement {
     claude: BTreeMap<String, bool>,
     codex: BTreeMap<String, bool>,
     grok: GrokPluginEnablement,
+    /// ZCode `cli/config.json` 的 `plugins.enabledPlugins`。未登记视为开。
+    zcode: BTreeMap<String, bool>,
 }
 
 /// Grok `config.toml` `[plugins]` 启停表。
@@ -41,6 +43,7 @@ impl ViewingPluginEnablement {
         claude_config_root: &Path,
         codex_config_root: &Path,
         grok_config_root: &Path,
+        zcode_config_root: &Path,
     ) -> Self {
         match target {
             AgentTarget::Claude => Self {
@@ -48,18 +51,28 @@ impl ViewingPluginEnablement {
                 claude: load_claude_plugin_enablement(claude_config_root),
                 codex: BTreeMap::new(),
                 grok: GrokPluginEnablement::default(),
+                zcode: BTreeMap::new(),
             },
             AgentTarget::Codex => Self {
                 target,
                 claude: BTreeMap::new(),
                 codex: load_codex_plugin_enablement(codex_config_root),
                 grok: GrokPluginEnablement::default(),
+                zcode: BTreeMap::new(),
             },
             AgentTarget::Grok => Self {
                 target,
                 claude: BTreeMap::new(),
                 codex: BTreeMap::new(),
                 grok: load_grok_plugin_enablement(grok_config_root),
+                zcode: BTreeMap::new(),
+            },
+            AgentTarget::Zcode => Self {
+                target,
+                claude: BTreeMap::new(),
+                codex: BTreeMap::new(),
+                grok: GrokPluginEnablement::default(),
+                zcode: load_zcode_plugin_enablement(zcode_config_root),
             },
             AgentTarget::OpenCode | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
                 Self {
@@ -67,6 +80,7 @@ impl ViewingPluginEnablement {
                     claude: BTreeMap::new(),
                     codex: BTreeMap::new(),
                     grok: GrokPluginEnablement::default(),
+                    zcode: BTreeMap::new(),
                 }
             }
         }
@@ -79,6 +93,7 @@ impl ViewingPluginEnablement {
             claude: BTreeMap::new(),
             codex: BTreeMap::new(),
             grok: GrokPluginEnablement::default(),
+            zcode: BTreeMap::new(),
         }
     }
 }
@@ -103,6 +118,9 @@ pub(crate) fn plugin_actual_enabled(
             grok_plugin_actual_enabled(plugin_id, native, &enablement.grok),
             None,
         ),
+        AgentTarget::Zcode => {
+            zcode_plugin_actual_enabled(plugin_id, registry_key, &enablement.zcode)
+        }
         AgentTarget::OpenCode | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
             (true, None)
         }
@@ -240,6 +258,62 @@ fn grok_plugin_string_array(item: Option<&toml_edit::Item>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 解析 ZCode `cli/config.json` 的 `plugins.enabledPlugins` 布尔表。
+///
+/// Business Logic（为什么需要这个函数）:
+///     启停只读 ZCode 自己的配置。Claude `enabledPlugins` 不得渗进来。
+///     未登记的已安装包视为开，所以空表不是白名单。
+///
+/// Code Logic（这个函数做什么）:
+///     只收集 `plugins.enabledPlugins` 里的 bool；其它键（provider/model/mcp）忽略。
+pub(crate) fn parse_zcode_plugin_enablement(text: &str) -> BTreeMap<String, bool> {
+    let mut out = BTreeMap::new();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return out;
+    };
+    let Some(plugins) = value
+        .get("plugins")
+        .and_then(|item| item.as_object())
+        .and_then(|plugins| plugins.get("enabledPlugins"))
+        .and_then(|item| item.as_object())
+    else {
+        return out;
+    };
+    for (key, item) in plugins {
+        if let Some(enabled) = item.as_bool() {
+            out.insert(key.clone(), enabled);
+        }
+    }
+    out
+}
+
+fn load_zcode_plugin_enablement(config_root: &Path) -> BTreeMap<String, bool> {
+    let path = config_root.join("cli").join("config.json");
+    match fs::read_to_string(&path) {
+        Ok(text) => parse_zcode_plugin_enablement(&text),
+        Err(_) => BTreeMap::new(),
+    }
+}
+
+fn zcode_plugin_actual_enabled(
+    plugin_id: &str,
+    registry_key: Option<&str>,
+    enablement: &BTreeMap<String, bool>,
+) -> (bool, Option<String>) {
+    if let Some(key) = registry_key {
+        if let Some(enabled) = enablement.get(key) {
+            return (*enabled, None);
+        }
+    }
+    if let Some(enabled) = enablement.get(plugin_id) {
+        return (*enabled, None);
+    }
+    if let Some(enabled) = lookup_plugin_bool(enablement, plugin_id) {
+        return (enabled, None);
+    }
+    (true, None)
+}
+
 fn load_grok_plugin_enablement(config_root: &Path) -> GrokPluginEnablement {
     let path = config_root.join("config.toml");
     match fs::read_to_string(&path) {
@@ -308,6 +382,7 @@ mod tests {
             claude,
             codex: BTreeMap::new(),
             grok: GrokPluginEnablement::default(),
+            zcode: BTreeMap::new(),
         }
     }
 
@@ -360,6 +435,7 @@ mod tests {
             claude: BTreeMap::new(),
             codex,
             grok: GrokPluginEnablement::default(),
+            zcode: BTreeMap::new(),
         };
         let (native_missing, warn) = plugin_actual_enabled(&viewing, "latex", None, true);
         assert!(!native_missing);
@@ -388,6 +464,7 @@ mod tests {
                 enabled: vec!["native-only".into()],
                 disabled: vec!["ecc".into()],
             },
+            zcode: BTreeMap::new(),
         };
         assert!(
             plugin_actual_enabled(&viewing, "superpowers", None, false).0,
@@ -404,6 +481,7 @@ mod tests {
                 enabled: vec!["native-only@market".into()],
                 disabled: Vec::new(),
             },
+            zcode: BTreeMap::new(),
         };
         assert!(
             plugin_actual_enabled(&qualified, "native-only@market", None, true).0,
@@ -425,6 +503,7 @@ mod tests {
             claude,
             codex: BTreeMap::new(),
             grok: GrokPluginEnablement::default(),
+            zcode: BTreeMap::new(),
         };
         let (official, _) = plugin_actual_enabled(
             &viewing,
@@ -438,6 +517,45 @@ mod tests {
         assert!(empty_map, "missing settings keeps installed=true");
         let (unlisted, _) = plugin_actual_enabled(&viewing, "other", None, true);
         assert!(unlisted, "installed but unlisted defaults enabled");
+    }
+
+    /// Business Logic: ZCode 开关只认自己的 enabledPlugins；Claude 关掉不得让 ZCode 显示为关。
+    #[test]
+    fn zcode_enablement_ignores_claude_and_closes_only_its_own_false_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        let zcode = dir.path().join(".zcode");
+        fs::create_dir_all(claude.join("unused")).unwrap();
+        fs::create_dir_all(zcode.join("cli")).unwrap();
+        fs::write(
+            claude.join("settings.json"),
+            r#"{"enabledPlugins":{"demo@market":false}}"#,
+        )
+        .unwrap();
+        fs::write(
+            zcode.join("cli/config.json"),
+            r#"{"provider":"example","model":"demo","skills":{},"mcp":{"servers":{}},"plugins":{"enabledPlugins":{"other@market":false}}}"#,
+        )
+        .unwrap();
+        let loaded = ViewingPluginEnablement::load(
+            AgentTarget::Zcode,
+            &claude,
+            dir.path(),
+            dir.path(),
+            &zcode,
+        );
+        assert!(
+            loaded.claude.is_empty(),
+            "ZCode load must not read Claude settings"
+        );
+        let (unlisted, _) = plugin_actual_enabled(&loaded, "demo", Some("demo@market"), true);
+        assert!(unlisted, "unregistered installed package stays on");
+        let (closed, _) = plugin_actual_enabled(&loaded, "other", Some("other@market"), true);
+        assert!(!closed);
+        let mut poisoned = loaded.clone();
+        poisoned.claude.insert("demo@market".into(), false);
+        let (still_on, _) = plugin_actual_enabled(&poisoned, "demo", Some("demo@market"), true);
+        assert!(still_on, "Claude map must not apply while viewing ZCode");
     }
 
     #[test]

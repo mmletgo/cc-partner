@@ -40,6 +40,7 @@ export const USER_NATIVE_KINDS: Record<AgentTarget, readonly UserNativeFileKind[
   grok: ['agents', 'claude'],
   cursor: [],
   pi: ['agents', 'claude'],
+  zcode: ['agents'],
 };
 
 /**

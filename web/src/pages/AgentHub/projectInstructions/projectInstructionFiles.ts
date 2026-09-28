@@ -3,7 +3,7 @@
  *
  * Business Logic（为什么需要）:
  *   项目 Agent 不走 Hub 三槽投影；用户要直接编辑 Claude/Codex 等真正读取的文件。
- *   Codex / OpenCode / Grok / Cursor / Pi 共用仓库根 AGENTS.md，必须当成同一份文件，
+ *   Codex / OpenCode / Grok / Cursor / Pi / ZCode 共用仓库根 AGENTS.md，必须当成同一份文件，
  *   不能按 Agent 复制出多份编辑器。
  *
  * Code Logic（做什么）:
@@ -36,7 +36,7 @@ export const PROJECT_INSTRUCTION_FILES: readonly ProjectInstructionFileSpec[] = 
   {
     id: 'agents',
     path: 'AGENTS.md',
-    consumers: ['codex', 'opencode', 'grok', 'cursor', 'pi'],
+    consumers: ['codex', 'opencode', 'grok', 'cursor', 'pi', 'zcode'],
   },
   {
     id: 'claude',

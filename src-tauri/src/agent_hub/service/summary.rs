@@ -21,7 +21,7 @@ use crate::agent_hub::models::{
 use crate::agent_hub::targets::{
     AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
     GeminiInstructionAdapter, GrokInstructionAdapter, OpenCodeInstructionAdapter,
-    PiInstructionAdapter, TargetEnvironment,
+    PiInstructionAdapter, TargetEnvironment, ZcodeInstructionAdapter,
 };
 use crate::error::AppError;
 use crate::state::AppState;
@@ -355,6 +355,7 @@ pub(super) fn probe_support_map() -> BTreeMap<AgentTarget, bool> {
         (Box::new(GeminiInstructionAdapter), AgentTarget::Gemini),
         (Box::new(CursorInstructionAdapter), AgentTarget::Cursor),
         (Box::new(PiInstructionAdapter), AgentTarget::Pi),
+        (Box::new(ZcodeInstructionAdapter), AgentTarget::Zcode),
     ];
     let mut map = BTreeMap::new();
     for (adapter, target) in adapters {

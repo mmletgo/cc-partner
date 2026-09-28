@@ -213,7 +213,7 @@ pub use targets::{
     OpenCodeHomePaths, OpenCodeInstructionAdapter, PiInstructionAdapter, PortableAssetOrigin,
     PortableAssetOwner, PortableDiscoveryStatus, PortableOriginKind, ProjectedAssetFile,
     RenderedInstruction, TargetAssetProjection, TargetEnvironment, TargetHomePaths, TargetHomes,
-    TargetPathResolver, TargetProbe,
+    TargetPathResolver, TargetProbe, ZcodeInstructionAdapter,
 };
 pub use user_instructions::{
     apply_user_instruction_plan, inspect_user_instruction_workspace,

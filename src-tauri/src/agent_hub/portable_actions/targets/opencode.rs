@@ -77,6 +77,19 @@ impl TargetActionExecutor for OpenCodeTargetExecutor {
         if is_file_only_viewing_toggle(change.target, change.kind, ctx.action) {
             match change.kind {
                 PortableAssetKind::Plugin => {
+                    if change.target == AgentTarget::Zcode {
+                        let config = zcode_cli_config_path(pre_item, change);
+                        let source = change
+                            .path
+                            .as_deref()
+                            .or_else(|| pre_item.and_then(|item| item.source_path.as_deref()));
+                        let id = plugin_cli_selector(&native_id(change, pre_item), source);
+                        return set_zcode_plugin_enabled(
+                            &config,
+                            &id,
+                            matches!(ctx.action, PortableAssetActionKind::Enable),
+                        );
+                    }
                     let config = grok_config_toml_path(pre_item, change);
                     let native =
                         pre_item.is_some_and(|item| item.origin_kind == PortableOriginKind::Native);
@@ -162,6 +175,7 @@ fn config_root_for(target: AgentTarget, homes: &TargetHomes) -> PathBuf {
         AgentTarget::Gemini => homes.gemini.config_root.clone(),
         AgentTarget::Cursor => homes.cursor.config_root.clone(),
         AgentTarget::Pi => homes.pi.config_root.clone(),
+        AgentTarget::Zcode => homes.zcode.config_root.clone(),
     }
 }
 
@@ -402,8 +416,9 @@ fn execute_native_mcp_enabled_toggle(
     match change.target {
         AgentTarget::Grok => set_mcp_enabled_toml(&path, "mcp_servers", &id, enabled),
         AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::OpenCode => {
-            set_mcp_enabled_jsonc(&path, "mcpServers", &id, enabled)
+            set_mcp_enabled_jsonc(&path, &["mcpServers"], &id, enabled)
         }
+        AgentTarget::Zcode => set_mcp_enabled_jsonc(&path, &["mcp", "servers"], &id, enabled),
         AgentTarget::Claude | AgentTarget::Codex | AgentTarget::Pi => {
             Ok(TargetActionRawOutcome::Blocked {
                 code: "PORTABLE_ASSET_ACTION_TARGET_WRITE_NOT_CERTIFIED".into(),
@@ -451,6 +466,7 @@ fn is_mcp_config_filename(target: AgentTarget, name: &OsStr) -> bool {
         AgentTarget::Gemini => name == "settings.json",
         AgentTarget::Cursor => name == "mcp.json",
         AgentTarget::OpenCode => name == "opencode.json" || name == "opencode.jsonc",
+        AgentTarget::Zcode => name == "config.json",
         AgentTarget::Claude | AgentTarget::Codex | AgentTarget::Pi => false,
     }
 }
@@ -472,6 +488,7 @@ fn default_mcp_config_path(target: AgentTarget) -> PathBuf {
             }
             homes.opencode.config_file.clone()
         }
+        AgentTarget::Zcode => homes.zcode.config_root.join("cli").join("config.json"),
         other => config_root_for(other, &homes).join("config.toml"),
     }
 }
@@ -489,7 +506,14 @@ fn set_mcp_enabled_toml(
     id: &str,
     enabled: bool,
 ) -> Result<TargetActionRawOutcome, AppError> {
-    set_mcp_leaf_enabled_flag(&TomlConfigPatcher, config_path, table_key, id, enabled, b"")
+    set_mcp_leaf_enabled_flag(
+        &TomlConfigPatcher,
+        config_path,
+        &[table_key],
+        id,
+        enabled,
+        b"",
+    )
 }
 
 /// 翻转 JSONC MCP leaf `enabled`（Gemini settings.json / Cursor mcp.json / OpenCode）。
@@ -501,14 +525,14 @@ fn set_mcp_enabled_toml(
 ///     路径 `[object_key, id, "enabled"]`；空文件按 `{}` 起步。
 fn set_mcp_enabled_jsonc(
     config_path: &Path,
-    object_key: &str,
+    servers_prefix: &[&str],
     id: &str,
     enabled: bool,
 ) -> Result<TargetActionRawOutcome, AppError> {
     set_mcp_leaf_enabled_flag(
         &JsoncConfigPatcher,
         config_path,
-        object_key,
+        servers_prefix,
         id,
         enabled,
         b"{}",
@@ -525,7 +549,7 @@ fn set_mcp_enabled_jsonc(
 fn set_mcp_leaf_enabled_flag(
     patcher: &dyn SemanticConfigPatcher,
     config_path: &Path,
-    servers_key: &str,
+    servers_prefix: &[&str],
     id: &str,
     enabled: bool,
     missing_seed: &[u8],
@@ -535,11 +559,17 @@ fn set_mcp_leaf_enabled_flag(
     } else {
         missing_seed.to_vec()
     };
-    let parent = patcher.inspect(&bytes, &[servers_key.into(), id.to_string()])?;
+    let mut parent_path: Vec<String> = servers_prefix
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect();
+    parent_path.push(id.to_string());
+    let parent = patcher.inspect(&bytes, &parent_path)?;
     if !parent.present {
         return Ok(TargetActionRawOutcome::Skipped);
     }
-    let path = vec![servers_key.into(), id.to_string(), "enabled".into()];
+    let mut path = parent_path;
+    path.push("enabled".into());
     let owned = patcher.inspect(&bytes, &path)?;
     let patch = if owned.present {
         if owned.value.as_bool() == Some(enabled) {
@@ -603,6 +633,92 @@ fn config_flag_patch_outcome(
     }
 }
 
+/// 解析 ZCode `cli/config.json`。插件启停只改这个文件的 `plugins.enabledPlugins`。
+///
+/// Business Logic（为什么需要这个函数）:
+///     观测路径通常是 cache 里的包目录；必须回到 `<config_root>/cli/config.json`，
+///     不得改项目 `.zcode/config.json` 的 MCP，也不得改 `v2/`。
+///
+/// Code Logic（这个函数做什么）:
+///     祖先名为 `.zcode` 时拼 `cli/config.json`；否则回落解析后的用户配置根。
+fn zcode_cli_config_path(
+    pre_item: Option<&PortableInventoryItemDto>,
+    change: &PortableAssetActionChangeDto,
+) -> PathBuf {
+    for raw in [
+        change.path.as_deref(),
+        pre_item.and_then(|item| item.source_path.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(path) = zcode_cli_config_from_observed(Path::new(raw)) {
+            return path;
+        }
+    }
+    TargetPathResolver::resolve_all(&TargetEnvironment::from_process())
+        .zcode
+        .config_root
+        .join("cli")
+        .join("config.json")
+}
+
+fn zcode_cli_config_from_observed(path: &Path) -> Option<PathBuf> {
+    for ancestor in path.ancestors() {
+        if ancestor.file_name() == Some(OsStr::new(".zcode")) {
+            return Some(ancestor.join("cli").join("config.json"));
+        }
+    }
+    None
+}
+
+/// 只改 `plugins.enabledPlugins.<id>`，保留 provider/model/mcp/skills。
+///
+/// Business Logic（为什么需要这个函数）:
+///     Enable/Disable 是配置补丁，不 spawn `zcode`，也不重写整份 config。
+///
+/// Code Logic（这个函数做什么）:
+///     JSONC patch 路径 `plugins.enabledPlugins.{id}`；已是目标值则 Skip。
+fn set_zcode_plugin_enabled(
+    config_path: &Path,
+    plugin_id: &str,
+    enabled: bool,
+) -> Result<TargetActionRawOutcome, AppError> {
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = if config_path.exists() {
+        fs::read(config_path)?
+    } else {
+        b"{}".to_vec()
+    };
+    let path = vec![
+        "plugins".to_string(),
+        "enabledPlugins".to_string(),
+        plugin_id.to_string(),
+    ];
+    let owned = JsoncConfigPatcher.inspect(&bytes, &path)?;
+    if owned.present && owned.value.as_bool() == Some(enabled) {
+        return Ok(TargetActionRawOutcome::Skipped);
+    }
+    let patch = ManagedConfigPatch {
+        owner_id: format!("portable-plugin:{plugin_id}"),
+        path,
+        value: Some(serde_json::Value::Bool(enabled)),
+        expected_base_hash: if owned.present {
+            owned.value_hash
+        } else {
+            Some(CAS_EXPECT_ABSENT.to_string())
+        },
+    };
+    config_flag_patch_outcome(
+        apply_config_patch_atomically(&JsoncConfigPatcher, config_path, &[patch])?,
+        "PORTABLE_ASSET_ACTION_PLUGIN_CAS_CONFLICT",
+        "zcode plugin enablement CAS conflict",
+        "PORTABLE_ASSET_ACTION_PLUGIN_PATCH_FAILED",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,6 +735,30 @@ mod tests {
         attach_store_link, ensure_portable_store_layout, portable_store_root, store_skill_dir,
     };
     use std::sync::Arc;
+
+    /// Business Logic: 关掉插件不得改掉 provider/model/mcp/skills。
+    #[test]
+    fn zcode_plugin_disable_patches_only_enabled_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".zcode/cli/config.json");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(
+            &config,
+            r#"{"provider":"example","model":"demo","skills":{"paths":["keep"]},"mcp":{"servers":{"demo":{"command":"echo","args":["ok"]}}},"plugins":{"enabledPlugins":{"keep@market":true}}}"#,
+        )
+        .unwrap();
+        let outcome = set_zcode_plugin_enabled(&config, "demo@market", false).unwrap();
+        assert_eq!(outcome, TargetActionRawOutcome::Applied);
+        let text = fs::read_to_string(&config).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["provider"], "example");
+        assert_eq!(value["model"], "demo");
+        assert_eq!(value["skills"]["paths"][0], "keep");
+        assert_eq!(value["mcp"]["servers"]["demo"]["command"], "echo");
+        assert_eq!(value["plugins"]["enabledPlugins"]["keep@market"], true);
+        assert_eq!(value["plugins"]["enabledPlugins"]["demo@market"], false);
+        assert!(!text.contains("v2/"));
+    }
 
     fn dummy_plan() -> PortableAssetActionPlanDto {
         PortableAssetActionPlanDto {

@@ -14,7 +14,7 @@ import type { AgentProviderId } from '@/lib/types/orchestrator';
 import type { CcHistorySource } from '@/lib/types/core';
 
 /** 产品级 Agent 身份。 */
-export type AgentId = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini' | 'cursor' | 'pi';
+export type AgentId = 'claude' | 'codex' | 'opencode' | 'grok' | 'gemini' | 'cursor' | 'pi' | 'zcode';
 
 /** owning device 无图形剪贴板时 Workbench 贴图的 PTY 注入语法。 */
 export type HeadlessImagePasteKind =
@@ -139,6 +139,20 @@ const IDENTITIES: readonly AgentIdentity[] = [
     hasHeadless: true,
     executableNames: ['pi'],
     headlessImagePaste: 'typedAbsolutePath',
+  },
+  {
+    id: 'zcode',
+    wire: 'zcode',
+    displayName: 'ZCode',
+    hubTarget: 'zcode',
+    runtimeProvider: null,
+    sessionSource: null,
+    historySource: null,
+    hasUsage: false,
+    hasHeadless: false,
+    executableNames: ['zcode'],
+    // 未识别命令回退，不是 ZCode 官方贴图语法。
+    headlessImagePaste: 'atFileMention',
   },
 ];
 

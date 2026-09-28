@@ -630,6 +630,9 @@ fn infer_store_loaded_via_target(item: &PortableInventoryItemDto) -> Option<Agen
     if path.contains("/.pi/") || path.contains("/.pi-coding/") {
         return Some(AgentTarget::Pi);
     }
+    if path.contains("/.zcode/") {
+        return Some(AgentTarget::Zcode);
+    }
     if path.contains("/.config/opencode/") || path.contains("/.opencode/") {
         return Some(AgentTarget::OpenCode);
     }

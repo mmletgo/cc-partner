@@ -70,6 +70,7 @@ impl TargetEnvironment {
             "GROK_HOME",
             "GEMINI_HOME",
             "CURSOR_HOME",
+            "ZCODE_DATA_BASE_DIR",
         ] {
             if let Ok(v) = env::var(key) {
                 if !v.trim().is_empty() {
@@ -159,6 +160,8 @@ pub struct TargetHomes {
     pub cursor: TargetHomePaths,
     /// Pi Coding Agent 配置根（默认 `~/.pi/agent`）
     pub pi: TargetHomePaths,
+    /// ZCode CLI 配置根（`ZCODE_DATA_BASE_DIR` 非空时为 `<base>/.zcode`，否则 `~/.zcode`）
+    pub zcode: TargetHomePaths,
 }
 
 /// 目标路径解析器。
@@ -191,6 +194,7 @@ impl TargetPathResolver {
             gemini: resolve_gemini_home(env),
             cursor: resolve_cursor_home(env),
             pi: resolve_pi_home(env),
+            zcode: resolve_zcode_home(env),
         }
     }
 }
@@ -305,6 +309,25 @@ fn resolve_pi_home(env: &TargetEnvironment) -> TargetHomePaths {
     }
 }
 
+/// 解析 ZCode 配置根。
+///
+/// Business Logic（为什么需要这个函数）:
+///     ZCode 只认 `ZCODE_DATA_BASE_DIR`：非空时配置根是 `<base>/.zcode`，否则 `~/.zcode`。
+///     没有官方 `ZCODE_HOME`，禁止把别的变量当成覆盖。
+///
+/// Code Logic（这个函数做什么）:
+///     `var` 已把空白当成未设置；skills 在 config_root/skills。
+fn resolve_zcode_home(env: &TargetEnvironment) -> TargetHomePaths {
+    let config_root = env
+        .var("ZCODE_DATA_BASE_DIR")
+        .map(|base| PathBuf::from(base).join(".zcode"))
+        .unwrap_or_else(|| env.home.join(".zcode"));
+    TargetHomePaths {
+        skill_compat_root: Some(config_root.join("skills")),
+        config_root,
+    }
+}
+
 impl TargetHomes {
     /// 用户级指令默认落点。
     ///
@@ -331,6 +354,7 @@ impl TargetHomes {
                 .join("rules")
                 .join("cc-partner.exclusive.mdc"),
             AgentTarget::Pi => self.pi.config_root.join("cc-partner.exclusive.md"),
+            AgentTarget::Zcode => self.zcode.config_root.join("AGENTS.md"),
         }
     }
 }

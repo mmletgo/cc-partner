@@ -674,6 +674,10 @@ fn upsert_plugin(
     if portable_binding_is_blocked(bindings, target, change.kind, &change.native_id) {
         return Ok(());
     }
+    if target == AgentTarget::Zcode {
+        // 安装包保持 blocked。镜像只写 viewing 启用标记，不把包树落到错误目录。
+        return set_plugin_viewing_enabled(homes, target, &change.native_id, true);
+    }
     let bytes = portable_object_bytes(target, change.kind, &change.native_id, objects, bindings)?;
     let dest_dir = plugin_package_dir(homes, target, &change.native_id);
     if let Some(tree_hash) = plugin_tree_hash(&bytes) {
@@ -1013,6 +1017,7 @@ fn config_root_for(homes: &TargetHomes, target: AgentTarget) -> PathBuf {
         AgentTarget::Gemini => homes.gemini.config_root.clone(),
         AgentTarget::Cursor => homes.cursor.config_root.clone(),
         AgentTarget::Pi => homes.pi.config_root.clone(),
+        AgentTarget::Zcode => homes.zcode.config_root.clone(),
     }
 }
 
@@ -1036,21 +1041,21 @@ fn mcp_config_spec(
     env: &TargetEnvironment,
     homes: &TargetHomes,
     target: AgentTarget,
-) -> Option<(PathBuf, &'static str, McpPatchKind)> {
+) -> Option<(PathBuf, &'static [&'static str], McpPatchKind)> {
     match target {
         AgentTarget::Claude => Some((
             claude_user_mcp_config_path(env),
-            "mcpServers",
+            &["mcpServers"],
             McpPatchKind::Jsonc,
         )),
         AgentTarget::Codex => Some((
             homes.codex.config_root.join("config.toml"),
-            "mcp_servers",
+            &["mcp_servers"],
             McpPatchKind::Toml,
         )),
         AgentTarget::Grok => Some((
             homes.grok.config_root.join("config.toml"),
-            "mcp_servers",
+            &["mcp_servers"],
             McpPatchKind::Toml,
         )),
         AgentTarget::OpenCode => {
@@ -1065,19 +1070,24 @@ fn mcp_config_spec(
                     homes.opencode.config_file.clone()
                 }
             };
-            Some((path, "mcpServers", McpPatchKind::Jsonc))
+            Some((path, &["mcpServers"], McpPatchKind::Jsonc))
         }
         AgentTarget::Gemini => Some((
             homes.gemini.config_root.join("settings.json"),
-            "mcpServers",
+            &["mcpServers"],
             McpPatchKind::Jsonc,
         )),
         AgentTarget::Cursor => Some((
             homes.cursor.config_root.join("mcp.json"),
-            "mcpServers",
+            &["mcpServers"],
             McpPatchKind::Jsonc,
         )),
         AgentTarget::Pi => None,
+        AgentTarget::Zcode => Some((
+            homes.zcode.config_root.join("cli").join("config.json"),
+            &["mcp", "servers"][..],
+            McpPatchKind::Jsonc,
+        )),
     }
 }
 
@@ -1100,7 +1110,7 @@ fn mcp_leaf_value(target: AgentTarget, bytes: &[u8]) -> Result<serde_json::Value
 fn patch_mcp_leaf(
     path: &Path,
     kind: McpPatchKind,
-    table: &str,
+    table: &[&str],
     server_id: &str,
     value: Option<serde_json::Value>,
 ) -> Result<(), AppError> {
@@ -1117,7 +1127,8 @@ fn patch_mcp_leaf(
             McpPatchKind::Toml => Vec::new(),
         }
     };
-    let leaf_path = vec![table.to_string(), server_id.to_string()];
+    let mut leaf_path: Vec<String> = table.iter().map(|key| (*key).to_string()).collect();
+    leaf_path.push(server_id.to_string());
     let existing = match kind {
         McpPatchKind::Jsonc => JsoncConfigPatcher.inspect(&current, &leaf_path).ok(),
         McpPatchKind::Toml => TomlConfigPatcher.inspect(&current, &leaf_path).ok(),
@@ -1186,6 +1197,10 @@ fn set_plugin_viewing_enabled(
         AgentTarget::Gemini => {
             let path = homes.gemini.config_root.join("settings.json");
             patch_jsonc_bool(&path, &["enabledPlugins", native_id], enabled)
+        }
+        AgentTarget::Zcode => {
+            let path = homes.zcode.config_root.join("cli").join("config.json");
+            patch_jsonc_bool(&path, &["plugins", "enabledPlugins", native_id], enabled)
         }
         AgentTarget::Cursor | AgentTarget::OpenCode | AgentTarget::Pi => Ok(()),
     }

@@ -17,6 +17,7 @@ pub mod paths;
 pub mod pi;
 pub mod portable;
 pub(crate) mod tree_metadata;
+pub mod zcode;
 
 use crate::agent_hub::assets::PortableAssetPayload;
 use crate::agent_hub::models::{AgentTarget, ScopeKind};
@@ -42,6 +43,7 @@ pub use portable::{
     PortableAssetOwner, PortableDiscoveryStatus, PortableOriginKind, ProjectedAssetFile,
     TargetAssetProjection,
 };
+pub use zcode::ZcodeInstructionAdapter;
 
 /// adapter 能力支持级别。
 ///
@@ -416,6 +418,7 @@ pub fn probe_target(target: AgentTarget, env: &TargetEnvironment) -> Result<Targ
         AgentTarget::Gemini => GeminiInstructionAdapter.probe(env),
         AgentTarget::Cursor => CursorInstructionAdapter.probe(env),
         AgentTarget::Pi => PiInstructionAdapter.probe(env),
+        AgentTarget::Zcode => ZcodeInstructionAdapter.probe(env),
     }
 }
 

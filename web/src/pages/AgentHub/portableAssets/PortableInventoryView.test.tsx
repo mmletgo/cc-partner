@@ -93,6 +93,7 @@ const labels: PortableInventoryViewLabels = {
     gemini: 'From Gemini CLI',
     cursor: 'From Cursor CLI',
     pi: 'From Pi',
+    zcode: 'From ZCode',
     sharedAgents: 'Shared ~/.agents',
     portableStore: 'Store',
     unknown: 'From unknown owner',

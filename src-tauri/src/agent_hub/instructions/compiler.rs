@@ -665,6 +665,12 @@ pub fn render_discovery_before_edit(
 处理本目录（`{relative_key}`）前：读取仓库 `AGENTS.md`/`CLAUDE.md`，再读取 `.pi/` 下的 cc-partner 专属文件。\n"
             )
         }
+        AgentTarget::Zcode => {
+            format!(
+                "## 分层发现（ZCode）\n\n\
+处理本目录（`{relative_key}`）前：读取仓库根 `AGENTS.md`。Hub 草稿在 `.zcode/`，ZCode 不会加载它们。\n"
+            )
+        }
         AgentTarget::OpenCode => {
             format!(
                 "## 分层发现（OpenCode）\n\n\
@@ -762,6 +768,8 @@ pub fn compile_render(
         AgentTarget::Gemini => "GEMINI.md",
         AgentTarget::Cursor => "cc-partner.exclusive.mdc",
         AgentTarget::Pi => "cc-partner.exclusive.md",
+        // 适配器会再改写到 `.zcode/`，这里不得是仓库根 AGENTS.md。
+        AgentTarget::Zcode => "cc-partner.exclusive.md",
     }
     .to_string();
 

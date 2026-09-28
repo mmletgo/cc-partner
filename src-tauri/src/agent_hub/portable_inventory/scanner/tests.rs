@@ -2424,3 +2424,115 @@ fn project_scope_leftover_does_not_claim_user_store() {
 
     std::env::remove_var("CC_PARTNER_DATA_DIR");
 }
+
+/// Business Logic: ZCode 插件清单是数组且只认 cache；Claude 的 enabledPlugins 不得把它关掉。
+#[test]
+fn zcode_plugin_inventory_uses_array_registry_and_own_enablement() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().to_path_buf();
+    let cache = home.join(".zcode/cli/plugins/cache/market/demo/1.0.0");
+    write(
+        &cache.join(".zcode-plugin/plugin.json"),
+        r#"{"name":"demo","version":"1.0.0"}"#,
+    );
+    write(
+        &cache.join(".claude-plugin/plugin.json"),
+        r#"{"name":"should-not-win","version":"9.9.9"}"#,
+    );
+    write(
+        &cache.join("skills/inner/SKILL.md"),
+        "---\nname: inner\ndescription: bundled\n---\nbody\n",
+    );
+    let outside = home.join(".zcode/cli/plugins/staged/demo");
+    write(
+        &outside.join(".zcode-plugin/plugin.json"),
+        r#"{"name":"outside"}"#,
+    );
+    write(
+        &home.join(".zcode/cli/plugins/installed_plugins.json"),
+        &serde_json::json!({
+            "plugins": [
+                {
+                    "id": "demo@market",
+                    "installPath": cache.to_string_lossy(),
+                    "scope": "user"
+                },
+                {
+                    "id": "outside@market",
+                    "installPath": outside.to_string_lossy(),
+                    "scope": "user"
+                }
+            ]
+        })
+        .to_string(),
+    );
+    write(
+        &home.join(".claude/settings.json"),
+        r#"{"enabledPlugins":{"demo@market":false}}"#,
+    );
+    write(
+        &home.join(".zcode/cli/config.json"),
+        r#"{"provider":"example","model":"demo","skills":{},"mcp":{"servers":{}},"plugins":{"enabledPlugins":{}}}"#,
+    );
+    let env = TargetEnvironment {
+        home: home.clone(),
+        vars: BTreeMap::new(),
+        path_entries: vec![],
+    };
+    let scopes = [PortableScanScope {
+        scope_id: "user".into(),
+        scope_kind: ScopeKind::User,
+        project_id: None,
+        project_opted_in: true,
+        absolute_path: home.clone(),
+    }];
+    let plugin_query = PortableInventoryQuery {
+        target: Some(AgentTarget::Zcode),
+        kind: Some(PortableAssetKind::Plugin),
+        scope_kind: Some(ScopeKind::User),
+        local_project_id: None,
+    };
+    let (_targets, items) =
+        scan_portable_inventory_facts_query(&env, &scopes, plugin_query.clone()).expect("scan");
+    assert!(
+        items.iter().all(|item| item.native_id != "outside"),
+        "installPath outside cache must be ignored: {items:?}"
+    );
+    let demo = items
+        .iter()
+        .find(|item| item.native_id == "demo@market")
+        .expect("demo plugin");
+    assert_eq!(demo.owned_by, PortableAssetOwner::Zcode);
+    assert_eq!(demo.origin_kind, PortableOriginKind::Native);
+    assert_eq!(demo.actual_enabled, Some(true));
+    assert_eq!(demo.display_name, "demo");
+    assert!(demo.capabilities.can_disable);
+    assert!(!demo.capabilities.can_uninstall);
+    let skill_query = PortableInventoryQuery {
+        target: Some(AgentTarget::Zcode),
+        kind: Some(PortableAssetKind::Skill),
+        scope_kind: Some(ScopeKind::User),
+        local_project_id: None,
+    };
+    let (_targets, skills) =
+        scan_portable_inventory_facts_query(&env, &scopes, skill_query).expect("skills");
+    assert!(
+        skills.iter().all(|item| item.native_id != "inner"),
+        "plugin-bundled skill must stay off the skill list: {skills:?}"
+    );
+
+    write(
+        &home.join(".zcode/cli/config.json"),
+        r#"{"provider":"example","plugins":{"enabledPlugins":{"demo@market":false}},"mcp":{"servers":{"keep":{"command":"echo"}}}}"#,
+    );
+    let (_targets, disabled_items) =
+        scan_portable_inventory_facts_query(&env, &scopes, plugin_query).expect("rescan");
+    let disabled = disabled_items
+        .iter()
+        .find(|item| item.native_id == "demo@market")
+        .expect("demo still installed");
+    assert_eq!(disabled.actual_enabled, Some(false));
+    let text = fs::read_to_string(home.join(".zcode/cli/config.json")).unwrap();
+    assert!(text.contains("\"provider\":\"example\""));
+    assert!(text.contains("\"keep\""));
+}

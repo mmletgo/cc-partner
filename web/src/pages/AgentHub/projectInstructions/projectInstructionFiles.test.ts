@@ -19,6 +19,7 @@ describe('projectInstructionFiles', () => {
     expect(filesForAgent('grok').map((file) => file.path)).toEqual(['AGENTS.md', 'CLAUDE.md']);
     expect(filesForAgent('cursor').map((file) => file.path)).toEqual(['AGENTS.md', 'CLAUDE.md']);
     expect(filesForAgent('pi').map((file) => file.path)).toEqual(['AGENTS.md', 'CLAUDE.md']);
+    expect(filesForAgent('zcode').map((file) => file.path)).toEqual(['AGENTS.md']);
   });
 
   test('switching among AGENTS.md consumers keeps the shared file selected', () => {

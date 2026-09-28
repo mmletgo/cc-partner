@@ -34,7 +34,7 @@ use app_lib::agent_hub::targets::{
     compute_probe_fingerprint, probe_cli_version, resolve_executable, ClaudeInstructionAdapter,
     CodexInstructionAdapter, CursorInstructionAdapter, GeminiInstructionAdapter,
     GrokInstructionAdapter, OpenCodeInstructionAdapter, PiInstructionAdapter, TargetEnvironment,
-    TargetPathResolver,
+    TargetPathResolver, ZcodeInstructionAdapter,
 };
 use app_lib::agent_hub::AssetAdapter;
 use app_lib::AgentTarget;
@@ -186,6 +186,7 @@ fn adapter_for(target: AgentTarget) -> &'static dyn AssetAdapter {
         AgentTarget::Gemini => &GeminiInstructionAdapter,
         AgentTarget::Cursor => &CursorInstructionAdapter,
         AgentTarget::Pi => &PiInstructionAdapter,
+        AgentTarget::Zcode => &ZcodeInstructionAdapter,
     }
 }
 
@@ -330,7 +331,11 @@ fn l3_cli_contract_for_selected_target() {
         AgentTarget::OpenCode => {
             assert!(homes.opencode.config_root.starts_with(&home));
         }
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {}
+        AgentTarget::Grok
+        | AgentTarget::Gemini
+        | AgentTarget::Cursor
+        | AgentTarget::Pi
+        | AgentTarget::Zcode => {}
     }
 
     let eval = evaluate_target_support(&manifest, &snapshot);

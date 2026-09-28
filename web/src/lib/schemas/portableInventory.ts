@@ -104,6 +104,7 @@ export const portableInventoryOwnedByDecoder: Decoder<PortableInventoryOwnedBy> 
     'gemini',
     'cursor',
     'pi',
+    'zcode',
     'sharedAgents',
     'portableStore',
     'unknown',

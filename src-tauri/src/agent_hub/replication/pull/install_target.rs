@@ -237,6 +237,7 @@ pub(super) async fn resolve_install_root(
             AgentTarget::Gemini => project_path.join(".gemini"),
             AgentTarget::Cursor => project_path.join(".cursor"),
             AgentTarget::Pi => project_path.join(".pi"),
+            AgentTarget::Zcode => project_path.join(".zcode"),
         });
     }
     Ok(match item.target {
@@ -263,5 +264,10 @@ pub(super) async fn resolve_install_root(
             .map(PathBuf::from)
             .unwrap_or_else(|| env_home.join(".cursor")),
         AgentTarget::Pi => env_home.join(".pi").join("agent"),
+        AgentTarget::Zcode => std::env::var_os("ZCODE_DATA_BASE_DIR")
+            .map(PathBuf::from)
+            .filter(|base| !base.as_os_str().is_empty())
+            .map(|base| base.join(".zcode"))
+            .unwrap_or_else(|| env_home.join(".zcode")),
     })
 }

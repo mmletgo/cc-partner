@@ -90,6 +90,8 @@ pub enum DiscoveryGate {
     },
     /// 仅当 Pi settings 列出该 Claude skills 路径时扫描
     PiSettingsSkills,
+    /// 仅当该 scope 的 ZCode 配置没有非空 `mcp.servers` 时扫描
+    ZcodeNativeMcpEmpty,
 }
 
 /// 单条发现根。
@@ -236,6 +238,10 @@ pub fn resolve_path(
             homes.pi.config_root.to_string_lossy().into_owned(),
         ),
         (
+            "{zcodeConfigRoot}",
+            homes.zcode.config_root.to_string_lossy().into_owned(),
+        ),
+        (
             "{opencodeConfigRoot}",
             homes.opencode.config_root.to_string_lossy().into_owned(),
         ),
@@ -271,6 +277,7 @@ fn config_root_for(hinted: Option<AgentTarget>, homes: &TargetHomes) -> PathBuf 
         AgentTarget::Gemini => homes.gemini.config_root.clone(),
         AgentTarget::Cursor => homes.cursor.config_root.clone(),
         AgentTarget::Pi => homes.pi.config_root.clone(),
+        AgentTarget::Zcode => homes.zcode.config_root.clone(),
     }
 }
 
@@ -292,6 +299,57 @@ pub fn gate_allows(
         None => true,
         Some(DiscoveryGate::EnvUnset { names }) => names.iter().all(|name| env.var(name).is_none()),
         Some(DiscoveryGate::PiSettingsSkills) => pi_settings_lists_path(homes, env, resolved),
+        Some(DiscoveryGate::ZcodeNativeMcpEmpty) => {
+            !zcode_native_mcp_servers_nonempty(env, homes, resolved)
+        }
+    }
+}
+
+/// 借用 `.agents/mcp.json` 是否被同一 scope 的非空 ZCode `mcp.servers` 挡住。
+///
+/// Business Logic（为什么需要这个函数）:
+///     ZCode 只在自己的配置没有 server 时才加载 `.agents/mcp.json`。
+///     有 native server 时借用项不得再出现，避免两套清单。
+///
+/// Code Logic（这个函数做什么）:
+///     用户 scope（借用路径在 `home/.agents`）读 `<config_root>/cli/config.json`；
+///     项目 scope 读 `<project>/.zcode/config.json`。缺文件或空对象视为未挡住。
+fn zcode_native_mcp_servers_nonempty(
+    env: &TargetEnvironment,
+    homes: &TargetHomes,
+    resolved_borrow_path: &Path,
+) -> bool {
+    let Some(config) = zcode_mcp_config_for_borrow_path(env, homes, resolved_borrow_path) else {
+        return false;
+    };
+    let Ok(text) = fs::read_to_string(config) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    value
+        .get("mcp")
+        .and_then(|mcp| mcp.get("servers"))
+        .and_then(|servers| servers.as_object())
+        .is_some_and(|servers| !servers.is_empty())
+}
+
+/// 由 `.agents/mcp.json` 路径推出同一 scope 的 ZCode 配置文件。
+fn zcode_mcp_config_for_borrow_path(
+    env: &TargetEnvironment,
+    homes: &TargetHomes,
+    resolved_borrow_path: &Path,
+) -> Option<PathBuf> {
+    let agents_dir = resolved_borrow_path.parent()?;
+    if agents_dir.file_name().and_then(|name| name.to_str()) != Some(".agents") {
+        return None;
+    }
+    let scope_root = agents_dir.parent()?;
+    if scope_root == env.home {
+        Some(homes.zcode.config_root.join("cli").join("config.json"))
+    } else {
+        Some(scope_root.join(".zcode").join("config.json"))
     }
 }
 
@@ -433,6 +491,40 @@ fn scan_one_root(
     }
 }
 
+/// 取出 MCP server 对象。
+///
+/// Business Logic（为什么需要这个函数）:
+///     ZCode 的 native leaf 是 `config.json` 里的 `mcp.servers`，不是顶层 `mcpServers`。
+///     `.agents/mcp.json` 仍按常见 `mcpServers` 读；没有该键时再试嵌套对象。
+///
+/// Code Logic（这个函数做什么）:
+///     `config.json` 且 target 为 ZCode 时只读 `mcp.servers`；其它 JSON 先 `mcpServers` 再嵌套。
+fn mcp_server_object(
+    target: AgentTarget,
+    path: &Path,
+    value: &serde_json::Value,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    if target == AgentTarget::Zcode && file_name == Some("config.json") {
+        return value
+            .get("mcp")
+            .and_then(|mcp| mcp.get("servers"))
+            .and_then(|servers| servers.as_object())
+            .cloned();
+    }
+    value
+        .get("mcpServers")
+        .and_then(|servers| servers.as_object())
+        .cloned()
+        .or_else(|| {
+            value
+                .get("mcp")
+                .and_then(|mcp| mcp.get("servers"))
+                .and_then(|servers| servers.as_object())
+                .cloned()
+        })
+}
+
 fn scan_mcp_path(
     target: AgentTarget,
     scope_kind: ScopeKind,
@@ -457,7 +549,7 @@ fn scan_mcp_path(
     let Ok(value) = parse_json_or_jsonc(&text) else {
         return Ok(vec![]);
     };
-    let Some(map) = value.get("mcpServers").and_then(|v| v.as_object()).cloned() else {
+    let Some(map) = mcp_server_object(target, path, &value) else {
         return Ok(vec![]);
     };
     Ok(parse_mcp_servers_json_map(

@@ -21,7 +21,7 @@ use crate::agent_hub::targets::{
     AssetAdapter, ClaudeInstructionAdapter, CodexInstructionAdapter, CursorInstructionAdapter,
     GeminiInstructionAdapter, GrokInstructionAdapter, InstructionSource, InstructionSourceRole,
     LocalScopeMapping, OpenCodeInstructionAdapter, PiInstructionAdapter, TargetEnvironment,
-    TargetPathResolver,
+    TargetPathResolver, ZcodeInstructionAdapter,
 };
 use crate::agent_hub::user_instructions::slot_history::{
     extract_slot_text, replace_slot_text, snapshot_dirty_slot_versions, InstructionSlotKey,
@@ -417,6 +417,7 @@ pub async fn inspect_user_instruction_workspace_with_env(
         Box::new(GeminiInstructionAdapter),
         Box::new(CursorInstructionAdapter),
         Box::new(PiInstructionAdapter),
+        Box::new(ZcodeInstructionAdapter),
     ];
     let mut targets = Vec::with_capacity(adapters.len());
     for adapter in adapters {
@@ -742,6 +743,10 @@ fn add_declared_candidates(
                 InstructionSourceRole::ManagedProjection,
             ),
         ],
+        AgentTarget::Zcode => vec![(
+            homes.zcode.config_root.join("AGENTS.md"),
+            InstructionSourceRole::NativePrimary,
+        )],
         AgentTarget::Pi => vec![
             (
                 homes.pi.config_root.join("AGENTS.md"),
@@ -966,9 +971,11 @@ fn resolve_managed_target_path(
         AgentTarget::Claude => homes.claude.config_root.join("CLAUDE.md"),
         AgentTarget::Codex => homes.codex.config_root.join("AGENTS.md"),
         AgentTarget::OpenCode => homes.opencode.config_root.join("AGENTS.md"),
-        AgentTarget::Grok | AgentTarget::Gemini | AgentTarget::Cursor | AgentTarget::Pi => {
-            homes.default_user_instruction_path(target)
-        }
+        AgentTarget::Grok
+        | AgentTarget::Gemini
+        | AgentTarget::Cursor
+        | AgentTarget::Pi
+        | AgentTarget::Zcode => homes.default_user_instruction_path(target),
     }
 }
 

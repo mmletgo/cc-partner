@@ -1772,6 +1772,13 @@ async fn install_payload_to_target(
                 AgentTarget::OpenCode => resolve_opencode_mcp_config_path(&root),
                 AgentTarget::Gemini => root.join("settings.json"),
                 AgentTarget::Cursor => root.join("mcp.json"),
+                AgentTarget::Zcode => {
+                    if item.scope_id.starts_with("project:") {
+                        root.join("config.json")
+                    } else {
+                        root.join("cli").join("config.json")
+                    }
+                }
                 AgentTarget::Pi => {
                     return Ok(());
                 }
@@ -1784,6 +1791,7 @@ async fn install_payload_to_target(
                             | AgentTarget::OpenCode
                             | AgentTarget::Gemini
                             | AgentTarget::Cursor
+                            | AgentTarget::Zcode
                     ) {
                         // ownership-aware semantic patch；skipExisting 若 leaf 已存在则跳过
                         let current_bytes = if path.exists() {
@@ -1791,11 +1799,15 @@ async fn install_payload_to_target(
                         } else {
                             b"{}".to_vec()
                         };
+                        let mut leaf_path = if item.target == AgentTarget::Zcode {
+                            vec!["mcp".to_string(), "servers".to_string()]
+                        } else {
+                            vec!["mcpServers".to_string()]
+                        };
+                        leaf_path.push(server.key.clone());
                         let existing = {
                             use crate::agent_hub::config_patch::SemanticConfigPatcher;
-                            JsoncConfigPatcher
-                                .inspect(&current_bytes, &["mcpServers".into(), server.key.clone()])
-                                .ok()
+                            JsoncConfigPatcher.inspect(&current_bytes, &leaf_path).ok()
                         };
                         if change.install_mode == PortablePullInstallMode::SkipExisting
                             && existing.as_ref().map(|o| o.present).unwrap_or(false)
@@ -1813,7 +1825,7 @@ async fn install_payload_to_target(
                         });
                         let patches = [ManagedConfigPatch {
                             owner_id: format!("portable-pull:{}", server.key),
-                            path: vec!["mcpServers".into(), server.key.clone()],
+                            path: leaf_path,
                             value: Some(value),
                             expected_base_hash: expected,
                         }];
