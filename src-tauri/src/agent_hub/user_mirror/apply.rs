@@ -180,7 +180,7 @@ pub(crate) async fn apply_user_mirror_instructions_with_env(
 ///
 /// Business Logic: 该 Agent 任一步失败则 Failed，不回滚已写文件，不影响其他 Agent；
 ///     include_instructions=false 时原生指令文件与 Hub 三槽覆盖全部跳过。
-/// Code Logic: 先逐条 native；全成功后再覆盖三槽；portable 按条目继续，收集首个失败。
+/// Code Logic: native、三槽、portable 都独立尝试；记录首个失败但继续其余项。
 async fn apply_one_agent(
     dest_state: &AppState,
     env: &TargetEnvironment,
@@ -190,23 +190,27 @@ async fn apply_one_agent(
     bindings: &[UserMirrorObjectBinding],
     include_instructions: bool,
 ) -> UserMirrorAgentResultDto {
+    let mut first_error: Option<AppError> = None;
     if include_instructions {
         for change in &agent_plan.instruction_writes {
             if let Err(error) =
                 write_one_native(env, homes, agent_plan.target, change, objects, bindings)
             {
-                return failed_agent(agent_plan.target, &error);
+                first_error.get_or_insert(error);
             }
         }
         if let Err(error) =
             sync_hub_slots_for_agent(dest_state, agent_plan.target, objects, bindings).await
         {
-            return failed_agent(agent_plan.target, &error);
+            first_error.get_or_insert(error);
         }
     }
     if let Err(error) =
         apply_agent_portables(dest_state, env, homes, agent_plan, objects, bindings).await
     {
+        first_error.get_or_insert(error);
+    }
+    if let Some(error) = first_error {
         return failed_agent(agent_plan.target, &error);
     }
     UserMirrorAgentResultDto {
@@ -220,10 +224,9 @@ async fn apply_one_agent(
 /// 把一条 native instruction_write 写到 dest 白名单路径。
 ///
 /// Business Logic: logical_id 必须在 dest 进程白名单内；仓库根 AGENTS.md 不得作为 Grok 输出。
-///     镜像是已确认覆盖：CAS 必须对落盘当下，不能用 preview 时的 destHash
-///     （冻结/传输期间对端 Hub 投影常改写 CLAUDE.md / AGENTS.md）。
+///     镜像确认绑定 preview destHash；写盘前漂移必须拒绝，不能覆盖用户的新编辑。
 /// Code Logic: 查 `user_level_mirror_native_paths`；Write/Replace 取 CAS UTF-8；Clear 写空串；
-///     expected hash 取当前文件 sha256（缺失则 None）。
+///     expected hash 使用 preview 的 destHash，由 AtomicProjectionWriter 做逐文件 CAS。
 pub(crate) fn write_one_native(
     env: &TargetEnvironment,
     homes: &TargetHomes,
@@ -239,29 +242,7 @@ pub(crate) fn write_one_native(
             "USER_NATIVE_INSTRUCTION_CONTENT_TOO_LARGE".to_string(),
         ));
     }
-    write_dest_native_file(
-        env,
-        &path,
-        &content,
-        current_native_file_hash(&path)?.as_deref(),
-    )
-}
-
-/// 镜像写盘前读取 dest 当前文件 hash，供 AtomicProjectionWriter CAS。
-///
-/// Business Logic: preview destHash 在传输后往往已过期；当下 hash 才能覆盖漂移。
-/// Code Logic: 不存在 → None；目录 → 校验错误；否则 sha256 全文。
-fn current_native_file_hash(path: &Path) -> Result<Option<String>, AppError> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    if path.is_dir() {
-        return Err(AppError::validation(
-            USER_MIRROR_NATIVE_PATH_FORBIDDEN.to_string(),
-        ));
-    }
-    let bytes = fs::read(path)?;
-    Ok(Some(sha256_hex(&bytes)))
+    write_dest_native_file(env, &path, &content, change.dest_hash.as_deref())
 }
 
 /// dest 进程把 logical_id 映射为白名单绝对路径。
@@ -338,14 +319,7 @@ fn write_dest_native_file(
     content: &str,
     expected_hash: Option<&str>,
 ) -> Result<(), AppError> {
-    match write_dest_native_file_once(env, path, content, expected_hash) {
-        Ok(()) => Ok(()),
-        Err(error) if is_native_instruction_stale(&error) => {
-            let refreshed = current_native_file_hash(path)?;
-            write_dest_native_file_once(env, path, content, refreshed.as_deref())
-        }
-        Err(error) => Err(error),
-    }
+    write_dest_native_file_once(env, path, content, expected_hash)
 }
 
 fn write_dest_native_file_once(
@@ -366,10 +340,6 @@ fn write_dest_native_file_once(
         }
         Err(error) => Err(error),
     }
-}
-
-fn is_native_instruction_stale(error: &AppError) -> bool {
-    error.to_string().contains("USER_NATIVE_INSTRUCTION_STALE")
 }
 
 fn is_native_path_not_allowed(error: &AppError) -> bool {
@@ -628,7 +598,10 @@ fn upsert_skill_or_command(
     bindings: &[UserMirrorObjectBinding],
 ) -> Result<(), AppError> {
     if portable_binding_is_blocked(bindings, target, change.kind, &change.native_id) {
-        return Ok(());
+        return Err(AppError::validation(format!(
+            "USER_MIRROR_SOURCE_BLOCKED:{}",
+            change.native_id
+        )));
     }
     let bytes = portable_object_bytes(target, change.kind, &change.native_id, objects, bindings)?;
     let data_dir = crate::config::data_dir()?;
@@ -672,7 +645,10 @@ fn upsert_plugin(
     bindings: &[UserMirrorObjectBinding],
 ) -> Result<(), AppError> {
     if portable_binding_is_blocked(bindings, target, change.kind, &change.native_id) {
-        return Ok(());
+        return Err(AppError::validation(format!(
+            "USER_MIRROR_SOURCE_BLOCKED:{}",
+            change.native_id
+        )));
     }
     if target == AgentTarget::Zcode {
         // 安装包保持 blocked。镜像只写 viewing 启用标记，不把包树落到错误目录。
@@ -719,7 +695,10 @@ fn upsert_mcp(
         AppError::not_found(format!("USER_MIRROR_OBJECT_NOT_FOUND:{}", change.native_id))
     })?;
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
-        return Ok(());
+        return Err(AppError::validation(format!(
+            "USER_MIRROR_MCP_LEAF_INVALID:{}",
+            change.native_id
+        )));
     }
     if bytes_are_legacy_lossy(&bytes) {
         return Err(AppError::validation(
@@ -727,12 +706,12 @@ fn upsert_mcp(
         ));
     }
     let Some((path, table, kind)) = mcp_config_spec(env, homes, target) else {
-        return Ok(());
+        return Err(AppError::validation(format!(
+            "USER_MIRROR_MCP_DEST_UNSUPPORTED:{}",
+            target.as_str()
+        )));
     };
-    // Codex 等 TOML 源在 pack 失败时会带上整份 raw config；不能让单条坏 leaf 拖垮该 Agent。
-    let Ok(value) = mcp_leaf_value(target, &bytes) else {
-        return Ok(());
-    };
+    let value = mcp_leaf_value(target, &bytes)?;
     patch_mcp_leaf(&path, kind, table, &change.native_id, Some(value))
 }
 
@@ -965,7 +944,10 @@ fn portable_object_bytes(
         .ok_or_else(|| AppError::not_found(format!("USER_MIRROR_OBJECT_NOT_FOUND:{native_id}")))
 }
 
-/// 源端跳过的逃逸软链 / source_blocked：dest 不得因此把整个 Agent 标失败。
+/// 判断源端冻结是否把 portable 标为不可安装。
+///
+/// Business Logic: blocked binding 没有可写对象，dest 必须显式失败，不能假装安装成功。
+/// Code Logic: binding.blocked 或空 object hash 均视为 blocked。
 fn portable_binding_is_blocked(
     bindings: &[UserMirrorObjectBinding],
     target: AgentTarget,
@@ -1377,6 +1359,9 @@ fn mirror_error_code(error: &AppError) -> String {
         "USER_NATIVE_INSTRUCTION_CONTENT_TOO_LARGE",
         "USER_MIRROR_NATIVE_NOT_UTF8",
         "USER_MIRROR_OBJECT_NOT_FOUND",
+        "USER_MIRROR_SOURCE_BLOCKED",
+        "USER_MIRROR_MCP_DEST_UNSUPPORTED",
+        "USER_MIRROR_MCP_LEAF_INVALID",
     ] {
         if text.contains(code) {
             return code.to_string();
@@ -1388,8 +1373,8 @@ fn mirror_error_code(error: &AppError) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_user_mirror_instructions_with_env, dest_path_for_logical_id,
-        filter_agent_plan_for_selection, write_one_native,
+        apply_one_agent, apply_user_mirror_instructions_with_env, dest_path_for_logical_id,
+        filter_agent_plan_for_selection, upsert_mcp, upsert_skill_or_command, write_one_native,
     };
     use crate::agent_hub::models::AgentTarget;
     use crate::agent_hub::portable_inventory::PortableAssetKind;
@@ -1650,14 +1635,13 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     Push 冻结/传输可达数分钟，对端 Hub 投影可能改写 CLAUDE.md / AGENTS.md；
-    ///     用户已确认覆盖，apply 不得因 preview destHash 过期报 STALE 而拒写。
+    ///     preview 后目标原生文件发生漂移时，逐文件 CAS 必须拒绝覆盖用户新正文。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     preview 时 dest=OLD-DEST；apply 前改成 DRIFTED-DEST；断言 Claude succeeded
-    ///     且落盘为 FROM-SRC。
+    ///     preview 时 dest=OLD-DEST；apply 前改成 DRIFTED-DEST；断言 Claude failed
+    ///     且新正文保持不变。
     #[tokio::test]
-    async fn apply_overwrites_native_file_even_if_dest_hash_drifted_after_preview() {
+    async fn apply_rejects_native_file_when_dest_hash_drifted_after_preview() {
         let env = seed_dual_env().await;
         write(
             env.source_home.join(".claude/CLAUDE.md").as_path(),
@@ -1725,12 +1709,12 @@ mod tests {
         let claude = claude_result(&results);
         assert_eq!(
             claude.state,
-            UserMirrorItemState::Succeeded,
-            "drifted dest native file must still be overwritten after confirmed mirror: {claude:?}"
+            UserMirrorItemState::Failed,
+            "drifted dest native file must fail preview-bound CAS: {claude:?}"
         );
         assert_eq!(
             fs::read_to_string(env.dest_home.join(".claude/CLAUDE.md")).unwrap(),
-            "FROM-SRC"
+            "DRIFTED-DEST"
         );
     }
 
@@ -1962,11 +1946,11 @@ mod tests {
 
     /// Business Logic（为什么需要这个测试）:
     ///     仓库软链形式的 Skill（逃逸链但真树可解析）必须能跨机镜像进对端 portable store；
-    ///     断链逃逸仍 fail-closed 跳过，且都不得拖垮其余 Skill。
+    ///     断链逃逸仍 fail-closed 标失败，但不得阻止其余 Skill 落地。
     ///
     /// Code Logic（这个测试做什么）:
     ///     源 keep 真树 + escaped 软链（指向存在的仓库真树）+ broken 软链（目标缺失）；
-    ///     apply 后 Claude succeeded，keep 照常落地，escaped 进 dest portable store 并挂
+    ///     apply 后 Claude Failed 且错误明确；keep 照常落地，escaped 进 dest portable store并挂
     ///     store 软链，broken 不落 dest。
     #[tokio::test]
     async fn apply_pushes_resolvable_escape_skill_into_dest_store_and_skips_broken_link() {
@@ -1999,8 +1983,12 @@ mod tests {
         let (_, built, results) = run_apply_mirror(&env).await;
         assert_eq!(
             claude_result(&results).state,
-            UserMirrorItemState::Succeeded,
+            UserMirrorItemState::Failed,
             "{results:?}"
+        );
+        assert_eq!(
+            claude_result(&results).error_code.as_deref(),
+            Some("USER_MIRROR_SOURCE_BLOCKED")
         );
         let escaped_binding = built
             .item_bindings
@@ -2201,15 +2189,134 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
-    ///     空 MCP blob 不能让整个 Agent 失败；应跳过该 leaf，保留 dest 原文。
+    ///     MCP 无目标落点或 leaf 解析失败不能假装成功，必须保留明确失败状态。
     ///
     /// Code Logic（这个测试做什么）:
-    ///     锁定 upsert_mcp 对空白字节直接 Ok。
+    ///     Pi 使用合法对象触发无落点；Claude 使用坏 JSON 触发解析失败，二者都返回显式错误。
     #[test]
-    fn empty_mcp_leaf_is_skipped() {
-        let src = include_str!("apply.rs");
-        assert!(src.contains("bytes.iter().all(|b| b.is_ascii_whitespace())"));
-        assert!(src.contains("let Ok(value) = mcp_leaf_value(target, &bytes) else"));
+    fn mcp_without_destination_or_valid_leaf_fails_explicitly() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env = TargetEnvironment {
+            home: temp.path().to_path_buf(),
+            vars: BTreeMap::new(),
+            path_entries: Vec::new(),
+        };
+        let homes = TargetPathResolver::resolve_all(&env);
+        let change = portable_change(PortableAssetKind::Mcp, "server", UserMirrorChangeOp::Write);
+        for (target, bytes, expected) in [
+            (
+                AgentTarget::Pi,
+                b"{}".as_slice(),
+                "USER_MIRROR_MCP_DEST_UNSUPPORTED",
+            ),
+            (
+                AgentTarget::Claude,
+                b"not-json".as_slice(),
+                "USER_MIRROR_MCP_LEAF_INVALID",
+            ),
+        ] {
+            let hash = crate::agent_hub::object_store::sha256_hex(bytes);
+            let objects = BTreeMap::from([(hash.clone(), bytes.to_vec())]);
+            let bindings = vec![crate::agent_hub::user_mirror::UserMirrorObjectBinding {
+                target,
+                logical_id: None,
+                kind: Some(PortableAssetKind::Mcp),
+                native_id: Some("server".into()),
+                object_hash: hash,
+                blocked: false,
+            }];
+            let error = upsert_mcp(&env, &homes, target, &change, &objects, &bindings)
+                .expect_err("MCP apply must fail explicitly");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     source blocked 的 Skill/Command 不能被当成已成功安装。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     blocked binding 调 upsert，断言 USER_MIRROR_SOURCE_BLOCKED。
+    #[test]
+    fn blocked_portable_binding_fails_explicitly() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env = TargetEnvironment {
+            home: temp.path().to_path_buf(),
+            vars: BTreeMap::new(),
+            path_entries: Vec::new(),
+        };
+        let homes = TargetPathResolver::resolve_all(&env);
+        let change = portable_change(
+            PortableAssetKind::Skill,
+            "blocked-skill",
+            UserMirrorChangeOp::Write,
+        );
+        let bindings = vec![crate::agent_hub::user_mirror::UserMirrorObjectBinding {
+            target: AgentTarget::Claude,
+            logical_id: None,
+            kind: Some(PortableAssetKind::Skill),
+            native_id: Some("blocked-skill".into()),
+            object_hash: String::new(),
+            blocked: true,
+        }];
+
+        let error = upsert_skill_or_command(
+            &homes,
+            AgentTarget::Claude,
+            &change,
+            &BTreeMap::new(),
+            &bindings,
+        )
+        .expect_err("blocked source must fail");
+
+        assert!(error.to_string().contains("USER_MIRROR_SOURCE_BLOCKED"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     同一 Agent 的原生写失败后，独立 portable 删除仍应继续执行并保留 partial 事实。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     注入白名单外 native change + 目标多余 Skill；apply_one_agent 返回 Failed 但 Skill 已删除。
+    #[tokio::test]
+    async fn apply_one_agent_continues_independent_items_after_first_error() {
+        let env = seed_dual_env().await;
+        let skill = env.dest_home.join(".claude/skills/remove-me/SKILL.md");
+        write(&skill, "---\nname: remove-me\ndescription: d\n---\nbody\n");
+        crate::agent_hub::portable_inventory::invalidate_portable_inventory_cache();
+        let homes = TargetPathResolver::resolve_all(&env.dest_env);
+        let agent_plan = UserMirrorAgentPlanDto {
+            target: AgentTarget::Claude,
+            instruction_writes: vec![UserMirrorFileChangeDto {
+                logical_id: "claude.native.NOT-ALLOWED".into(),
+                op: UserMirrorChangeOp::Write,
+                source_hash: None,
+                dest_hash: None,
+            }],
+            portable_upserts: Vec::new(),
+            portable_deletes: vec![portable_change(
+                PortableAssetKind::Skill,
+                "remove-me",
+                UserMirrorChangeOp::Delete,
+            )],
+            plugin_disables: Vec::new(),
+            mcp_deletes: Vec::new(),
+        };
+
+        let result = apply_one_agent(
+            &env.dest_state,
+            &env.dest_env,
+            &homes,
+            &agent_plan,
+            &BTreeMap::new(),
+            &[],
+            true,
+        )
+        .await;
+
+        assert_eq!(result.state, UserMirrorItemState::Failed);
+        assert!(
+            !skill.exists(),
+            "portable delete must continue after native failure"
+        );
     }
 
     fn portable_change(

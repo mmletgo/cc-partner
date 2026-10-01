@@ -267,12 +267,33 @@ fn map_portable_item(
     }
 }
 
-/// `inventory_snapshot_hash`：agents 的 canonical JSON SHA-256（不含 refreshed_at）。
+/// `inventory_snapshot_hash`：Agent 身份、内容与启用状态的 canonical JSON SHA-256。
 ///
-/// Business Logic: preview/apply 绑定该 hash；刷新时间不得使快照漂移。
-/// Code Logic: serde → RFC8785 子集 canonicalize → sha256_hex。
+/// Business Logic: preview/apply 绑定内容事实；portable-store 收编只改变诊断/展示来源，
+///     不得让同一份内容在 preview 与 freeze 之间自触发 stale。
+/// Code Logic: 排除 displayName/warnings/refreshedAt，仅规范化 target、槽、native 内容事实、
+///     portable identity/content/enabled/credential hash，再 canonicalize → sha256_hex。
 fn hash_agents_snapshot(agents: &[UserMirrorAgentInventoryDto]) -> Result<String, AppError> {
-    let value = serde_json::to_value(agents)?;
+    let value = serde_json::Value::Array(
+        agents
+            .iter()
+            .map(|agent| {
+                serde_json::json!({
+                    "target": agent.target,
+                    "slots": agent.slots,
+                    "nativeFiles": agent.native_files,
+                    "items": agent.items.iter().map(|item| serde_json::json!({
+                        "kind": item.kind,
+                        "nativeId": item.native_id,
+                        "contentHash": item.content_hash,
+                        "treeHash": item.tree_hash,
+                        "actualEnabled": item.actual_enabled,
+                        "mcpCredential": item.mcp_credential,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    );
     let bytes = canonicalize_value(&value).map_err(|error| {
         AppError::validation(format!("user_mirror_inventory_hash_canon:{error}"))
     })?;
@@ -281,7 +302,7 @@ fn hash_agents_snapshot(agents: &[UserMirrorAgentInventoryDto]) -> Result<String
 
 #[cfg(test)]
 mod tests {
-    use super::build_local_user_mirror_inventory;
+    use super::{build_local_user_mirror_inventory, hash_agents_snapshot};
     use crate::agent_hub::models::AgentTarget;
     use crate::agent_hub::portable_inventory::PortableAssetKind;
     use crate::backend::runtime::build_app_state;
@@ -332,6 +353,37 @@ mod tests {
             fs::create_dir_all(parent).expect("parent");
         }
         fs::write(path, text).expect("write");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     portable-store 收编只改变来源诊断/展示名时，preview 与 freeze 的内容快照必须保持一致。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     同一 inventory 仅改 displayName/warnings，断言 snapshot hash 不变。
+    #[tokio::test]
+    async fn snapshot_hash_ignores_portable_display_and_warning_metadata() {
+        let env = seed_user_mirror_homes().await;
+        write(
+            env.claude_home.join("skills/hello/SKILL.md").as_path(),
+            "---\nname: hello\ndescription: d\n---\nbody\n",
+        );
+        let inventory = build_local_user_mirror_inventory(&env.app_state, "device")
+            .await
+            .expect("inventory");
+        let mut changed = inventory.agents.clone();
+        let item = changed
+            .iter_mut()
+            .flat_map(|agent| &mut agent.items)
+            .find(|item| item.native_id == "hello")
+            .expect("hello item");
+        item.display_name = "renamed display".to_string();
+        item.warnings
+            .push("store_loaded_via_other_path".to_string());
+
+        assert_eq!(
+            hash_agents_snapshot(&inventory.agents).expect("before hash"),
+            hash_agents_snapshot(&changed).expect("after hash")
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

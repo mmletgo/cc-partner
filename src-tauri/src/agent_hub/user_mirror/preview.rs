@@ -38,14 +38,16 @@ pub fn diff_inventories(
 ) -> UserMirrorPlanDto {
     let source_agents = index_agents(source);
     let dest_agents = index_agents(dest);
+    let catalog_mismatch = catalog_mismatch_reason(&source_agents, &dest_agents);
     let agents = all_targets(source, dest)
         .into_iter()
-        .map(|target| {
-            diff_agent(
+        .map(|target| match catalog_mismatch {
+            Some(_) => empty_agent_plan(target),
+            None => diff_agent(
                 target,
                 source_agents.get(&target).copied(),
                 dest_agents.get(&target).copied(),
-            )
+            ),
         })
         .collect();
     let (remote_inventory_snapshot_hash, local_inventory_snapshot_hash) =
@@ -61,10 +63,54 @@ pub fn diff_inventories(
         credential_bearing_count: source.credential_bearing_count,
         has_credential_bearing_assets: source.credential_bearing_count > 0,
         agents,
-        blocking_reasons: Vec::new(),
+        blocking_reasons: catalog_mismatch.into_iter().collect(),
+        peer_plans: Vec::new(),
         peer_device_ids: Vec::new(),
         // preview 不带选择；apply 时由 request.selection 合并进内存 plan。
         selection: None,
+    }
+}
+
+/// 检查源/目标 Agent catalog 是否完全一致。
+///
+/// Business Logic: 新端出现而旧端缺席的 Agent 不能按空库存解释，否则会生成清空/删除计划。
+/// Code Logic: 比较 target key 集；不一致返回含两侧缺席 target 的稳定阻断原因。
+fn catalog_mismatch_reason(
+    source: &BTreeMap<AgentTarget, &UserMirrorAgentInventoryDto>,
+    dest: &BTreeMap<AgentTarget, &UserMirrorAgentInventoryDto>,
+) -> Option<String> {
+    let source_targets: BTreeSet<AgentTarget> = source.keys().copied().collect();
+    let dest_targets: BTreeSet<AgentTarget> = dest.keys().copied().collect();
+    if source_targets == dest_targets {
+        return None;
+    }
+    let missing_source = dest_targets
+        .difference(&source_targets)
+        .map(|target| target.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let missing_destination = source_targets
+        .difference(&dest_targets)
+        .map(|target| target.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!(
+        "USER_MIRROR_AGENT_CATALOG_MISMATCH:missingSource={missing_source}:missingDestination={missing_destination}"
+    ))
+}
+
+/// 为 catalog 不一致的 Agent 生成零变更占位。
+///
+/// Business Logic: 阻断计划仍需告诉 UI 受影响 Agent，但绝不能包含清空或删除动作。
+/// Code Logic: 仅保留 target，所有 mutation 列表为空。
+fn empty_agent_plan(target: AgentTarget) -> UserMirrorAgentPlanDto {
+    UserMirrorAgentPlanDto {
+        target,
+        instruction_writes: Vec::new(),
+        portable_upserts: Vec::new(),
+        portable_deletes: Vec::new(),
+        plugin_disables: Vec::new(),
+        mcp_deletes: Vec::new(),
     }
 }
 
@@ -607,5 +653,41 @@ mod tests {
             plan.local_inventory_snapshot_hash,
             source.inventory_snapshot_hash
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     新版 catalog 增加 Agent 后，旧源缺席该 Agent 不能被解释成空库存并清空目标端。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     source 只有 Claude，dest 额外有 ZCode Skill；preview 必须阻断且所有变更为空。
+    #[test]
+    fn missing_source_agent_blocks_without_generating_deletes() {
+        let source = inventory_with_items(
+            "src",
+            AgentTarget::Claude,
+            PortableAssetKind::Skill,
+            &["shared"],
+        );
+        let mut dest = source.clone();
+        dest.source_device_id = "dst".into();
+        dest.inventory_snapshot_hash = "snap-dst".into();
+        dest.agents.push(UserMirrorAgentInventoryDto {
+            target: AgentTarget::Zcode,
+            slots: empty_slots(),
+            native_files: Vec::new(),
+            items: vec![portable_item(PortableAssetKind::Skill, "zcode-only")],
+        });
+
+        let plan = diff_inventories(&source, &dest, "src", "dst", UserMirrorDirection::Pull);
+
+        assert_eq!(plan.blocking_reasons.len(), 1, "{plan:?}");
+        assert!(plan.blocking_reasons[0].contains("missingSource=zcode"));
+        assert!(plan.agents.iter().all(|agent| {
+            agent.instruction_writes.is_empty()
+                && agent.portable_upserts.is_empty()
+                && agent.portable_deletes.is_empty()
+                && agent.plugin_disables.is_empty()
+                && agent.mcp_deletes.is_empty()
+        }));
     }
 }

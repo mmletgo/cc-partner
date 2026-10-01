@@ -14,8 +14,9 @@ use super::inventory::build_local_user_mirror_inventory;
 use super::ledger::UserMirrorClaim;
 use super::models::{
     ApplyUserMirrorRequest, UserMirrorAgentResultDto, UserMirrorDirection, UserMirrorItemState,
-    UserMirrorPlanDto, UserMirrorResultDto, USER_MIRROR_CAPABILITY_UNSUPPORTED,
-    USER_MIRROR_PEER_OFFLINE, USER_MIRROR_PREVIEW_REQUIRED, USER_MIRROR_STALE,
+    UserMirrorPeerPlanDto, UserMirrorPeerResultDto, UserMirrorPlanDto, UserMirrorResultDto,
+    USER_MIRROR_CAPABILITY_UNSUPPORTED, USER_MIRROR_PEER_OFFLINE, USER_MIRROR_PREVIEW_REQUIRED,
+    USER_MIRROR_STALE,
 };
 use super::receive::{CommitUserMirrorRequest, CommitUserMirrorResponse, PrepareUserMirrorRequest};
 use super::selection::{
@@ -81,8 +82,8 @@ pub async fn apply_push_user_mirror(
     if request.selection.is_some() {
         plan.selection = request.selection.clone();
     }
-    let peers = push_peer_ids(&plan);
-    if peers.is_empty() {
+    let peer_plans = push_peer_plans(&plan);
+    if peer_plans.is_empty() {
         return Err(AppError::validation(USER_MIRROR_PREVIEW_REQUIRED));
     }
 
@@ -97,7 +98,7 @@ pub async fn apply_push_user_mirror(
             &request.client_request_id,
             &plan,
         )),
-        UserMirrorClaim::Claimed(_) => run_claimed_push(state, &request, &plan, &peers).await,
+        UserMirrorClaim::Claimed(_) => run_claimed_push(state, &request, &plan, &peer_plans).await,
     }
 }
 
@@ -112,7 +113,7 @@ async fn run_claimed_push(
     state: &AppState,
     request: &ApplyUserMirrorRequest,
     plan: &UserMirrorPlanDto,
-    peers: &[String],
+    peer_plans: &[UserMirrorPeerPlanDto],
 ) -> Result<UserMirrorResultDto, AppError> {
     if plan.expires_at.as_str() < Utc::now().to_rfc3339().as_str() {
         let fail = failed_code_result(
@@ -123,6 +124,22 @@ async fn run_claimed_push(
         );
         complete_plan(state, request, &fail).await?;
         return Err(AppError::conflict(USER_MIRROR_STALE));
+    }
+
+    if !plan.blocking_reasons.is_empty() {
+        let outcomes = peer_plans
+            .iter()
+            .map(|peer_plan| {
+                let reason = peer_plan
+                    .blocking_reasons
+                    .first()
+                    .unwrap_or(&plan.blocking_reasons[0]);
+                blocked_peer_outcome(peer_plan, reason)
+            })
+            .collect::<Vec<_>>();
+        let result = aggregate_result(request, plan, peer_plans, &outcomes);
+        complete_plan(state, request, &result).await?;
+        return Ok(result);
     }
 
     // 幂等收编：preview 时已迁移，此处多为 StoreLink skip，inventory hash 与 preview 一致。
@@ -173,8 +190,10 @@ async fn run_claimed_push(
         guard.clone()
     };
 
-    let mut jobs = Vec::with_capacity(peers.len());
-    for peer_id in peers {
+    let mut jobs = Vec::with_capacity(peer_plans.len());
+    let mut outcomes = Vec::new();
+    for peer_plan in peer_plans {
+        let peer_id = &peer_plan.destination_device_id;
         let device = device_map.get(peer_id).cloned();
         let label = device
             .as_ref()
@@ -188,15 +207,19 @@ async fn run_claimed_push(
             &format!("{}:{peer_id}", request.client_request_id),
         )
         .await?;
-        jobs.push((peer_id.clone(), label, device));
+        if let Some(reason) = peer_plan.blocking_reasons.first() {
+            outcomes.push(blocked_peer_outcome(peer_plan, reason));
+        } else {
+            jobs.push((peer_plan.clone(), label, device));
+        }
     }
 
     let source_device_id = state.device_id.as_str().to_string();
     let peer_client = PeerClient::new();
     let request_id = request.client_request_id.clone();
     let plan = Arc::new(plan.clone());
-    let outcomes: Vec<PeerPushOutcome> = stream::iter(jobs)
-        .map(|(peer_id, _label, device)| {
+    let network_outcomes: Vec<PeerPushOutcome> = stream::iter(jobs)
+        .map(|(peer_plan, _label, device)| {
             let built = Arc::clone(&built);
             let plan = Arc::clone(&plan);
             let peer_client = peer_client.clone();
@@ -208,7 +231,7 @@ async fn run_claimed_push(
                     peer_client: &peer_client,
                     source_device_id: &source_device_id,
                     request_id: &request_id,
-                    peer_id: &peer_id,
+                    peer_plan: &peer_plan,
                     device: device.as_ref(),
                     built: built.as_ref(),
                     plan: plan.as_ref(),
@@ -220,12 +243,13 @@ async fn run_claimed_push(
         .buffer_unordered(MAX_TARGET_PARALLELISM)
         .collect()
         .await;
+    outcomes.extend(network_outcomes);
 
     for outcome in &outcomes {
         persist_target_outcome(state, &request.client_request_id, outcome).await?;
     }
 
-    let result = aggregate_result(request, plan.as_ref(), &outcomes);
+    let result = aggregate_result(request, plan.as_ref(), peer_plans, &outcomes);
     complete_plan(state, request, &result).await?;
     Ok(result)
 }
@@ -234,7 +258,7 @@ struct PushOnePeerArgs<'a> {
     peer_client: &'a PeerClient,
     source_device_id: &'a str,
     request_id: &'a str,
-    peer_id: &'a str,
+    peer_plan: &'a UserMirrorPeerPlanDto,
     device: Option<&'a Device>,
     built: &'a BuiltUserMirrorSelection,
     plan: &'a UserMirrorPlanDto,
@@ -257,12 +281,13 @@ async fn push_one_peer(args: PushOnePeerArgs<'_>) -> PeerPushOutcome {
         peer_client,
         source_device_id,
         request_id,
-        peer_id,
+        peer_plan,
         device,
         built,
         plan,
         selection_hash,
     } = args;
+    let peer_id = peer_plan.destination_device_id.as_str();
     let fail = |code: &str| PeerPushOutcome {
         peer_device_id: peer_id.to_string(),
         status: TargetPushStatus::Failed,
@@ -287,6 +312,11 @@ async fn push_one_peer(args: PushOnePeerArgs<'_>) -> PeerPushOutcome {
 
     let mut dest_plan = plan.clone();
     dest_plan.destination_device_id = peer_id.to_string();
+    dest_plan.remote_inventory_snapshot_hash = peer_plan.remote_inventory_snapshot_hash.clone();
+    dest_plan.agents = peer_plan.agents.clone();
+    dest_plan.blocking_reasons = peer_plan.blocking_reasons.clone();
+    dest_plan.peer_plans.clear();
+    dest_plan.peer_device_ids.clear();
     let dest_client_request_id = format!("{request_id}:{peer_id}");
     let prepare_body = PrepareUserMirrorRequest {
         envelope: built.envelope.clone(),
@@ -567,6 +597,43 @@ fn push_peer_ids(plan: &UserMirrorPlanDto) -> Vec<String> {
     ids
 }
 
+/// 读取 Push 的逐 peer 计划，并兼容升级前只存顶层差异的单目标 plan。
+///
+/// Business Logic: 新计划必须逐目标绑定 destination hash；旧数据库 plan 仅单目标可兼容，
+///     旧多目标 plan 无独立 hash，必须重新 preview，禁止再次复制首目标差异。
+/// Code Logic: peerPlans 非空直接克隆；legacy 恰好一个 peer 时复制顶层字段，否则返回空。
+fn push_peer_plans(plan: &UserMirrorPlanDto) -> Vec<UserMirrorPeerPlanDto> {
+    if !plan.peer_plans.is_empty() {
+        return plan.peer_plans.clone();
+    }
+    let peer_ids = push_peer_ids(plan);
+    if peer_ids.len() != 1 {
+        return Vec::new();
+    }
+    vec![UserMirrorPeerPlanDto {
+        destination_device_id: peer_ids[0].clone(),
+        remote_inventory_snapshot_hash: plan.remote_inventory_snapshot_hash.clone(),
+        agents: plan.agents.clone(),
+        blocking_reasons: plan.blocking_reasons.clone(),
+    }]
+}
+
+/// 为 preview 已阻断的目标构造不发网络请求的失败 outcome。
+///
+/// Business Logic: catalog 不一致/preview 离线只拒绝该 peer，其他目标仍可继续。
+/// Code Logic: 复用普通 aggregate/persistence 路径，errorCode 保留具体阻断原因。
+fn blocked_peer_outcome(peer_plan: &UserMirrorPeerPlanDto, reason: &str) -> PeerPushOutcome {
+    PeerPushOutcome {
+        peer_device_id: peer_plan.destination_device_id.clone(),
+        status: TargetPushStatus::Failed,
+        error_code: Some(reason.to_string()),
+        transfer_id: None,
+        missing_object_count: 0,
+        transferred_object_count: 0,
+        dest_result: None,
+    }
+}
+
 fn parse_plan(plan_json: &str) -> Result<UserMirrorPlanDto, AppError> {
     serde_json::from_str(plan_json).map_err(AppError::from)
 }
@@ -576,22 +643,32 @@ fn outcome_unknown_result(
     client_request_id: &str,
     plan: &UserMirrorPlanDto,
 ) -> UserMirrorResultDto {
+    let peer_results = push_peer_plans(plan)
+        .into_iter()
+        .map(|peer_plan| UserMirrorPeerResultDto {
+            destination_device_id: peer_plan.destination_device_id,
+            partial: true,
+            agents: peer_plan
+                .agents
+                .iter()
+                .map(|agent| UserMirrorAgentResultDto {
+                    target: agent.target,
+                    state: UserMirrorItemState::OutcomeUnknown,
+                    error_code: None,
+                    message: None,
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let agents = aggregate_peer_agents(&peer_results);
     UserMirrorResultDto {
         plan_token: plan_token.to_string(),
         client_request_id: client_request_id.to_string(),
         source_device_id: plan.source_device_id.clone(),
         destination_device_id: plan.destination_device_id.clone(),
         partial: true,
-        agents: plan
-            .agents
-            .iter()
-            .map(|agent| UserMirrorAgentResultDto {
-                target: agent.target,
-                state: UserMirrorItemState::OutcomeUnknown,
-                error_code: None,
-                message: None,
-            })
-            .collect(),
+        agents,
+        peer_results,
     }
 }
 
@@ -601,59 +678,138 @@ fn failed_code_result(
     code: &str,
     state: UserMirrorItemState,
 ) -> UserMirrorResultDto {
+    let peer_results = push_peer_plans(plan)
+        .into_iter()
+        .map(|peer_plan| UserMirrorPeerResultDto {
+            destination_device_id: peer_plan.destination_device_id,
+            partial: true,
+            agents: peer_plan
+                .agents
+                .iter()
+                .map(|agent| UserMirrorAgentResultDto {
+                    target: agent.target,
+                    state,
+                    error_code: Some(code.to_string()),
+                    message: Some(code.to_string()),
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let agents = aggregate_peer_agents(&peer_results);
     UserMirrorResultDto {
         plan_token: request.plan_token.clone(),
         client_request_id: request.client_request_id.clone(),
         source_device_id: plan.source_device_id.clone(),
         destination_device_id: plan.destination_device_id.clone(),
         partial: true,
-        agents: plan
-            .agents
-            .iter()
-            .map(|agent| UserMirrorAgentResultDto {
-                target: agent.target,
-                state,
-                error_code: Some(code.to_string()),
-                message: Some(code.to_string()),
-            })
-            .collect(),
+        agents,
+        peer_results,
     }
 }
 
 fn aggregate_result(
     request: &ApplyUserMirrorRequest,
     plan: &UserMirrorPlanDto,
+    peer_plans: &[UserMirrorPeerPlanDto],
     outcomes: &[PeerPushOutcome],
 ) -> UserMirrorResultDto {
-    let any_failed = outcomes
+    let by_peer = outcomes
         .iter()
-        .any(|o| o.status == TargetPushStatus::Failed);
-    let dest_result = outcomes
+        .map(|outcome| (outcome.peer_device_id.as_str(), outcome))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let peer_results = peer_plans
         .iter()
-        .find_map(|o| o.dest_result.clone())
-        .or_else(|| {
-            outcomes.iter().find_map(|o| {
-                o.error_code.as_ref().map(|code| {
-                    failed_code_result(request, plan, code, UserMirrorItemState::Failed)
-                })
-            })
-        });
-    let mut result = dest_result.unwrap_or_else(|| {
-        failed_code_result(
-            request,
-            plan,
-            USER_MIRROR_PEER_OFFLINE,
-            UserMirrorItemState::Failed,
-        )
-    });
-    result.plan_token = request.plan_token.clone();
-    result.client_request_id = request.client_request_id.clone();
-    result.source_device_id = plan.source_device_id.clone();
-    result.destination_device_id = plan.destination_device_id.clone();
-    if any_failed {
-        result.partial = true;
+        .map(|peer_plan| {
+            let outcome = by_peer
+                .get(peer_plan.destination_device_id.as_str())
+                .copied();
+            peer_result_from_outcome(peer_plan, outcome)
+        })
+        .collect::<Vec<_>>();
+    let agents = aggregate_peer_agents(&peer_results);
+    let partial = peer_results.iter().any(|peer| peer.partial)
+        || agents
+            .iter()
+            .any(|agent| agent.state != UserMirrorItemState::Succeeded);
+    UserMirrorResultDto {
+        plan_token: request.plan_token.clone(),
+        client_request_id: request.client_request_id.clone(),
+        source_device_id: plan.source_device_id.clone(),
+        destination_device_id: plan.destination_device_id.clone(),
+        partial,
+        agents,
+        peer_results,
     }
-    result
+}
+
+/// 把 transport outcome 转为单 peer 的逐 Agent 结果。
+fn peer_result_from_outcome(
+    peer_plan: &UserMirrorPeerPlanDto,
+    outcome: Option<&PeerPushOutcome>,
+) -> UserMirrorPeerResultDto {
+    if let Some(result) = outcome.and_then(|outcome| outcome.dest_result.as_ref()) {
+        return UserMirrorPeerResultDto {
+            destination_device_id: peer_plan.destination_device_id.clone(),
+            partial: result.partial,
+            agents: result.agents.clone(),
+        };
+    }
+    let (state, error_code) = match outcome {
+        Some(outcome) if outcome.status == TargetPushStatus::Failed => (
+            UserMirrorItemState::Failed,
+            outcome
+                .error_code
+                .clone()
+                .or_else(|| Some(USER_MIRROR_PEER_OFFLINE.to_string())),
+        ),
+        _ => (UserMirrorItemState::OutcomeUnknown, None),
+    };
+    let agents = peer_plan
+        .agents
+        .iter()
+        .map(|agent| UserMirrorAgentResultDto {
+            target: agent.target,
+            state,
+            error_code: error_code.clone(),
+            message: error_code.clone(),
+        })
+        .collect();
+    UserMirrorPeerResultDto {
+        destination_device_id: peer_plan.destination_device_id.clone(),
+        partial: true,
+        agents,
+    }
+}
+
+/// 按 Agent 聚合各 peer 的最差状态，兼容旧顶层结果消费者。
+fn aggregate_peer_agents(
+    peer_results: &[UserMirrorPeerResultDto],
+) -> Vec<UserMirrorAgentResultDto> {
+    let mut by_target: std::collections::BTreeMap<
+        crate::agent_hub::models::AgentTarget,
+        UserMirrorAgentResultDto,
+    > = std::collections::BTreeMap::new();
+    for peer in peer_results {
+        for agent in &peer.agents {
+            match by_target.get(&agent.target) {
+                Some(current) if item_state_rank(current.state) >= item_state_rank(agent.state) => {
+                }
+                _ => {
+                    by_target.insert(agent.target, agent.clone());
+                }
+            }
+        }
+    }
+    by_target.into_values().collect()
+}
+
+fn item_state_rank(state: UserMirrorItemState) -> u8 {
+    match state {
+        UserMirrorItemState::Succeeded => 0,
+        UserMirrorItemState::Skipped => 1,
+        UserMirrorItemState::OutcomeUnknown => 2,
+        UserMirrorItemState::Failed => 3,
+    }
 }
 
 async fn complete_plan(
@@ -780,19 +936,20 @@ async fn persist_target_outcome(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_push_user_mirror, map_peer_error_code, USER_MIRROR_CAPABILITY_UNSUPPORTED,
-        USER_MIRROR_DEVICE_ID_MISMATCH,
+        aggregate_result, apply_push_user_mirror, map_peer_error_code, push_peer_plans,
+        PeerPushOutcome, USER_MIRROR_CAPABILITY_UNSUPPORTED, USER_MIRROR_DEVICE_ID_MISMATCH,
     };
     use crate::agent_hub::portable_inventory::PortableAssetKind;
     use crate::agent_hub::replication::receiver::{PreparePushResponse, PutObjectResponse};
     use crate::agent_hub::replication::sender::{
-        list_failed_source_push_targets, SOURCE_PUSH_KIND_USER_MIRROR,
+        list_failed_source_push_targets, TargetPushStatus, SOURCE_PUSH_KIND_USER_MIRROR,
     };
     use crate::agent_hub::user_mirror::inventory::build_local_user_mirror_inventory;
     use crate::agent_hub::user_mirror::models::{
-        ApplyUserMirrorRequest, UserMirrorDirection, UserMirrorInventoryDto,
-        UserMirrorPortableKeyDto, UserMirrorSelectionFilterDto,
-        USER_MIRROR_CAPABILITY_UNSUPPORTED as UNSUPPORTED,
+        ApplyUserMirrorRequest, UserMirrorAgentPlanDto, UserMirrorAgentResultDto,
+        UserMirrorDirection, UserMirrorInventoryDto, UserMirrorItemState, UserMirrorPeerPlanDto,
+        UserMirrorPlanDto, UserMirrorPortableKeyDto, UserMirrorResultDto,
+        UserMirrorSelectionFilterDto, USER_MIRROR_CAPABILITY_UNSUPPORTED as UNSUPPORTED,
     };
     use crate::agent_hub::user_mirror::receive::{
         CommitUserMirrorRequest, CommitUserMirrorResponse, PrepareUserMirrorRequest,
@@ -854,12 +1011,30 @@ mod tests {
         fs::write(path, text).expect("write");
     }
 
-    fn empty_dest_inventory(device: &str) -> UserMirrorInventoryDto {
+    fn empty_dest_inventory(
+        device: &str,
+        source: &UserMirrorInventoryDto,
+    ) -> UserMirrorInventoryDto {
         UserMirrorInventoryDto {
             source_device_id: device.to_string(),
             inventory_snapshot_hash: format!("dest-{device}"),
             refreshed_at: "2026-08-23T00:00:00Z".into(),
-            agents: Vec::new(),
+            agents: source
+                .agents
+                .iter()
+                .map(
+                    |agent| crate::agent_hub::user_mirror::UserMirrorAgentInventoryDto {
+                        target: agent.target,
+                        slots: crate::agent_hub::user_mirror::UserMirrorSlotHashesDto {
+                            common: None,
+                            adapted: None,
+                            exclusive: None,
+                        },
+                        native_files: Vec::new(),
+                        items: Vec::new(),
+                    },
+                )
+                .collect(),
             credential_bearing_count: 0,
         }
     }
@@ -1021,6 +1196,7 @@ mod tests {
                                     destination_device_id: c.health_device_id.clone(),
                                     partial: false,
                                     agents: vec![],
+                                    peer_results: vec![],
                                 },
                             })
                         }
@@ -1057,7 +1233,7 @@ mod tests {
         let source = build_local_user_mirror_inventory(state, state.device_id.as_str())
             .await
             .expect("inventory");
-        let dest = empty_dest_inventory(peer_id);
+        let dest = empty_dest_inventory(peer_id, &source);
         let mut plan = preview_from_two_inventories(
             state,
             &source,
@@ -1069,6 +1245,12 @@ mod tests {
         .await
         .expect("preview");
         plan.peer_device_ids = vec![peer_id.to_string()];
+        plan.peer_plans = vec![UserMirrorPeerPlanDto {
+            destination_device_id: peer_id.to_string(),
+            remote_inventory_snapshot_hash: plan.remote_inventory_snapshot_hash.clone(),
+            agents: plan.agents.clone(),
+            blocking_reasons: plan.blocking_reasons.clone(),
+        }];
         sqlx::query("UPDATE agent_hub_user_mirror_plans SET plan_json = ? WHERE plan_token = ?")
             .bind(serde_json::to_string(&plan).unwrap())
             .bind(&plan.plan_token)
@@ -1215,7 +1397,7 @@ mod tests {
         let source = build_local_user_mirror_inventory(&env.state, env.state.device_id.as_str())
             .await
             .unwrap();
-        let dest = empty_dest_inventory("peer-ok");
+        let dest = empty_dest_inventory("peer-ok", &source);
         let mut plan = preview_from_two_inventories(
             &env.state,
             &source,
@@ -1227,6 +1409,19 @@ mod tests {
         .await
         .unwrap();
         plan.peer_device_ids = vec!["peer-ok".into(), "peer-bad".into()];
+        let first_peer_plan = UserMirrorPeerPlanDto {
+            destination_device_id: "peer-ok".into(),
+            remote_inventory_snapshot_hash: plan.remote_inventory_snapshot_hash.clone(),
+            agents: plan.agents.clone(),
+            blocking_reasons: Vec::new(),
+        };
+        plan.peer_plans = vec![
+            first_peer_plan.clone(),
+            UserMirrorPeerPlanDto {
+                destination_device_id: "peer-bad".into(),
+                ..first_peer_plan
+            },
+        ];
         sqlx::query("UPDATE agent_hub_user_mirror_plans SET plan_json = ? WHERE plan_token = ?")
             .bind(serde_json::to_string(&plan).unwrap())
             .bind(&plan.plan_token)
@@ -1386,5 +1581,138 @@ mod tests {
             "unselected keep-b must not be frozen: {skill_ids:?}"
         );
         handle.abort();
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     第二台目标失败时，第一台成功结果与第二台具体 errorCode 都必须保留。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     直接聚合一成功一失败 outcome，断言 peerResults 两项且顶层 Agent 取最差 Failed。
+    #[test]
+    fn aggregate_result_preserves_each_peer_and_worst_agent_state() {
+        let agent_plan = UserMirrorAgentPlanDto {
+            target: crate::AgentTarget::Claude,
+            instruction_writes: Vec::new(),
+            portable_upserts: Vec::new(),
+            portable_deletes: Vec::new(),
+            plugin_disables: Vec::new(),
+            mcp_deletes: Vec::new(),
+        };
+        let peer_plans = vec![
+            UserMirrorPeerPlanDto {
+                destination_device_id: "peer-a".into(),
+                remote_inventory_snapshot_hash: "hash-a".into(),
+                agents: vec![agent_plan.clone()],
+                blocking_reasons: Vec::new(),
+            },
+            UserMirrorPeerPlanDto {
+                destination_device_id: "peer-b".into(),
+                remote_inventory_snapshot_hash: "hash-b".into(),
+                agents: vec![agent_plan.clone()],
+                blocking_reasons: Vec::new(),
+            },
+        ];
+        let plan = UserMirrorPlanDto {
+            plan_token: "plan".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            direction: UserMirrorDirection::Push,
+            source_device_id: "source".into(),
+            destination_device_id: "peer-a".into(),
+            remote_inventory_snapshot_hash: "hash-a".into(),
+            local_inventory_snapshot_hash: "source-hash".into(),
+            credential_bearing_count: 0,
+            has_credential_bearing_assets: false,
+            agents: vec![agent_plan],
+            blocking_reasons: Vec::new(),
+            peer_plans: peer_plans.clone(),
+            peer_device_ids: vec!["peer-a".into(), "peer-b".into()],
+            selection: None,
+        };
+        let succeeded_agent = UserMirrorAgentResultDto {
+            target: crate::AgentTarget::Claude,
+            state: UserMirrorItemState::Succeeded,
+            error_code: None,
+            message: None,
+        };
+        let outcomes = vec![
+            PeerPushOutcome {
+                peer_device_id: "peer-a".into(),
+                status: TargetPushStatus::Committed,
+                error_code: None,
+                transfer_id: Some("transfer-a".into()),
+                missing_object_count: 0,
+                transferred_object_count: 0,
+                dest_result: Some(UserMirrorResultDto {
+                    plan_token: "plan".into(),
+                    client_request_id: "req:peer-a".into(),
+                    source_device_id: "source".into(),
+                    destination_device_id: "peer-a".into(),
+                    partial: false,
+                    agents: vec![succeeded_agent],
+                    peer_results: Vec::new(),
+                }),
+            },
+            PeerPushOutcome {
+                peer_device_id: "peer-b".into(),
+                status: TargetPushStatus::Failed,
+                error_code: Some("USER_MIRROR_PEER_OFFLINE".into()),
+                transfer_id: None,
+                missing_object_count: 0,
+                transferred_object_count: 0,
+                dest_result: None,
+            },
+        ];
+        let request = ApplyUserMirrorRequest {
+            plan_token: "plan".into(),
+            client_request_id: "req".into(),
+            selection: None,
+        };
+
+        let result = aggregate_result(&request, &plan, &peer_plans, &outcomes);
+
+        assert!(result.partial);
+        assert_eq!(result.peer_results.len(), 2);
+        assert_eq!(result.peer_results[0].destination_device_id, "peer-a");
+        assert_eq!(
+            result.peer_results[0].agents[0].state,
+            UserMirrorItemState::Succeeded
+        );
+        assert_eq!(result.peer_results[1].destination_device_id, "peer-b");
+        assert_eq!(
+            result.peer_results[1].agents[0].state,
+            UserMirrorItemState::Failed
+        );
+        assert_eq!(
+            result.peer_results[1].agents[0].error_code.as_deref(),
+            Some("USER_MIRROR_PEER_OFFLINE")
+        );
+        assert_eq!(result.agents[0].state, UserMirrorItemState::Failed);
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     legacy 多目标 plan 只有首目标差异，升级后必须要求重新预览，不能复制到其他机器。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构造 peerPlans 缺省且 peerDeviceIds=2 的旧 plan，断言无可执行 peer plan。
+    #[test]
+    fn legacy_multi_peer_plan_requires_repreview() {
+        let plan: UserMirrorPlanDto = serde_json::from_value(serde_json::json!({
+            "planToken": "legacy",
+            "expiresAt": "2099-01-01T00:00:00Z",
+            "direction": "push",
+            "sourceDeviceId": "source",
+            "destinationDeviceId": "peer-a",
+            "remoteInventorySnapshotHash": "only-peer-a",
+            "localInventorySnapshotHash": "source-hash",
+            "credentialBearingCount": 0,
+            "hasCredentialBearingAssets": false,
+            "agents": [],
+            "blockingReasons": [],
+            "peerDeviceIds": ["peer-a", "peer-b"],
+            "selection": null
+        }))
+        .expect("legacy plan");
+
+        assert!(push_peer_plans(&plan).is_empty());
     }
 }
