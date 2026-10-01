@@ -2,6 +2,7 @@
 //!
 //! 子模块:
 //! - `state`:工作/休息状态机(纯算法)
+//! - `focus_anchor`:遮罩焦点锚点(打开前记录 frontmost,最终关闭后恢复)
 //! - `monitor`:键鼠采样(跨平台)
 //! - `overlay`:健康遮罩 create/navigate/close 规划（几何去重见 `monitor_geom`）
 //! - `reminder`:提醒生命周期 + 免打扰
@@ -9,6 +10,7 @@
 //! - `validation`:配置范围/DND/贪睡检查算术
 //! - daemon 入口 `start_health_daemon`(本文件)
 
+mod focus_anchor;
 pub mod monitor;
 pub mod overlay;
 pub mod reminder;
@@ -18,7 +20,7 @@ pub mod validation;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -76,10 +78,20 @@ pub struct HealthRuntime {
     pub overlay_queue: Mutex<OverlayQueue>,
     /// 当前 session 倒计时权威态(None=未在倒计时);多屏共享同一 end_ts。
     pub overlay_rest: Mutex<Option<OverlayRestSession>>,
+    /// 遮罩打开前的前台焦点锚点(None=未记录)。
+    ///
+    /// Business Logic: 遮罩弹出并点击按钮后 macOS 会把本进程(含主窗口)带到前台,
+    ///     遮罩关闭时需把焦点还给用户之前在用的 app。打开遮罩前捕获(排除本进程),
+    ///     全部遮罩最终关闭时消费(本进程仍在前台才恢复,用户已切走则丢弃)。
+    /// Code Logic: 读写只发生在主线程闭包内(capture/merge 在 `open_health_overlay`
+    ///     派发的主线程闭包,take/restore 在 `close_all_health_overlay_windows` 派发的
+    ///     主线程闭包);Mutex 仅防并发测试与未来跨线程调用,不承担热路径同步。
+    ///     pub(crate) 而非 pub:锚点类型是 crate 内部实现细节,不进入对外可见性。
+    pub(crate) overlay_focus_anchor: Mutex<Option<focus_anchor::OverlayFocusAnchor>>,
 }
 impl HealthRuntime {
     /// Business Logic: daemon 与命令层需要共享时钟、模板态和遮罩队列。
-    /// Code Logic: Idle 时钟 + 空模板 map + 空队列 + 未暂停。
+    /// Code Logic: Idle 时钟 + 空模板 map + 空队列 + 未暂停 + 无焦点锚点。
     pub fn new() -> Self {
         Self {
             machine: Mutex::new(HealthStateMachine::new()),
@@ -88,6 +100,7 @@ impl HealthRuntime {
             templates: Mutex::new(HashMap::new()),
             overlay_queue: Mutex::new(OverlayQueue::default()),
             overlay_rest: Mutex::new(None),
+            overlay_focus_anchor: Mutex::new(None),
         }
     }
 }
@@ -259,7 +272,7 @@ async fn handle_sample(
             enqueue_overlay(&mut q, &tmpl.id)
         };
         if should_open {
-            if let Err(e) = open_health_overlay(app, &tmpl.id) {
+            if let Err(e) = open_health_overlay(app, &state.health, &tmpl.id) {
                 tracing::warn!("打开全屏健康遮罩失败: {e}");
             }
         }
@@ -471,10 +484,32 @@ async fn credit_health_completed(
 /// Business Logic: 健康监测启用后,久坐/喝水提醒触发时需在每块屏幕覆盖
 ///     一个透明置顶遮罩窗口强制打断。Ubuntu/X11 上 xcap 可能把同一块屏列成多个
 ///     重叠 output，必须去重，否则两层透明窗会叠出新旧文案。已有窗口要改 URL，
-///     不能跳过（队列下一项会继续显示上一模板）。
-/// Code Logic: 枚举 xcap 显示器 → 逻辑像素几何去重 → 规划 create/navigate/close →
-///     先关多余窗，再给已有窗 eval location.replace，最后新建缺失窗。
-pub fn open_health_overlay(app: &AppHandle, template_id: &str) -> Result<(), AppError> {
+///     不能跳过（队列下一项会继续显示上一模板）。遮罩会抢走用户正在使用的 app
+///     的前台焦点，需在开窗前记录「焦点锚点」，供全部遮罩最终关闭后恢复。
+/// Code Logic: 先 run_on_main_thread 派发 fire-and-forget 闭包捕获 frontmost
+///     (排除本进程)并 merge 进 `overlay_focus_anchor`(已有锚点不覆盖)→ 枚举
+///     xcap 显示器 → 逻辑像素几何去重 → 规划 create/navigate/close → 先关多余窗，
+///     再给已有窗 eval location.replace，最后新建缺失窗。捕获派发不阻塞等待
+///     (避免主线程死锁)；锚点仅在主线程读写。
+pub fn open_health_overlay(
+    app: &AppHandle,
+    runtime: &Arc<HealthRuntime>,
+    template_id: &str,
+) -> Result<(), AppError> {
+    // 焦点锚点捕获:必须在创建/聚焦遮罩窗口之前排队到主线程执行,否则 frontmost
+    // 已变成本进程。fire-and-forget + 已有锚点不覆盖,队列推进复用同一锚点。
+    let runtime_for_capture = Arc::clone(runtime);
+    if let Err(e) = app.run_on_main_thread(move || {
+        let captured = focus_anchor::capture_frontmost_excluding_current_process();
+        let mut guard = runtime_for_capture.overlay_focus_anchor.lock().unwrap();
+        focus_anchor::merge_anchor(&mut guard, captured);
+        if let Some(anchor) = guard.as_ref() {
+            tracing::debug!(pid = anchor.pid, name = ?anchor.name, "健康遮罩焦点锚点已记录");
+        }
+    }) {
+        tracing::warn!(error = %e, "派发焦点锚点捕获到主线程失败");
+    }
+
     let monitors = list_unique_xcap_monitors()?;
     let geoms: Vec<_> = monitors.iter().map(geom_from_xcap).collect();
     let existing: Vec<String> = app
@@ -538,17 +573,38 @@ pub fn open_health_overlay(app: &AppHandle, template_id: &str) -> Result<(), App
     Ok(())
 }
 
-/// 关闭所有全屏健康提醒遮罩窗口(纯关窗,不触碰休息态)。
+/// 关闭所有全屏健康提醒遮罩窗口(纯关窗,不触碰休息态),并做焦点锚点收尾。
 ///
 /// Business Logic: 用户在遮罩上点击推迟/跳过/已饮水,或休息倒计时到点后,需关闭全部遮罩
 ///     窗口恢复桌面。是否取消进行中的休息 task 由调用方(`close_health_overlay` 命令 /
-///     到点收尾 task)按语义决定,本函数只负责关窗。
-/// Code Logic: 遍历 `app.webview_windows()`,label 以 `health-overlay-` 前缀开头则 close()。
-pub fn close_all_health_overlay_windows(app: &AppHandle) {
+///     到点收尾 task)按语义决定,本函数只负责关窗。本函数是所有遮罩最终消失的唯一终点:
+///     点击遮罩按钮会让 macOS 把本进程(含主窗口)带到前台,关窗后需把焦点还给用户
+///     打开遮罩前在用的 app(焦点锚点);用户已手动切走则丢弃锚点不动作。
+/// Code Logic: 遍历 `app.webview_windows()`,label 以 `health-overlay-` 前缀开头则
+///     close();之后 run_on_main_thread 派发 fire-and-forget 闭包:take
+///     `overlay_focus_anchor` → `restore_focus_to_anchor`(内部重查 frontmost 经
+///     `should_restore` 判断,通过才激活锚点 app 并 tracing::info 记录结果/跳过原因)。
+///     无锚点时跳过。锚点仅在主线程读写;派发失败仅 tracing::warn。
+pub fn close_all_health_overlay_windows(app: &AppHandle, runtime: &Arc<HealthRuntime>) {
     for (label, win) in app.webview_windows() {
         if label.starts_with("health-overlay-") {
             let _ = win.close();
         }
+    }
+    // 焦点锚点恢复:全部遮罩已关,若本进程仍在前台则把前台还给锚点 app。
+    let runtime_for_restore = Arc::clone(runtime);
+    if let Err(e) = app.run_on_main_thread(move || {
+        let anchor = runtime_for_restore
+            .overlay_focus_anchor
+            .lock()
+            .unwrap()
+            .take();
+        match anchor {
+            Some(anchor) => focus_anchor::restore_focus_to_anchor(&anchor),
+            None => tracing::debug!("无焦点锚点,跳过前台焦点恢复"),
+        }
+    }) {
+        tracing::warn!(error = %e, "派发焦点锚点恢复到主线程失败");
     }
 }
 
@@ -672,11 +728,11 @@ pub fn start_overlay_session(
             advance_overlay_queue(&mut q)
         };
         if let Some(next_id) = next {
-            if let Err(e) = open_health_overlay(&app_h, &next_id) {
+            if let Err(e) = open_health_overlay(&app_h, &health, &next_id) {
                 tracing::warn!("打开排队遮罩失败: {e}");
             }
         } else {
-            close_all_health_overlay_windows(&app_h);
+            close_all_health_overlay_windows(&app_h, &health);
         }
     });
     end_ts
@@ -733,19 +789,20 @@ pub(crate) fn snooze_template_runtime(
 /// Business Logic（为什么需要这个函数）:
 ///     跳过/完成即时模板后不能把还在排队的提醒一起关掉。
 /// Code Logic（这个函数做什么）:
-///     cancel 当前 session → advance queue → 有 next 则 open，否则 close all。
-pub fn dismiss_current_overlay(app: &AppHandle, runtime: &HealthRuntime) {
+///     cancel 当前 session → advance queue → 有 next 则 open（队列推进复用同一焦点锚点），
+///     否则 close all（内含焦点锚点恢复收尾）。
+pub fn dismiss_current_overlay(app: &AppHandle, runtime: &Arc<HealthRuntime>) {
     cancel_overlay_rest(runtime);
     let next = {
         let mut q = runtime.overlay_queue.lock().unwrap();
         advance_overlay_queue(&mut q)
     };
     if let Some(next_id) = next {
-        if let Err(e) = open_health_overlay(app, &next_id) {
+        if let Err(e) = open_health_overlay(app, runtime, &next_id) {
             tracing::warn!("打开排队遮罩失败: {e}");
         }
     } else {
-        close_all_health_overlay_windows(app);
+        close_all_health_overlay_windows(app, runtime);
     }
 }
 

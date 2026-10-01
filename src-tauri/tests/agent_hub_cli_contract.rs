@@ -60,7 +60,7 @@ fn support_manifest_compiles_and_lists_hub_targets() {
     names.sort_unstable();
     assert_eq!(
         names,
-        vec!["claude", "codex", "cursor", "gemini", "grok", "opencode", "pi"]
+        vec!["claude", "codex", "cursor", "gemini", "grok", "opencode", "pi", "zcode"]
     );
 }
 

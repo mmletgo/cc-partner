@@ -160,6 +160,7 @@ dependencies = [
  "libc",
  "mdns-sd",
  "notify",
+ "objc2-app-kit",
  "portable-pty",
  "rdev",
  "regex",

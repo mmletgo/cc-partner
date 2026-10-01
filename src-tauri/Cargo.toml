@@ -107,6 +107,15 @@ clap = { version = "=4.5.32", features = ["derive"] }
 # headless 后端单文件部署：编译期把 ../web/dist 嵌入二进制，/mobile 静态资源磁盘 miss 时兜底
 include_dir = "0.7"
 
+# macOS 健康遮罩焦点锚点（health/focus_anchor.rs）：遮罩打开前经 NSWorkspace 记录
+# frontmost app（排除本进程），全部遮罩最终关闭后经 NSRunningApplication 恢复前台焦点。
+# 仅直接使用 objc2_app_kit 的 NSWorkspace / NSRunningApplication 两个类（tauri 传递依赖
+# 已带 default features，此处显式声明用到的 feature）；`libc` feature 开启
+# processIdentifier / runningApplicationWithProcessIdentifier 绑定（非 default）。
+# 未直接命名 objc2 / objc2-foundation 类型，不加直接依赖，保持最小集合。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", features = ["NSRunningApplication", "NSWorkspace", "libc"] }
+
 [dev-dependencies]
 tempfile = "3"
 # integration smoke（pty_smoke）需要直接使用 portable-pty / libc，不能只依赖 lib 再导出。

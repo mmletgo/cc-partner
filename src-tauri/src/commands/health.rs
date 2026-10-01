@@ -642,7 +642,8 @@ pub async fn snooze_water_reminder(
 ///     桌面。若此时有进行中的休息倒计时,应一并取消其到点 task——既避免到点重复 record/skip/
 ///     close,也保留「中途退出(ESC)不记录完整休息」的原语义(只有自然到 0 才 record)。
 /// Code Logic: 先 `cancel_overlay_rest(&state.health)` 取消休息到点 task 并清会话,再
-///             `close_all_health_overlay_windows(&app)` 关闭全部 `health-overlay-*` 窗口。
+///             `dismiss_current_overlay(&app, &state.health)` 弹出队列下一项(无则
+///             `close_all_health_overlay_windows` 关闭全部 `health-overlay-*` 窗口并恢复焦点锚点)。
 #[tauri::command]
 pub async fn close_health_overlay(
     app: tauri::AppHandle,
