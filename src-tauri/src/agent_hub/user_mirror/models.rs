@@ -286,6 +286,11 @@ pub struct UserMirrorPlanDto {
     pub has_credential_bearing_assets: bool,
     pub agents: Vec<UserMirrorAgentPlanDto>,
     pub blocking_reasons: Vec<String>,
+    /// Push 各目标机独立的 preview 快照与差异；Pull 固定为空。
+    ///
+    /// `default` 允许读取升级前已落库的单目标 plan；新输出始终显式序列化数组。
+    #[serde(default)]
+    pub peer_plans: Vec<UserMirrorPeerPlanDto>,
     /// Push 所选对端；空则 apply 回落到 `destination_device_id`。
     #[serde(default)]
     pub peer_device_ids: Vec<String>,
@@ -293,6 +298,19 @@ pub struct UserMirrorPlanDto {
     /// push fan-out 经 dest_plan 序列化携带到对端。
     #[serde(default)]
     pub selection: Option<UserMirrorSelectionFilterDto>,
+}
+
+/// Push 单台目标机的 preview 计划。
+///
+/// Business Logic: 每台目标机的多余资产和 preview 快照都不同，不能复用首台机器的差异。
+/// Code Logic: 绑定 destination id、该机 inventory hash、per-Agent 差异与局部阻断原因。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserMirrorPeerPlanDto {
+    pub destination_device_id: String,
+    pub remote_inventory_snapshot_hash: String,
+    pub agents: Vec<UserMirrorAgentPlanDto>,
+    pub blocking_reasons: Vec<String>,
 }
 
 /// 应用已预览镜像的请求。
@@ -348,6 +366,23 @@ pub struct UserMirrorResultDto {
     pub destination_device_id: String,
     pub partial: bool,
     pub agents: Vec<UserMirrorAgentResultDto>,
+    /// Push 各目标机的真实结果；Pull 固定为空。
+    ///
+    /// `default` 允许重放升级前已落库的结果；新输出始终显式序列化数组。
+    #[serde(default)]
+    pub peer_results: Vec<UserMirrorPeerResultDto>,
+}
+
+/// Push 单台目标机的 apply 结果。
+///
+/// Business Logic: 一台目标失败不得覆盖或隐藏其他目标已成功/未知的事实。
+/// Code Logic: 记录 destination id、partial 与该目标逐 Agent 状态。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserMirrorPeerResultDto {
+    pub destination_device_id: String,
+    pub partial: bool,
+    pub agents: Vec<UserMirrorAgentResultDto>,
 }
 
 #[cfg(test)]
@@ -375,6 +410,51 @@ mod tests {
         assert_eq!(
             USER_MIRROR_LEGACY_LOSSY_BLOCKED,
             "USER_MIRROR_LEGACY_LOSSY_BLOCKED"
+        );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     升级前数据库里的 plan/result 没有 peer 数组，升级后必须可读且新输出显式返回空数组。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     反序列化 legacy JSON，断言 default=[]；再序列化确认 peerPlans/peerResults 均存在。
+    #[test]
+    fn peer_arrays_default_for_legacy_json_and_serialize_explicitly() {
+        let plan: UserMirrorPlanDto = serde_json::from_value(serde_json::json!({
+            "planToken": "plan",
+            "expiresAt": "2099-01-01T00:00:00Z",
+            "direction": "pull",
+            "sourceDeviceId": "source",
+            "destinationDeviceId": "dest",
+            "remoteInventorySnapshotHash": "remote",
+            "localInventorySnapshotHash": "local",
+            "credentialBearingCount": 0,
+            "hasCredentialBearingAssets": false,
+            "agents": [],
+            "blockingReasons": [],
+            "peerDeviceIds": [],
+            "selection": null
+        }))
+        .expect("legacy plan");
+        let result: UserMirrorResultDto = serde_json::from_value(serde_json::json!({
+            "planToken": "plan",
+            "clientRequestId": "request",
+            "sourceDeviceId": "source",
+            "destinationDeviceId": "dest",
+            "partial": false,
+            "agents": []
+        }))
+        .expect("legacy result");
+
+        assert!(plan.peer_plans.is_empty());
+        assert!(result.peer_results.is_empty());
+        assert_eq!(
+            serde_json::to_value(plan).unwrap()["peerPlans"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            serde_json::to_value(result).unwrap()["peerResults"],
+            serde_json::json!([])
         );
     }
 }

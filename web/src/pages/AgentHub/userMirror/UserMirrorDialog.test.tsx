@@ -90,6 +90,7 @@ const plan: UserMirrorPlanDto = {
     },
   ],
   blockingReasons: [],
+  peerPlans: [],
 };
 
 const result: UserMirrorResultDto = {
@@ -106,6 +107,7 @@ const result: UserMirrorResultDto = {
       message: null,
     },
   ],
+  peerResults: [],
 };
 
 afterEach(() => {
@@ -121,6 +123,7 @@ describe('UserMirrorDialog', () => {
         open
         direction="pull"
         busy={false}
+        submitted={false}
         error={null}
         stale={false}
         devices={[
@@ -187,6 +190,7 @@ describe('UserMirrorDialog', () => {
         open
         direction="pull"
         busy={false}
+        submitted={false}
         error={null}
         stale={false}
         devices={[{ deviceId: 'device-a', name: 'Alpha' }]}
@@ -237,7 +241,7 @@ describe('UserMirrorDialog', () => {
     expect(onSetIncludeInstructions).toHaveBeenCalledWith(false);
   });
 
-  it('enables apply after confirm and shows partial StatusMessage plus reconcile', () => {
+  it('disables repeat apply after submission and shows partial StatusMessage plus reconcile', () => {
     const onApply = vi.fn();
     const onReconcile = vi.fn();
     render(
@@ -245,6 +249,7 @@ describe('UserMirrorDialog', () => {
         open
         direction="pull"
         busy={false}
+        submitted
         error={null}
         stale={false}
         devices={[{ deviceId: 'device-a', name: 'Alpha' }]}
@@ -253,7 +258,7 @@ describe('UserMirrorDialog', () => {
         plan={plan}
         result={result}
         confirmed
-        canApply
+        canApply={false}
         canReconcile
         assetOptions={assetOptions}
         selectedAssetKeys={['skill:skill-a', 'command:cmd-x']}
@@ -272,8 +277,13 @@ describe('UserMirrorDialog', () => {
       />,
     );
 
-    fireEvent.click(screen.getByTestId('user-mirror-apply'));
-    expect(onApply).toHaveBeenCalledTimes(1);
+    const apply = screen.getByTestId('user-mirror-apply') as HTMLButtonElement;
+    expect(apply.disabled).toBe(true);
+    fireEvent.click(apply);
+    expect(onApply).not.toHaveBeenCalled();
+    expect((screen.getByTestId('user-mirror-include-instructions') as HTMLInputElement).disabled).toBe(
+      true,
+    );
     expect(screen.getByTestId('user-mirror-partial')).toBeTruthy();
     fireEvent.click(screen.getByTestId('user-mirror-reconcile'));
     expect(onReconcile).toHaveBeenCalledTimes(1);
@@ -286,11 +296,12 @@ describe('UserMirrorDialog', () => {
         open
         direction="push"
         busy={false}
+        submitted
         error={null}
         stale={false}
         devices={[
-          { deviceId: 'peer-a', name: 'A' },
-          { deviceId: 'peer-b', name: 'B' },
+          { deviceId: 'peer-a', name: 'Alpha' },
+          { deviceId: 'peer-b', name: 'Beta' },
         ]}
         sourceDeviceId=""
         selectedPeerIds={['peer-a']}
@@ -299,6 +310,26 @@ describe('UserMirrorDialog', () => {
           ...result,
           destinationDeviceId: 'peer-a',
           partial: true,
+          agents: [],
+          peerResults: [
+            {
+              destinationDeviceId: 'peer-a',
+              partial: true,
+              agents: result.agents,
+            },
+            {
+              destinationDeviceId: 'peer-b',
+              partial: false,
+              agents: [
+                {
+                  target: 'codex',
+                  state: 'failed',
+                  errorCode: 'WRITE_FAILED',
+                  message: 'disk full',
+                },
+              ],
+            },
+          ],
         }}
         confirmed={false}
         canApply={false}
@@ -326,5 +357,150 @@ describe('UserMirrorDialog', () => {
     expect(onTogglePeer).toHaveBeenCalledWith('peer-b');
     expect(screen.getByTestId('user-mirror-report')).toBeTruthy();
     expect(screen.getByTestId('user-mirror-report-peer-a')).toBeTruthy();
+    expect(screen.getByTestId('user-mirror-report-peer-b').textContent).toContain('Beta');
+    expect(screen.getByTestId('user-mirror-report-peer-b').textContent).toContain(
+      'agentHub:userMirror.itemState.failed',
+    );
+    expect(screen.getByTestId('user-mirror-report-peer-b').textContent).toContain('WRITE_FAILED');
+  });
+
+  it('projects per-agent counts and credential disclosure through the selected scope', () => {
+    render(
+      <UserMirrorDialog
+        open
+        direction="pull"
+        busy={false}
+        submitted={false}
+        error={null}
+        stale={false}
+        devices={[{ deviceId: 'dev-a', name: 'Alpha' }]}
+        sourceDeviceId="dev-a"
+        selectedPeerIds={[]}
+        plan={plan}
+        result={null}
+        confirmed={false}
+        canApply={false}
+        canReconcile={false}
+        assetOptions={assetOptions}
+        selectedAssetKeys={['skill:skill-a']}
+        includeInstructions={false}
+        onToggleAsset={vi.fn()}
+        onSelectAllAssets={vi.fn()}
+        onDeselectAllAssets={vi.fn()}
+        onSetIncludeInstructions={vi.fn()}
+        onSelectSourceDevice={vi.fn()}
+        onTogglePeer={vi.fn()}
+        onConfirmChange={vi.fn()}
+        onPreview={vi.fn()}
+        onApply={vi.fn()}
+        onReconcile={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const counts = screen.getByTestId('user-mirror-agent-claude').textContent;
+    expect(counts).toContain('"writes":0');
+    expect(counts).toContain('"upserts":1');
+    expect(counts).toContain('"deletes":0');
+    expect(counts).toContain('"disables":0');
+    expect(screen.getByTestId('user-mirror-credentials').hidden).toBe(true);
+  });
+
+  it('renders an independent preview for every push destination', () => {
+    const peerPlan = {
+      destinationDeviceId: 'peer-a',
+      remoteInventorySnapshotHash: 'peer-a-hash',
+      agents: plan.agents,
+      blockingReasons: [],
+    };
+    render(
+      <UserMirrorDialog
+        open
+        direction="push"
+        busy={false}
+        submitted={false}
+        error={null}
+        stale={false}
+        devices={[
+          { deviceId: 'peer-a', name: 'Alpha' },
+          { deviceId: 'peer-b', name: 'Beta' },
+        ]}
+        sourceDeviceId=""
+        selectedPeerIds={['peer-a', 'peer-b']}
+        plan={{
+          ...plan,
+          direction: 'push',
+          sourceDeviceId: 'local',
+          destinationDeviceId: '',
+          agents: [],
+          blockingReasons: [],
+          peerPlans: [peerPlan, { ...peerPlan, destinationDeviceId: 'peer-b' }],
+        }}
+        result={null}
+        confirmed={false}
+        canApply={false}
+        canReconcile={false}
+        assetOptions={assetOptions}
+        selectedAssetKeys={['skill:skill-a', 'command:cmd-x']}
+        includeInstructions
+        onToggleAsset={vi.fn()}
+        onSelectAllAssets={vi.fn()}
+        onDeselectAllAssets={vi.fn()}
+        onSetIncludeInstructions={vi.fn()}
+        onSelectSourceDevice={vi.fn()}
+        onTogglePeer={vi.fn()}
+        onConfirmChange={vi.fn()}
+        onPreview={vi.fn()}
+        onApply={vi.fn()}
+        onReconcile={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId('user-mirror-peer-plan-peer-a').textContent).toContain('Alpha');
+    expect(screen.getByTestId('user-mirror-peer-plan-peer-b').textContent).toContain('Beta');
+    expect(screen.getByTestId('user-mirror-peer-plan-peer-a').textContent).toContain(
+      'agentHub:userMirror.directionToPeer',
+    );
+  });
+
+  it('keeps the action footer outside the single scroll region', () => {
+    render(
+      <UserMirrorDialog
+        open
+        direction="pull"
+        busy={false}
+        submitted={false}
+        error={null}
+        stale={false}
+        devices={[{ deviceId: 'dev-a', name: 'Alpha' }]}
+        sourceDeviceId="dev-a"
+        selectedPeerIds={[]}
+        plan={plan}
+        result={null}
+        confirmed={false}
+        canApply={false}
+        canReconcile={false}
+        assetOptions={assetOptions}
+        selectedAssetKeys={['skill:skill-a', 'command:cmd-x']}
+        includeInstructions
+        onToggleAsset={vi.fn()}
+        onSelectAllAssets={vi.fn()}
+        onDeselectAllAssets={vi.fn()}
+        onSetIncludeInstructions={vi.fn()}
+        onSelectSourceDevice={vi.fn()}
+        onTogglePeer={vi.fn()}
+        onConfirmChange={vi.fn()}
+        onPreview={vi.fn()}
+        onApply={vi.fn()}
+        onReconcile={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const scrollRegion = screen.getByTestId('user-mirror-scroll-region');
+    const footer = screen.getByTestId('user-mirror-footer');
+    expect(scrollRegion.contains(footer)).toBe(false);
+    expect(scrollRegion.parentElement).toBe(footer.parentElement);
   });
 });

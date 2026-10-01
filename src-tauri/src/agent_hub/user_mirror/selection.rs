@@ -8,6 +8,7 @@
 //!     按 inventory 身份读源文件 → `ObjectStore::put_blob` / tree → 组装 envelope 与
 //!     item_bindings；累计超 512 MiB fail-closed；legacyLossy MCP 标 blocked 且不把占位当凭据。
 
+use super::inventory::{effective_user_mirror_portable_hashes, portable_item_outranks};
 use super::models::{
     UserMirrorAgentInventoryDto, UserMirrorInventoryDto, UserMirrorSelectionFilterDto,
     UserMirrorSlotHashesDto, USER_MIRROR_DEST_MAX_TOTAL_BYTES, USER_MIRROR_PLAN_TTL_MINUTES,
@@ -18,8 +19,8 @@ use crate::agent_hub::models::{
 };
 use crate::agent_hub::object_store::{sha256_hex, ObjectStore};
 use crate::agent_hub::portable_inventory::{
-    inspect_portable_inventory_with_env_query, PortableAssetKind, PortableInventoryItemDto,
-    PortableInventoryQuery,
+    hash_plugin_root, inspect_portable_inventory_force_with_env_query, PortableAssetKind,
+    PortableInventoryItemDto, PortableInventoryQuery,
 };
 use crate::agent_hub::portable_store::{classify_store_link, StoreLinkClass};
 use crate::agent_hub::service::instruction_document_from_block_dtos;
@@ -201,7 +202,14 @@ pub(crate) async fn freeze_user_mirror_selection_with_env(
         asset_heads: BTreeMap::new(),
         bindings: Vec::new(),
     };
-    freeze_native_and_hub_slots(&mut acc, state, inventory, env).await?;
+    if inventory.agents.iter().any(|agent| {
+        !agent.native_files.is_empty()
+            || agent.slots.common.is_some()
+            || agent.slots.adapted.is_some()
+            || agent.slots.exclusive.is_some()
+    }) {
+        freeze_native_and_hub_slots(&mut acc, state, inventory, env).await?;
+    }
     freeze_portable_items(&mut acc, state, inventory, env).await?;
     let envelope = finish_envelope(&mut acc, inventory)?;
     let transfer_id = format!("umirror-src-{}", Uuid::now_v7());
@@ -303,19 +311,33 @@ async fn freeze_native_and_hub_slots(
     let cap = MAX_NATIVE_FILE_BYTES as u64;
     for agent in &inventory.agents {
         for file in &agent.native_files {
-            if !file.exists || file.size == 0 || file.size > cap {
-                continue;
-            }
             let Some(path) = path_by_id.get(&(agent.target, file.logical_id.clone())) else {
-                continue;
+                return Err(AppError::validation(format!(
+                    "USER_MIRROR_NATIVE_PATH_FORBIDDEN:{}",
+                    file.logical_id
+                )));
             };
-            if !path.is_file() {
+            if !file.exists {
+                if path.is_file() {
+                    return Err(AppError::conflict("USER_MIRROR_STALE".to_string()));
+                }
                 continue;
             }
-            let bytes = match fs::read(path) {
-                Ok(bytes) if (bytes.len() as u64) <= cap && !bytes.is_empty() => bytes,
-                _ => continue,
-            };
+            if file.size > cap {
+                return Err(AppError::validation(
+                    "USER_NATIVE_INSTRUCTION_CONTENT_TOO_LARGE".to_string(),
+                ));
+            }
+            if !path.is_file() {
+                return Err(AppError::conflict("USER_MIRROR_STALE".to_string()));
+            }
+            let bytes = fs::read(path)?;
+            let current_hash = sha256_hex(&bytes);
+            if (bytes.len() as u64) != file.size
+                || file.content_hash.as_deref() != Some(current_hash.as_str())
+            {
+                return Err(AppError::conflict("USER_MIRROR_STALE".to_string()));
+            }
             let hash = record_bytes(acc, bytes, false).await?;
             push_asset(
                 acc,
@@ -334,7 +356,7 @@ async fn freeze_native_and_hub_slots(
             freeze_hub_slot_text(
                 acc,
                 agent,
-                agent.slots.common.is_some(),
+                agent.slots.common.as_deref(),
                 &extract_slot_text(document, InstructionSlotKey::Shared),
                 "common",
             )
@@ -342,7 +364,7 @@ async fn freeze_native_and_hub_slots(
             freeze_hub_slot_text(
                 acc,
                 agent,
-                agent.slots.adapted.is_some(),
+                agent.slots.adapted.as_deref(),
                 &extract_slot_text(
                     document,
                     InstructionSlotKey::Adapted {
@@ -355,7 +377,7 @@ async fn freeze_native_and_hub_slots(
             freeze_hub_slot_text(
                 acc,
                 agent,
-                agent.slots.exclusive.is_some(),
+                agent.slots.exclusive.as_deref(),
                 &extract_slot_text(
                     document,
                     InstructionSlotKey::TargetOnly {
@@ -365,6 +387,11 @@ async fn freeze_native_and_hub_slots(
                 "exclusive",
             )
             .await?;
+        } else if agent.slots.common.is_some()
+            || agent.slots.adapted.is_some()
+            || agent.slots.exclusive.is_some()
+        {
+            return Err(AppError::conflict("USER_MIRROR_STALE".to_string()));
         }
     }
     Ok(())
@@ -374,11 +401,15 @@ async fn freeze_native_and_hub_slots(
 async fn freeze_hub_slot_text(
     acc: &mut FreezeAcc,
     agent: &UserMirrorAgentInventoryDto,
-    present: bool,
+    expected_hash: Option<&str>,
     text: &str,
     slot: &str,
 ) -> Result<(), AppError> {
-    if !present || text.is_empty() {
+    let current_hash = (!text.is_empty()).then(|| sha256_hex(text.as_bytes()));
+    if current_hash.as_deref() != expected_hash {
+        return Err(AppError::conflict("USER_MIRROR_STALE".to_string()));
+    }
+    if expected_hash.is_none() {
         return Ok(());
     }
     let logical_id = format!("{}.hub.{slot}", agent.target.as_str());
@@ -408,24 +439,27 @@ async fn freeze_portable_items(
     inventory: &UserMirrorInventoryDto,
     env: &TargetEnvironment,
 ) -> Result<(), AppError> {
-    let snapshot = inspect_portable_inventory_with_env_query(
-        state,
-        env,
-        PortableInventoryQuery {
-            target: None,
-            kind: None,
-            scope_kind: Some(ScopeKind::User),
-            local_project_id: None,
-        },
-    )
-    .await?;
+    let query = PortableInventoryQuery {
+        target: None,
+        kind: None,
+        scope_kind: Some(ScopeKind::User),
+        local_project_id: None,
+    };
+    let snapshot = inspect_portable_inventory_force_with_env_query(state, env, query).await?;
     let mut live: HashMap<(AgentTarget, PortableAssetKind, String), PortableInventoryItemDto> =
         HashMap::new();
     for item in snapshot.items {
         if item.scope_kind != ScopeKind::User {
             continue;
         }
-        live.insert((item.target, item.kind, item.native_id.clone()), item);
+        let key = (item.target, item.kind, item.native_id.clone());
+        if live
+            .get(&key)
+            .is_some_and(|current| portable_item_outranks(current, &item))
+        {
+            continue;
+        }
+        live.insert(key, item);
     }
     let mut frozen: HashSet<(AgentTarget, PortableAssetKind, String)> = HashSet::new();
     for agent in &inventory.agents {
@@ -435,12 +469,36 @@ async fn freeze_portable_items(
                 continue;
             }
             let Some(item) = live.get(&key).cloned() else {
-                continue;
+                return Err(AppError::conflict("USER_MIRROR_STALE".to_string()));
             };
-            freeze_one_portable(acc, agent.target, &item).await?;
+            if !portable_live_matches_preview(listed, &item)? {
+                return Err(AppError::conflict("USER_MIRROR_STALE".to_string()));
+            }
+            freeze_one_portable(acc, agent.target, listed, &item).await?;
         }
     }
     Ok(())
+}
+
+/// 比较 portable live scan 与 preview 冻结的内容/启用/凭据事实。
+///
+/// Business Logic: guard 后源文件再次变化时不得冻结未预览字节；展示名/warnings 不参与内容绑定。
+/// Code Logic: 对比 content/tree/enabled 与 MCP credential present/hash。
+fn portable_live_matches_preview(
+    listed: &super::models::UserMirrorPortableItemDto,
+    live: &PortableInventoryItemDto,
+) -> Result<bool, AppError> {
+    let (content_hash, tree_hash) = effective_user_mirror_portable_hashes(live)?;
+    Ok(listed.content_hash == content_hash
+        && listed.tree_hash == tree_hash
+        && listed.actual_enabled == live.actual_enabled
+        && match (&listed.mcp_credential, &live.mcp_credential) {
+            (None, None) => true,
+            (Some(expected), Some(actual)) => {
+                expected.present == actual.present && expected.hash == actual.hash
+            }
+            _ => false,
+        })
 }
 
 /// 冻结单条 portable 资产。
@@ -451,6 +509,7 @@ async fn freeze_portable_items(
 async fn freeze_one_portable(
     acc: &mut FreezeAcc,
     target: AgentTarget,
+    listed: &super::models::UserMirrorPortableItemDto,
     item: &PortableInventoryItemDto,
 ) -> Result<(), AppError> {
     if portable_item_is_blocked_source(item) {
@@ -489,6 +548,7 @@ async fn freeze_one_portable(
             Err(err) => return Err(err),
         }
     };
+    validate_frozen_portable_source(listed, item)?;
     // dest apply 按 packed Skill.tree_manifest_hash 还原；该 hash 来自
     // hash_skill_directory（跳过 Regular/Escape symlink），与 put_tree 不同。
     // 必须把 pack 树打进 CAS，否则对端 USER_MIRROR_OBJECT_NOT_FOUND。
@@ -531,6 +591,66 @@ async fn freeze_one_portable(
         false,
     );
     Ok(())
+}
+
+/// 用实际读取路径复核即将冻结的 portable 内容事实。
+///
+/// Business Logic: selection guard 后源目录/文件仍可能变化；实际 payload 必须与 preview hash 对齐。
+/// Code Logic: Skill 复算 markdown+树、Command 复算原文件、Plugin 复算 manifest+树；
+///     MCP 的 live force scan 已解析到具体 leaf，pack 紧邻读取同一配置，不再重复全库存扫描。
+fn validate_frozen_portable_source(
+    listed: &super::models::UserMirrorPortableItemDto,
+    item: &PortableInventoryItemDto,
+) -> Result<(), AppError> {
+    let source_path = item
+        .source_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| AppError::conflict("USER_MIRROR_STALE".to_string()))?;
+    let matches = match item.kind {
+        PortableAssetKind::Skill => {
+            let dir = if source_path.is_dir() {
+                source_path
+            } else {
+                source_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .ok_or_else(|| AppError::conflict("USER_MIRROR_STALE".to_string()))?
+            };
+            let (content_hash, tree_hash, _, _) = hash_skill_directory_dereferenced(&dir)
+                .map_err(|_| AppError::conflict("USER_MIRROR_STALE".to_string()))?;
+            listed.content_hash.as_deref() == Some(content_hash.as_str())
+                && listed
+                    .tree_hash
+                    .as_deref()
+                    .map_or(true, |expected| expected == tree_hash)
+        }
+        PortableAssetKind::Command => {
+            let bytes = fs::read(&source_path)?;
+            listed.content_hash.as_deref() == Some(sha256_hex(&bytes).as_str())
+        }
+        PortableAssetKind::Plugin => {
+            let dir = if source_path.is_dir() {
+                source_path
+            } else {
+                source_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .ok_or_else(|| AppError::conflict("USER_MIRROR_STALE".to_string()))?
+            };
+            let (content_hash, tree_hash) = hash_plugin_root(&dir)
+                .map_err(|_| AppError::conflict("USER_MIRROR_STALE".to_string()))?;
+            listed.content_hash.as_deref() == Some(content_hash.as_str())
+                && listed.tree_hash.as_deref() == Some(tree_hash.as_str())
+        }
+        PortableAssetKind::Mcp => true,
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(AppError::conflict("USER_MIRROR_STALE".to_string()))
+    }
 }
 
 /// 逃逸软链 / source_blocked 不得拖垮整次冻结；可解析的仓库软链照常打包。
@@ -908,6 +1028,77 @@ mod tests {
     }
 
     /// Business Logic（为什么需要这个测试）:
+    ///     用户关闭指令同步时，实际 Canonical 非空也不能被误判为源漂移或进入对象包。
+    /// Code Logic（这个测试做什么）:
+    ///     保存公共槽，按 includeInstructions=false 裁剪后冻结，只允许 portable binding。
+    #[tokio::test]
+    async fn freeze_without_instructions_preserves_selected_portables() {
+        use crate::agent_hub::service::{AgentHubService, InstructionBlockDto};
+        use crate::agent_hub::user_instructions::{
+            inspect_user_instruction_workspace, SaveUserInstructionBlocksRequest,
+        };
+        let env = seed_user_mirror_homes().await;
+        seed_claude_native_skill_and_mcp(&env);
+        crate::agent_hub::migration::seed_user_instruction_if_head_null(
+            &env.app_state,
+            &env.claude_home.join("CLAUDE.md"),
+            &crate::config::data_dir().unwrap(),
+        )
+        .await
+        .unwrap();
+        let workspace = inspect_user_instruction_workspace(&env.app_state)
+            .await
+            .unwrap();
+        AgentHubService::save_user_instruction_blocks(
+            &env.app_state,
+            SaveUserInstructionBlocksRequest {
+                blocks: vec![InstructionBlockDto {
+                    id: "shared".into(),
+                    mode: "shared".into(),
+                    common_markdown: "NOT SELECTED".into(),
+                    variants: None,
+                    heading_path: None,
+                    source_target: None,
+                    needs_adaptation: false,
+                }],
+                base_revision_id: workspace
+                    .canonical
+                    .as_ref()
+                    .and_then(|canonical| canonical.head_revision_id.clone()),
+                inventory_snapshot_hash: workspace.inventory_snapshot_hash,
+            },
+        )
+        .await
+        .unwrap();
+        let inventory = build_local_user_mirror_inventory(&env.app_state, "dev-a")
+            .await
+            .unwrap();
+        assert!(inventory
+            .agents
+            .iter()
+            .any(|agent| agent.slots.common.is_some()));
+        let filtered = filter_inventory_for_freeze(
+            &inventory,
+            Some(&UserMirrorSelectionFilterDto {
+                include_instructions: false,
+                portable_keys: None,
+            }),
+        );
+        let built = freeze_user_mirror_selection(&env.app_state, &filtered)
+            .await
+            .unwrap();
+        assert!(!built.item_bindings.is_empty());
+        assert!(built
+            .item_bindings
+            .iter()
+            .all(|binding| binding.kind.is_some()));
+        assert!(!built
+            .object_bytes
+            .values()
+            .any(|bytes| bytes == b"NOT SELECTED"));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
     ///     源端冻结必须把原生 CLAUDE.md 与 skill 树写入 CAS，MCP 凭据只进对象字节。
     ///
     /// Code Logic（这个测试做什么）:
@@ -963,6 +1154,27 @@ mod tests {
                 && !b.blocked
         }));
         assert!(!built.transfer_id.is_empty());
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     selection guard 与实际读文件之间仍可能发生源端编辑，冻结不得带走未预览正文。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     构建 inventory 后改写 CLAUDE.md；freeze 必须返回 USER_MIRROR_STALE。
+    #[tokio::test]
+    async fn freeze_rejects_native_content_changed_after_inventory() {
+        let env = seed_user_mirror_homes().await;
+        write(env.claude_home.join("CLAUDE.md").as_path(), "PREVIEWED");
+        let inventory = build_local_user_mirror_inventory(&env.app_state, "dev-a")
+            .await
+            .expect("inventory");
+        write(env.claude_home.join("CLAUDE.md").as_path(), "CHANGED");
+
+        let error = freeze_user_mirror_selection(&env.app_state, &inventory)
+            .await
+            .expect_err("source drift must be stale");
+
+        assert!(error.to_string().contains("USER_MIRROR_STALE"), "{error}");
     }
 
     /// Business Logic（为什么需要这个测试）:

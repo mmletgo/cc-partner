@@ -943,6 +943,7 @@
     }
   },
   "userMirror": {
+    "closeAction": "Close",
     "pullTitle": "Mirror from peer (user scope)",
     "pushTitle": "Mirror to peers (user scope)",
     "pullHint": "Mirror every registered Agent's user-scope instructions and assets from the selected peer onto this device. Same-named Agents match in place; native files will be overwritten and extra user-scope assets on this device will be removed.",
@@ -971,6 +972,21 @@
     "selectionAria": "Select content to sync",
     "includeInstructions": "Include instruction files (CLAUDE.md / AGENTS.md slots, etc.)",
     "assetSelectAll": "Select all assets",
-    "assetDeselectAll": "Deselect all assets"
+    "assetDeselectAll": "Deselect all assets",
+    "selectionRequired": "Select instruction files or at least one asset before applying the mirror.",
+    "directionFromPeer": "{{peer}} → This device",
+    "directionToPeer": "This device → {{peer}}",
+    "blocked": "This device cannot be updated: {{reasons}}",
+    "outcomeUnknown": "The submission outcome is not known yet. Reconcile the same request to avoid applying it twice.",
+    "completed": "The mirror completed. Preview again before starting another sync.",
+    "errorWithDetail": "Mirror failed: {{detail}}",
+    "errorCode": "Error code: {{code}}",
+    "errorMessage": "Details: {{message}}",
+    "itemState": {
+      "succeeded": "Succeeded",
+      "failed": "Failed",
+      "skipped": "Skipped",
+      "outcomeUnknown": "Outcome unknown"
+    }
   }
 }

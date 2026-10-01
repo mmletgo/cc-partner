@@ -21,6 +21,7 @@ use crate::agent_hub::portable_inventory::{
 };
 use crate::agent_hub::service::instruction_document_from_block_dtos;
 use crate::agent_hub::snapshot::canonical_json::canonicalize_value;
+use crate::agent_hub::targets::portable::hash_skill_directory_dereferenced;
 use crate::agent_hub::targets::{TargetEnvironment, TargetPathResolver};
 use crate::agent_hub::user_instructions::{
     extract_slot_text, inspect_user_instruction_workspace_with_env, user_level_mirror_native_paths,
@@ -84,7 +85,7 @@ pub(crate) async fn build_local_user_mirror_inventory_with_env(
         )
         .into_iter()
         .map(|item| map_portable_item(&item, home_path.as_ref()))
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
         let native_files = native_specs
             .iter()
             .filter(|(spec_target, _, _)| *spec_target == target)
@@ -222,7 +223,7 @@ fn dedup_user_mirror_portable_items<'a>(
 }
 
 /// `keep` 是否优于 `other`（true 则不替换）。
-fn portable_item_outranks(
+pub(crate) fn portable_item_outranks(
     keep: &PortableInventoryItemDto,
     other: &PortableInventoryItemDto,
 ) -> bool {
@@ -244,13 +245,14 @@ fn portable_item_outranks(
 fn map_portable_item(
     item: &PortableInventoryItemDto,
     home_path: &str,
-) -> UserMirrorPortableItemDto {
-    UserMirrorPortableItemDto {
+) -> Result<UserMirrorPortableItemDto, AppError> {
+    let (content_hash, tree_hash) = effective_user_mirror_portable_hashes(item)?;
+    Ok(UserMirrorPortableItemDto {
         kind: item.kind,
         native_id: item.native_id.clone(),
         display_name: item.display_name.clone(),
-        content_hash: item.content_hash.clone(),
-        tree_hash: item.tree_hash.clone(),
+        content_hash,
+        tree_hash,
         actual_enabled: item.actual_enabled,
         mcp_credential: item.mcp_credential.as_ref().map(|credential| {
             UserMirrorMcpCredentialFactDto {
@@ -264,15 +266,76 @@ fn map_portable_item(
             .filter(|warning| home_path.is_empty() || !warning.contains(home_path))
             .cloned()
             .collect(),
+    })
+}
+
+/// Business Logic（为什么需要）:
+///     可解析的外部软链参与镜像时，预览必须绑定实际内容，不能把来源路径占位 hash 当正文。
+/// Code Logic（做什么）:
+///     普通项与断链保留扫描事实；可解析 EscapeLink 的 Skill/Command 按实际内容统一哈希。
+pub(crate) fn effective_user_mirror_portable_hashes(
+    item: &PortableInventoryItemDto,
+) -> Result<(Option<String>, Option<String>), AppError> {
+    let escape = item
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("store_symlink_escape") || warning == "source_blocked");
+    if !escape || portable_item_is_blocked_source(item) {
+        return Ok((item.content_hash.clone(), item.tree_hash.clone()));
+    }
+    let path = Path::new(
+        item.source_path
+            .as_deref()
+            .ok_or_else(|| AppError::validation("USER_MIRROR_SOURCE_BLOCKED"))?,
+    );
+    let resolved = fs::canonicalize(path)?;
+    match item.kind {
+        PortableAssetKind::Skill => {
+            let dir = if resolved.is_dir() {
+                resolved.as_path()
+            } else {
+                resolved
+                    .parent()
+                    .ok_or_else(|| AppError::validation("USER_MIRROR_SOURCE_BLOCKED"))?
+            };
+            let (content, tree, _, _) =
+                hash_skill_directory_dereferenced(dir).map_err(|error| {
+                    AppError::validation(format!("USER_MIRROR_SOURCE_BLOCKED:{error}"))
+                })?;
+            Ok((Some(content), Some(tree)))
+        }
+        PortableAssetKind::Command => Ok((Some(sha256_hex(&fs::read(resolved)?)), None)),
+        _ => Ok((item.content_hash.clone(), item.tree_hash.clone())),
     }
 }
 
-/// `inventory_snapshot_hash`：agents 的 canonical JSON SHA-256（不含 refreshed_at）。
+/// `inventory_snapshot_hash`：Agent 身份、内容与启用状态的 canonical JSON SHA-256。
 ///
-/// Business Logic: preview/apply 绑定该 hash；刷新时间不得使快照漂移。
-/// Code Logic: serde → RFC8785 子集 canonicalize → sha256_hex。
+/// Business Logic: preview/apply 绑定内容事实；portable-store 收编只改变诊断/展示来源，
+///     不得让同一份内容在 preview 与 freeze 之间自触发 stale。
+/// Code Logic: 排除 displayName/warnings/refreshedAt，仅规范化 target、槽、native 内容事实、
+///     portable identity/content/enabled/credential hash，再 canonicalize → sha256_hex。
 fn hash_agents_snapshot(agents: &[UserMirrorAgentInventoryDto]) -> Result<String, AppError> {
-    let value = serde_json::to_value(agents)?;
+    let value = serde_json::Value::Array(
+        agents
+            .iter()
+            .map(|agent| {
+                serde_json::json!({
+                    "target": agent.target,
+                    "slots": agent.slots,
+                    "nativeFiles": agent.native_files,
+                    "items": agent.items.iter().map(|item| serde_json::json!({
+                        "kind": item.kind,
+                        "nativeId": item.native_id,
+                        "contentHash": item.content_hash,
+                        "treeHash": item.tree_hash,
+                        "actualEnabled": item.actual_enabled,
+                        "mcpCredential": item.mcp_credential,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    );
     let bytes = canonicalize_value(&value).map_err(|error| {
         AppError::validation(format!("user_mirror_inventory_hash_canon:{error}"))
     })?;
@@ -281,7 +344,7 @@ fn hash_agents_snapshot(agents: &[UserMirrorAgentInventoryDto]) -> Result<String
 
 #[cfg(test)]
 mod tests {
-    use super::build_local_user_mirror_inventory;
+    use super::{build_local_user_mirror_inventory, hash_agents_snapshot};
     use crate::agent_hub::models::AgentTarget;
     use crate::agent_hub::portable_inventory::PortableAssetKind;
     use crate::backend::runtime::build_app_state;
@@ -332,6 +395,37 @@ mod tests {
             fs::create_dir_all(parent).expect("parent");
         }
         fs::write(path, text).expect("write");
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     portable-store 收编只改变来源诊断/展示名时，preview 与 freeze 的内容快照必须保持一致。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     同一 inventory 仅改 displayName/warnings，断言 snapshot hash 不变。
+    #[tokio::test]
+    async fn snapshot_hash_ignores_portable_display_and_warning_metadata() {
+        let env = seed_user_mirror_homes().await;
+        write(
+            env.claude_home.join("skills/hello/SKILL.md").as_path(),
+            "---\nname: hello\ndescription: d\n---\nbody\n",
+        );
+        let inventory = build_local_user_mirror_inventory(&env.app_state, "device")
+            .await
+            .expect("inventory");
+        let mut changed = inventory.agents.clone();
+        let item = changed
+            .iter_mut()
+            .flat_map(|agent| &mut agent.items)
+            .find(|item| item.native_id == "hello")
+            .expect("hello item");
+        item.display_name = "renamed display".to_string();
+        item.warnings
+            .push("store_loaded_via_other_path".to_string());
+
+        assert_eq!(
+            hash_agents_snapshot(&inventory.agents).expect("before hash"),
+            hash_agents_snapshot(&changed).expect("after hash")
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -357,6 +357,7 @@
     "loadFailed": "读取中转信息失败：{{error}}"
   },
   "mobilePush": {
+    "urlPlaceholder": "https://push.example.internal/v1/notify",
     "title": "移动系统推送",
     "subtitle": "APNs/FCM 中转",
     "description": "Attention 变化时由本机把通知发给中转，再由中转调用 APNs/FCM。中转只接收通知字段，不含终端内容。未配置则只登记 token、不发送。",

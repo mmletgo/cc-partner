@@ -57,7 +57,7 @@ export function MobilePushRelayCard(props: MobilePushRelayCardProps): ReactEleme
         <Input
           value={props.relayUrl}
           onChange={(event) => props.onRelayUrlChange(event.target.value)}
-          placeholder="https://push.example.internal/v1/notify"
+          placeholder={t('settings:mobilePush.urlPlaceholder')}
           disabled={props.loading || props.saving}
         />
         <Input

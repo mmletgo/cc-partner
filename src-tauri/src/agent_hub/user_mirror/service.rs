@@ -15,10 +15,10 @@ use super::inventory::{
 use super::ledger::{UserMirrorClaim, UserMirrorPlanRecord};
 use super::models::{
     ApplyUserMirrorRequest, PreviewUserMirrorRequest, UserMirrorAgentResultDto,
-    UserMirrorDirection, UserMirrorInventoryDto, UserMirrorItemState, UserMirrorPlanDto,
-    UserMirrorResultDto, USER_MIRROR_CAPABILITY_UNSUPPORTED, USER_MIRROR_DEST_MAX_TOTAL_BYTES,
-    USER_MIRROR_PEER_OFFLINE, USER_MIRROR_PREVIEW_REQUIRED, USER_MIRROR_STALE,
-    USER_MIRROR_TRANSFER_LIMIT,
+    UserMirrorDirection, UserMirrorInventoryDto, UserMirrorItemState, UserMirrorPeerPlanDto,
+    UserMirrorPlanDto, UserMirrorResultDto, USER_MIRROR_CAPABILITY_UNSUPPORTED,
+    USER_MIRROR_DEST_MAX_TOTAL_BYTES, USER_MIRROR_PEER_OFFLINE, USER_MIRROR_PREVIEW_REQUIRED,
+    USER_MIRROR_STALE, USER_MIRROR_TRANSFER_LIMIT,
 };
 use super::preview::preview_from_two_inventories as build_preview_from_two_inventories;
 use super::receive::{UserMirrorSelectionQuery, UserMirrorSelectionResponse};
@@ -27,6 +27,7 @@ use super::selection::{
 };
 use super::store_migration::migrate_portable_assets_into_store;
 use crate::agent_hub::object_store::sha256_hex;
+use crate::agent_hub::portable_inventory::invalidate_portable_inventory_cache;
 use crate::agent_hub::targets::TargetEnvironment;
 use crate::error::AppError;
 use crate::net::lan_guard::EXPECTED_DEVICE_ID_HEADER;
@@ -202,6 +203,39 @@ pub(crate) async fn apply_user_mirror_with_env(
                     .await?;
                 return Err(AppError::conflict(USER_MIRROR_STALE));
             }
+            if !plan.blocking_reasons.is_empty() {
+                let fail =
+                    failed_blocking_result(&request.plan_token, &request.client_request_id, &plan);
+                dest_state
+                    .agent_hub_repo
+                    .complete_user_mirror_plan(
+                        &request.plan_token,
+                        &request.client_request_id,
+                        &serde_json::to_string(&fail)?,
+                    )
+                    .await?;
+                return Ok(fail);
+            }
+            invalidate_portable_inventory_cache();
+            let current_dest = build_local_user_mirror_inventory_with_env(
+                dest_state,
+                dest_state.device_id.as_str(),
+                env,
+            )
+            .await?;
+            if current_dest.inventory_snapshot_hash != expected_destination_snapshot_hash(&plan) {
+                let fail =
+                    failed_stale_result(&request.plan_token, &request.client_request_id, &plan);
+                dest_state
+                    .agent_hub_repo
+                    .complete_user_mirror_plan(
+                        &request.plan_token,
+                        &request.client_request_id,
+                        &serde_json::to_string(&fail)?,
+                    )
+                    .await?;
+                return Err(AppError::conflict(USER_MIRROR_STALE));
+            }
             let result = match apply_user_mirror_instructions_with_env(
                 dest_state, &plan, objects, bindings, env,
             )
@@ -337,14 +371,50 @@ impl UserMirrorService {
                 migrate_portable_assets_into_store(state).await?;
                 let source =
                     build_local_user_mirror_inventory(state, state.device_id.as_str()).await?;
-                let dest = load_source_inventory(state, &dest_device_id).await?;
+                let source_agent_placeholders = build_preview_from_two_inventories(
+                    &source,
+                    &source,
+                    state.device_id.as_str(),
+                    state.device_id.as_str(),
+                    UserMirrorDirection::Push,
+                )
+                .agents;
+                let mut peer_plans = Vec::with_capacity(peer_ids.len());
+                for peer_id in &peer_ids {
+                    let peer_plan = match load_source_inventory(state, peer_id).await {
+                        Ok(dest) => {
+                            build_push_peer_plan(&source, &dest, state.device_id.as_str(), peer_id)
+                        }
+                        Err(error) => UserMirrorPeerPlanDto {
+                            destination_device_id: peer_id.clone(),
+                            remote_inventory_snapshot_hash: String::new(),
+                            agents: source_agent_placeholders.clone(),
+                            blocking_reasons: vec![preview_peer_failure_reason(&error)],
+                        },
+                    };
+                    peer_plans.push(peer_plan);
+                }
                 let mut plan = build_preview_from_two_inventories(
                     &source,
-                    &dest,
+                    &source,
                     state.device_id.as_str(),
                     &dest_device_id,
                     UserMirrorDirection::Push,
                 );
+                if let Some(first) = peer_plans.first() {
+                    plan.remote_inventory_snapshot_hash =
+                        first.remote_inventory_snapshot_hash.clone();
+                    plan.agents = first.agents.clone();
+                }
+                if peer_plans
+                    .iter()
+                    .all(|peer_plan| !peer_plan.blocking_reasons.is_empty())
+                {
+                    plan.blocking_reasons = vec!["USER_MIRROR_NO_APPLICABLE_PEERS".to_string()];
+                } else {
+                    plan.blocking_reasons.clear();
+                }
+                plan.peer_plans = peer_plans;
                 plan.peer_device_ids = peer_ids;
                 persist_plan(state, &plan).await?;
                 Ok(plan)
@@ -377,6 +447,9 @@ impl UserMirrorService {
         }
         match plan.direction {
             UserMirrorDirection::Pull => {
+                if !plan.blocking_reasons.is_empty() {
+                    return apply_user_mirror(state, request, &BTreeMap::new(), &[]).await;
+                }
                 let (objects, bindings) = collect_source_objects(state, &plan).await?;
                 apply_user_mirror(state, request, &objects, &bindings).await
             }
@@ -393,6 +466,31 @@ impl UserMirrorService {
         client_request_id: &str,
     ) -> Result<UserMirrorResultDto, AppError> {
         get_user_mirror(state, client_request_id).await
+    }
+}
+
+/// 从同一源 inventory 与单台目标 inventory 构建独立 Push peer plan。
+///
+/// Business Logic: 目标机 extras 与快照各不相同，任何一台都不能复用首台差异。
+/// Code Logic: 调纯 diff 后只提取该目标的 destination/hash/agents/blocking 字段。
+fn build_push_peer_plan(
+    source: &UserMirrorInventoryDto,
+    dest: &UserMirrorInventoryDto,
+    source_device_id: &str,
+    destination_device_id: &str,
+) -> UserMirrorPeerPlanDto {
+    let preview = build_preview_from_two_inventories(
+        source,
+        dest,
+        source_device_id,
+        destination_device_id,
+        UserMirrorDirection::Push,
+    );
+    UserMirrorPeerPlanDto {
+        destination_device_id: destination_device_id.to_string(),
+        remote_inventory_snapshot_hash: dest.inventory_snapshot_hash.clone(),
+        agents: preview.agents,
+        blocking_reasons: preview.blocking_reasons,
     }
 }
 
@@ -426,17 +524,15 @@ async fn collect_source_objects(
         migrate_portable_assets_into_store(state).await?;
         let migrated_inventory =
             build_local_user_mirror_inventory(state, state.device_id.as_str()).await?;
+        if migrated_inventory.inventory_snapshot_hash != plan.remote_inventory_snapshot_hash {
+            return Err(AppError::conflict(USER_MIRROR_STALE));
+        }
         let frozen = filter_inventory_for_freeze(&migrated_inventory, plan.selection.as_ref());
         let built = freeze_user_mirror_selection(state, &frozen).await?;
         return Ok((built.object_bytes, built.item_bindings));
     }
     let (base_url, expected) = resolve_online_peer(state, &plan.source_device_id)?;
     let peer = PeerClient::new();
-    let health = peer
-        .require_capability(&base_url, CAPABILITY_USER_MIRROR_V1)
-        .await
-        .map_err(map_user_mirror_peer_err)?;
-    ensure_health_device_id(&health.device_id, &expected)?;
     let selection: UserMirrorSelectionResponse = post_json_bound(
         &peer,
         &base_url,
@@ -460,6 +556,35 @@ async fn collect_source_objects(
         download_user_mirror_objects(&peer, &base_url, &expected, &selection.transfer_id, &hashes)
             .await?;
     Ok((objects, selection.item_bindings))
+}
+
+/// 把单 peer preview 失败收敛为局部阻断 reason。
+///
+/// Business Logic: 一台离线/旧版机器不能阻断其他已成功预览的 Push 目标。
+/// Code Logic: 保留稳定 USER_MIRROR code；未知错误使用受限通用 reason。
+fn preview_peer_failure_reason(error: &AppError) -> String {
+    let message = error.to_string();
+    for code in [
+        USER_MIRROR_CAPABILITY_UNSUPPORTED,
+        USER_MIRROR_PEER_OFFLINE,
+        USER_MIRROR_STALE,
+    ] {
+        if message.contains(code) {
+            return code.to_string();
+        }
+    }
+    "USER_MIRROR_PEER_PREVIEW_FAILED".to_string()
+}
+
+/// 返回 apply 端在 preview 时冻结的 destination inventory hash。
+///
+/// Business Logic: Pull 的本机是 local，Push 的接收机是源侧视角的 remote。
+/// Code Logic: 按 direction 选择对应 hash，供写盘前统一重扫比较。
+fn expected_destination_snapshot_hash(plan: &UserMirrorPlanDto) -> &str {
+    match plan.direction {
+        UserMirrorDirection::Pull => &plan.local_inventory_snapshot_hash,
+        UserMirrorDirection::Push => &plan.remote_inventory_snapshot_hash,
+    }
 }
 
 /// 对端 metadata inventory（无 path / secret）。
@@ -698,6 +823,7 @@ fn outcome_unknown_result(
                 message: None,
             })
             .collect(),
+        peer_results: Vec::new(),
     }
 }
 
@@ -717,6 +843,7 @@ fn build_result(
         destination_device_id: plan.destination_device_id.clone(),
         partial,
         agents,
+        peer_results: Vec::new(),
     }
 }
 
@@ -741,6 +868,41 @@ fn failed_stale_result(
                 message: Some(USER_MIRROR_STALE.to_string()),
             })
             .collect(),
+        peer_results: Vec::new(),
+    }
+}
+
+/// 把 preview 阻断原因投影到逐 Agent 失败结果。
+///
+/// Business Logic: catalog 不一致或整次不可 apply 时不得触碰磁盘，并向 UI 返回明确原因。
+/// Code Logic: 取第一条阻断原因作为稳定 error/message，所有占位 Agent 标 Failed。
+fn failed_blocking_result(
+    plan_token: &str,
+    client_request_id: &str,
+    plan: &UserMirrorPlanDto,
+) -> UserMirrorResultDto {
+    let reason = plan
+        .blocking_reasons
+        .first()
+        .cloned()
+        .unwrap_or_else(|| USER_MIRROR_PREVIEW_REQUIRED.to_string());
+    UserMirrorResultDto {
+        plan_token: plan_token.to_string(),
+        client_request_id: client_request_id.to_string(),
+        source_device_id: plan.source_device_id.clone(),
+        destination_device_id: plan.destination_device_id.clone(),
+        partial: true,
+        agents: plan
+            .agents
+            .iter()
+            .map(|agent| UserMirrorAgentResultDto {
+                target: agent.target,
+                state: UserMirrorItemState::Failed,
+                error_code: Some(reason.clone()),
+                message: Some(reason.clone()),
+            })
+            .collect(),
+        peer_results: Vec::new(),
     }
 }
 
@@ -767,19 +929,24 @@ fn failed_apply_result(
                 message: Some(message.clone()),
             })
             .collect(),
+        peer_results: Vec::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_user_mirror_with_env, get_user_mirror, preview_from_two_inventories,
-        preview_user_mirror_with_envs, UserMirrorService,
+        apply_user_mirror_with_env, build_push_peer_plan, get_user_mirror,
+        preview_from_two_inventories, preview_user_mirror_with_envs, UserMirrorService,
     };
+    use crate::agent_hub::models::AgentTarget;
+    use crate::agent_hub::portable_inventory::PortableAssetKind;
     use crate::agent_hub::targets::TargetEnvironment;
     use crate::agent_hub::user_mirror::inventory::build_local_user_mirror_inventory_with_env;
     use crate::agent_hub::user_mirror::models::{
-        ApplyUserMirrorRequest, PreviewUserMirrorRequest, UserMirrorDirection, UserMirrorItemState,
+        ApplyUserMirrorRequest, PreviewUserMirrorRequest, UserMirrorAgentInventoryDto,
+        UserMirrorDirection, UserMirrorInventoryDto, UserMirrorItemState,
+        UserMirrorPortableItemDto, UserMirrorSlotHashesDto,
     };
     use crate::agent_hub::user_mirror::selection::freeze_user_mirror_selection_with_env;
     use crate::backend::runtime::build_app_state;
@@ -889,6 +1056,57 @@ mod tests {
         fs::write(path, text).expect("write");
     }
 
+    fn one_agent_inventory(device_id: &str, extra_skill: Option<&str>) -> UserMirrorInventoryDto {
+        UserMirrorInventoryDto {
+            source_device_id: device_id.to_string(),
+            inventory_snapshot_hash: format!("hash-{device_id}"),
+            refreshed_at: "2026-10-01T00:00:00Z".to_string(),
+            agents: vec![UserMirrorAgentInventoryDto {
+                target: AgentTarget::Claude,
+                slots: UserMirrorSlotHashesDto {
+                    common: None,
+                    adapted: None,
+                    exclusive: None,
+                },
+                native_files: Vec::new(),
+                items: extra_skill
+                    .map(|native_id| UserMirrorPortableItemDto {
+                        kind: PortableAssetKind::Skill,
+                        native_id: native_id.to_string(),
+                        display_name: native_id.to_string(),
+                        content_hash: Some(format!("content-{native_id}")),
+                        tree_hash: Some(format!("tree-{native_id}")),
+                        actual_enabled: Some(true),
+                        mcp_credential: None,
+                        warnings: Vec::new(),
+                    })
+                    .into_iter()
+                    .collect(),
+            }],
+            credential_bearing_count: 0,
+        }
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     两台目标机的多余资产不同，Push preview 必须分别生成删除计划。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     同一空源对 peer-a/peer-b 各放不同 Skill，断言 peer plan 的 hash 与 delete 不串台。
+    #[test]
+    fn push_peer_plans_keep_independent_destination_diffs() {
+        let source = one_agent_inventory("source", None);
+        let peer_a = one_agent_inventory("peer-a", Some("extra-a"));
+        let peer_b = one_agent_inventory("peer-b", Some("extra-b"));
+
+        let plan_a = build_push_peer_plan(&source, &peer_a, "source", "peer-a");
+        let plan_b = build_push_peer_plan(&source, &peer_b, "source", "peer-b");
+
+        assert_eq!(plan_a.remote_inventory_snapshot_hash, "hash-peer-a");
+        assert_eq!(plan_b.remote_inventory_snapshot_hash, "hash-peer-b");
+        assert_eq!(plan_a.agents[0].portable_deletes[0].native_id, "extra-a");
+        assert_eq!(plan_b.agents[0].portable_deletes[0].native_id, "extra-b");
+    }
+
     /// Business Logic（为什么需要这个测试）:
     ///     本地 Pull 必须把 preview 写入 dest ledger，apply 写盘后同 request 重放且 get 一致。
     ///
@@ -984,6 +1202,70 @@ mod tests {
             .agents
             .iter()
             .all(|agent| agent.state == UserMirrorItemState::Succeeded));
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     preview 后目标端被用户编辑时，apply 必须拒绝覆盖该新内容。
+    ///
+    /// Code Logic（这个测试做什么）:
+    ///     DualEnv preview/freeze 后改写 dest CLAUDE.md；apply 返回 USER_MIRROR_STALE 且保留漂移正文。
+    #[tokio::test]
+    async fn destination_drift_after_preview_is_rejected_before_write() {
+        let env = seed_dual_env().await;
+        write(
+            env.source_home.join(".claude/CLAUDE.md").as_path(),
+            "FROM-SRC",
+        );
+        let dest_path = env.dest_home.join(".claude/CLAUDE.md");
+        write(&dest_path, "OLD-DEST");
+        let plan = preview_user_mirror_with_envs(
+            &env.dest_state,
+            &env.source_state,
+            PreviewUserMirrorRequest {
+                direction: UserMirrorDirection::Pull,
+                source_device_id: Some("src-dev".into()),
+                peer_device_ids: Vec::new(),
+            },
+            &env.source_env,
+            &env.dest_env,
+        )
+        .await
+        .expect("preview");
+        let source_inventory = build_local_user_mirror_inventory_with_env(
+            &env.source_state,
+            "src-dev",
+            &env.source_env,
+        )
+        .await
+        .expect("source inventory");
+        let built = freeze_user_mirror_selection_with_env(
+            &env.source_state,
+            &source_inventory,
+            &env.source_env,
+        )
+        .await
+        .expect("freeze");
+        write(&dest_path, "USER-EDIT-AFTER-PREVIEW");
+
+        let error = apply_user_mirror_with_env(
+            &env.dest_state,
+            ApplyUserMirrorRequest {
+                plan_token: plan.plan_token,
+                client_request_id: "req-dest-drift".into(),
+                selection: None,
+            },
+            &built.object_bytes,
+            &built.item_bindings,
+            &env.dest_env,
+        )
+        .await
+        .expect_err("destination drift must be stale");
+
+        assert!(error.to_string().contains("USER_MIRROR_STALE"), "{error}");
+        assert_eq!(
+            fs::read_to_string(dest_path).expect("dest content"),
+            "USER-EDIT-AFTER-PREVIEW"
+        );
     }
 
     /// Business Logic（为什么需要这个测试）:

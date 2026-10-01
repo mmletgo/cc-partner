@@ -82,7 +82,7 @@ import {
   isPortableStoreTab,
   portableInventoryTargetForHubContext,
   normalizeAgentHubContext,
-  peerAllowsUserPortableInventory,
+  isAgentHubPeerOnline,
   type AgentHubContext,
   type AgentHubTab,
   type AgentHubScope,
@@ -676,7 +676,7 @@ export function useAgentHubController(
     ...inventoryRequestContext,
     enabled:
       portableLaneActive &&
-      (hubContext.deviceId === null || peerAllowsUserPortableInventory(selectedPeer)) &&
+      (hubContext.deviceId === null || isAgentHubPeerOnline(selectedPeer)) &&
       (hubContext.scope !== 'project' || hubContext.projectKey !== null),
     initialFilters: {
       target: portableInventoryTargetForHubContext(hubContext),
@@ -2078,9 +2078,7 @@ export function useAgentHubController(
     deepLinkConflictId,
     deepLinkInventoryItemId,
     deepLinkSection,
-    hubContext.agent,
-    hubContext.scope,
-    hubContext.tab,
+    hubContext,
     portableInventoryBase,
     searchParams,
   ]);
@@ -2494,7 +2492,8 @@ export function useAgentHubController(
   const closeUserMirror = useCallback(() => {
     if (userMirror.busy) return;
     setUserMirrorOpen(false);
-  }, [userMirror.busy]);
+    if (userMirror.result) void reload();
+  }, [userMirror.busy, userMirror.result, reload]);
 
   const writeBlocked = Boolean(status && !status.writeCompatible);
   const upgradeRequired = writeBlocked;

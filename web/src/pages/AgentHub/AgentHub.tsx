@@ -34,8 +34,7 @@ import { AgentHubShell } from './shell';
 import { CrossAgentAdaptPage } from './crossAgent';
 import {
   isPortableStoreTab,
-  peerAllowsUserInstructionThreePane,
-  peerAllowsUserPortableInventory,
+  isAgentHubPeerOnline,
 } from './context/agentHubContext';
 import {
   isAssetKindTab,
@@ -376,16 +375,16 @@ export function AgentHubView(props: AgentHubViewProps) {
     hubContext.deviceId === null
       ? null
       : shellPeers.find((peer) => peer.deviceId === hubContext.deviceId) ?? null;
-  /** 用户级对端在线且宣告 user-instructions 才挂三栏；否则保持远端 hint。 */
+  /** 用户级在线对端直接挂三栏；能力由后端实际请求校验。 */
   const canMountRemoteUserThreePane =
     hubContext.scope === 'user' &&
     hubContext.deviceId !== null &&
-    peerAllowsUserInstructionThreePane(selectedPeer);
-  /** 用户级对端在线且宣告 portable-user 才挂资产主列表。 */
+    isAgentHubPeerOnline(selectedPeer);
+  /** 用户级在线对端挂资产列表；能力由后端实际请求校验。 */
   const canMountRemoteUserPortable =
     hubContext.scope === 'user' &&
     hubContext.deviceId !== null &&
-    peerAllowsUserPortableInventory(selectedPeer);
+    isAgentHubPeerOnline(selectedPeer);
   const showProjectInstructionFiles =
     projectLocked &&
     hubContext.tab === 'instructions' &&
@@ -721,6 +720,7 @@ export function AgentHubView(props: AgentHubViewProps) {
         open={userMirrorOpen}
         direction={userMirror.direction}
         busy={userMirror.busy}
+        submitted={userMirror.submitted}
         error={userMirror.error}
         stale={userMirror.stale}
         devices={userMirror.devices.map((device) => ({

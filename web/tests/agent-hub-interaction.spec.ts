@@ -654,8 +654,8 @@ test.describe('E2E-AGENT-HUB-SHELL-001 Agent Hub shell context and keyboard', ()
     await expect(page.getByTestId('agent-hub-agent-switcher')).toBeVisible();
     await page.getByTestId('agent-hub-agent-claude').focus();
     await page.keyboard.press('End');
-    await expect(page.getByTestId('agent-hub-agent-pi')).toBeFocused();
-    await expect(page.getByTestId('agent-hub-agent-pi')).toHaveAttribute(
+    await expect(page.getByTestId('agent-hub-agent-zcode')).toBeFocused();
+    await expect(page.getByTestId('agent-hub-agent-zcode')).toHaveAttribute(
       'aria-checked',
       'true',
     );
@@ -915,7 +915,7 @@ test.describe('E2E-AGENT-HUB-ADAPT-PREVIEW-001 selective preview-only', () => {
     await expect(page.getByTestId('cross-agent-adapt-full-plan')).toHaveCount(0);
 
     await expect(page.getByTestId('cross-agent-adapt-dest-codex')).toBeChecked();
-    for (const dest of ['opencode', 'grok', 'gemini', 'cursor', 'pi'] as const) {
+    for (const dest of ['opencode', 'grok', 'gemini', 'cursor', 'pi', 'zcode'] as const) {
       const box = page.getByTestId(`cross-agent-adapt-dest-${dest}`);
       if (await box.count()) {
         await box.uncheck();

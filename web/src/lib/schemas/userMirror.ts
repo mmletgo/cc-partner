@@ -22,6 +22,8 @@ import type {
   UserMirrorMcpCredentialFactDto,
   UserMirrorNativeFileFactDto,
   UserMirrorPlanDto,
+  UserMirrorPeerPlanDto,
+  UserMirrorPeerResultDto,
   UserMirrorPortableChangeDto,
   UserMirrorPortableItemDto,
   UserMirrorPortableKeyDto,
@@ -215,6 +217,17 @@ export const userMirrorSelectionFilterDecoder: Decoder<UserMirrorSelectionFilter
     portableKeys: nullableDecoder(arrayDecoder(userMirrorPortableKeyDecoder)),
   });
 
+/** Push 各目标的独立差异计划。 */
+export const userMirrorPeerPlanDecoder: Decoder<UserMirrorPeerPlanDto> = objectDecoder(
+  'UserMirrorPeerPlanDto',
+  {
+    destinationDeviceId: stringDecoder,
+    remoteInventorySnapshotHash: stringDecoder,
+    agents: arrayDecoder(userMirrorAgentPlanDecoder),
+    blockingReasons: arrayDecoder(stringDecoder),
+  },
+);
+
 /** Preview plan（selection 为后端 apply 时写入的可选字段）。 */
 export const userMirrorPlanDecoder: Decoder<UserMirrorPlanDto> = objectDecoder(
   'UserMirrorPlanDto',
@@ -230,6 +243,7 @@ export const userMirrorPlanDecoder: Decoder<UserMirrorPlanDto> = objectDecoder(
     hasCredentialBearingAssets: booleanDecoder,
     agents: arrayDecoder(userMirrorAgentPlanDecoder),
     blockingReasons: arrayDecoder(stringDecoder),
+    peerPlans: arrayDecoder(userMirrorPeerPlanDecoder),
     selection: optionalDecoder(nullableDecoder(userMirrorSelectionFilterDecoder)),
   },
 );
@@ -245,6 +259,16 @@ export const userMirrorAgentResultDecoder: Decoder<UserMirrorAgentResultDto> = o
   },
 );
 
+/** Push 每台设备的结果，不得丢弃后续设备失败原因。 */
+export const userMirrorPeerResultDecoder: Decoder<UserMirrorPeerResultDto> = objectDecoder(
+  'UserMirrorPeerResultDto',
+  {
+    destinationDeviceId: stringDecoder,
+    partial: booleanDecoder,
+    agents: arrayDecoder(userMirrorAgentResultDecoder),
+  },
+);
+
 /** Apply 聚合结果。 */
 export const userMirrorResultDecoder: Decoder<UserMirrorResultDto> = objectDecoder(
   'UserMirrorResultDto',
@@ -255,5 +279,6 @@ export const userMirrorResultDecoder: Decoder<UserMirrorResultDto> = objectDecod
     destinationDeviceId: stringDecoder,
     partial: booleanDecoder,
     agents: arrayDecoder(userMirrorAgentResultDecoder),
+    peerResults: arrayDecoder(userMirrorPeerResultDecoder),
   },
 );

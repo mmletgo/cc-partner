@@ -358,6 +358,7 @@
     "loadFailed": "Failed to load relay info: {{error}}"
   },
   "mobilePush": {
+    "urlPlaceholder": "https://push.example.internal/v1/notify",
     "title": "Mobile push",
     "subtitle": "APNs/FCM relay",
     "description": "When Attention changes, this PC sends a notification to the relay, which calls APNs/FCM. The relay only receives notification fields, not terminal bytes. If unset, tokens still register but nothing is sent.",

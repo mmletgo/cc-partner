@@ -394,7 +394,10 @@ describe('useAgentHubController', () => {
       result.current.shellPeers.find((peer) => peer.deviceId === 'peer-online')?.capabilities,
     ).toEqual(['agent-hub.user-instructions.v1']);
     expect(result.current.hubContext.deviceId).toBe('peer-online');
-    expect(portableApiMocks.inspect).not.toHaveBeenCalled();
+    await waitFor(() => expect(portableApiMocks.inspect).toHaveBeenCalled());
+    expect(portableApiMocks.inspect).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: 'peer-online', scopeKind: 'user' }),
+    );
     expect(listAssets).not.toHaveBeenCalled();
   });
 
