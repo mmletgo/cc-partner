@@ -216,6 +216,7 @@ function makeUserMirrorPlan(direction: 'pull' | 'push' = 'pull') {
       },
     ],
     blockingReasons: [] as string[],
+    peerPlans: [],
   };
 }
 
@@ -230,6 +231,7 @@ function makeUserMirrorResult(direction: 'pull' | 'push' = 'pull') {
     sourceDeviceId: direction === 'pull' ? 'peer-ok' : 'self-1',
     destinationDeviceId: direction === 'pull' ? 'self-1' : 'peer-ok',
     partial: false,
+    peerResults: [],
     agents: [
       {
         target: 'claude',
@@ -456,4 +458,145 @@ test.describe('E2E-AGENT-HUB-USER-MIRROR-001 user-mirror pull/push dialogs', () 
     await expect(page.getByTestId('user-mirror-report')).toBeVisible({ timeout: 10_000 });
     await expect(page.getByTestId('user-mirror-report-peer-ok')).toBeVisible();
   });
+});
+
+/**
+ * Business Logic: 多台目标具有不同删除项，计划与结果必须按设备保留。
+ * Code Logic: 为两个 peer 构造独立 hash 与不同数量的 extra command。
+ */
+function makeMultiPeerPlan() {
+  const plan = makeUserMirrorPlan('push');
+  return {
+    ...plan,
+    peerPlans: ['peer-ok', 'peer-ok-2'].map((destinationDeviceId, index) => ({
+      destinationDeviceId,
+      remoteInventorySnapshotHash: `remote-${destinationDeviceId}`,
+      blockingReasons: [],
+      agents: plan.agents.map((agent) => ({
+        ...agent,
+        portableDeletes: Array.from({ length: index + 1 }, (_, item) => ({
+          kind: 'command' as const,
+          nativeId: `extra-${destinationDeviceId}-${item}`,
+          displayName: `Extra ${destinationDeviceId} ${item}`,
+          op: 'delete' as const,
+          credentialBearing: false,
+        })),
+      })),
+    })),
+  };
+}
+
+test('multi-peer push shows each destination plan and preserves a later peer failure', async ({ page, backendHarness }, testInfo) => {
+  await installAppLocalStorage(page);
+  registerUserMirrorBase(backendHarness);
+  backendHarness.command('agent_hub_preview_user_mirror', { kind: 'resolve', value: makeMultiPeerPlan() });
+  const succeeded = makeUserMirrorResult('push');
+  backendHarness.command('agent_hub_apply_user_mirror', {
+    kind: 'resolve',
+    value: {
+      ...succeeded,
+      partial: true,
+      peerResults: [
+        { destinationDeviceId: 'peer-ok', partial: false, agents: succeeded.agents },
+        {
+          destinationDeviceId: 'peer-ok-2', partial: true,
+          agents: [{ target: 'claude', state: 'failed', errorCode: 'USER_MIRROR_STALE', message: 'Second peer inventory changed' }],
+        },
+      ],
+    },
+  });
+  await page.goto('/agent-hub');
+  await page.getByTestId('agent-hub-action-push').click();
+  await page.getByTestId('user-mirror-peer-peer-ok').check();
+  await page.getByTestId('user-mirror-peer-peer-ok-2').check();
+  await page.getByTestId('user-mirror-preview').click();
+  await expect(page.getByTestId('user-mirror-peer-plan-peer-ok')).toBeVisible();
+  await expect(page.getByTestId('user-mirror-peer-plan-peer-ok-2')).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('mirror-multi-peer.png') });
+  await page.getByTestId('user-mirror-confirm-overwrite').check();
+  await page.getByTestId('user-mirror-apply').click();
+  await expect(page.getByTestId('user-mirror-report-peer-ok')).toBeVisible();
+  await expect(page.getByTestId('user-mirror-report-peer-ok-2')).toContainText('USER_MIRROR_STALE');
+  await expect(page.getByTestId('user-mirror-apply')).toBeDisabled();
+});
+
+test('submitted transport failure can reconcile without submitting twice', async ({ page, backendHarness }) => {
+  await installAppLocalStorage(page);
+  registerUserMirrorBase(backendHarness);
+  backendHarness.command('agent_hub_apply_user_mirror', { kind: 'reject', error: { code: 'TIMEOUT', message: 'Reply timed out' } });
+  await page.goto('/agent-hub');
+  await page.getByTestId('agent-hub-action-pull').click();
+  await expect(page.getByTestId('user-mirror-source-peer-ok')).toBeChecked();
+  await page.getByTestId('user-mirror-preview').click();
+  await page.getByTestId('user-mirror-confirm-overwrite').check();
+  await page.getByTestId('user-mirror-apply').click();
+  await expect(page.getByTestId('user-mirror-error')).toBeVisible();
+  await expect(page.getByTestId('user-mirror-apply')).toBeDisabled();
+  await expect(page.getByTestId('user-mirror-reconcile')).toBeVisible();
+  await page.getByTestId('user-mirror-reconcile').click();
+  await expect(page.getByTestId('user-mirror-report')).toBeVisible();
+  const applyCalls = backendHarness.calls().filter((call) => call.type === 'invoke' && call.command === 'agent_hub_apply_user_mirror');
+  const getCalls = backendHarness.calls().filter((call) => call.type === 'invoke' && call.command === 'agent_hub_get_user_mirror');
+  expect(applyCalls).toHaveLength(1);
+  expect(getCalls).toHaveLength(1);
+  expect(getCalls[0].type === 'invoke' && getCalls[0].args).toEqual({ clientRequestId: readInvokeRequest(applyCalls[0]).clientRequestId });
+});
+
+test('selected content drives counts and an empty selection cannot apply', async ({ page, backendHarness }) => {
+  await installAppLocalStorage(page);
+  registerUserMirrorBase(backendHarness);
+  await page.goto('/agent-hub');
+  await page.getByTestId('agent-hub-action-pull').click();
+  await expect(page.getByTestId('user-mirror-source-peer-ok')).toBeChecked();
+  await page.getByTestId('user-mirror-preview').click();
+  await page.getByTestId('user-mirror-asset-deselect-all').click();
+  await page.getByTestId('user-mirror-include-instructions').uncheck();
+  await page.getByTestId('user-mirror-asset-skill:skill-a').check();
+  await expect(page.getByTestId('user-mirror-agent-claude')).toContainText('写入 0');
+  await expect(page.getByTestId('user-mirror-agent-claude')).toContainText('删除 0');
+  await expect(page.getByTestId('user-mirror-credentials')).not.toBeVisible();
+  await page.getByTestId('user-mirror-confirm-overwrite').check();
+  await expect(page.getByTestId('user-mirror-apply')).toBeEnabled();
+  await page.getByTestId('user-mirror-asset-skill:skill-a').uncheck();
+  await expect(page.getByTestId('user-mirror-apply')).toBeDisabled();
+  await page.getByTestId('user-mirror-preview').click();
+  await expect(page.getByTestId('user-mirror-include-instructions')).not.toBeChecked();
+  await expect(page.getByTestId('user-mirror-asset-skill:skill-a')).not.toBeChecked();
+});
+
+test('long mirror inventory keeps actions visible on a narrow viewport', async ({ page, backendHarness }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installAppLocalStorage(page);
+  registerUserMirrorBase(backendHarness);
+  const plan = makeUserMirrorPlan();
+  plan.agents[0].portableUpserts = Array.from({ length: 80 }, (_, index) => ({
+    kind: 'skill', nativeId: `skill-${index}`, displayName: `Skill ${index}`, op: 'write', credentialBearing: false,
+  }));
+  backendHarness.command('agent_hub_preview_user_mirror', { kind: 'resolve', value: plan });
+  await page.goto('/agent-hub');
+  await page.getByTestId('agent-hub-action-pull').click();
+  await expect(page.getByTestId('user-mirror-source-peer-ok')).toBeChecked();
+  await page.getByTestId('user-mirror-preview').click();
+  await expect(page.getByTestId('user-mirror-selection')).toBeVisible();
+  const applyBounds = await page.getByTestId('user-mirror-apply').boundingBox();
+  expect(applyBounds).not.toBeNull();
+  expect(applyBounds!.x).toBeGreaterThanOrEqual(0);
+  expect(applyBounds!.y + applyBounds!.height).toBeLessThanOrEqual(844);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await testInfo.attach('mirror-narrow-footer', { body: await page.screenshot({ path: testInfo.outputPath('mirror-narrow-footer.png') }), contentType: 'image/png' });
+});
+
+test('online remote instructions are inspected when mDNS capability hints are empty', async ({ page, backendHarness }) => {
+  await installAppLocalStorage(page);
+  registerUserMirrorBase(backendHarness);
+  backendHarness.command('list_devices', {
+    kind: 'resolve', value: makeDevices().map((device) => ({ ...device, capabilities: [] })),
+  });
+  await page.goto('/agent-hub?deviceId=peer-ok');
+  await expect(page.getByTestId('instruction-three-pane')).toBeVisible({ timeout: 10_000 });
+  const calls = backendHarness.calls().filter((call) => call.type === 'invoke' && call.command === 'agent_hub_inspect_user_instruction_workspace');
+  expect(calls.length).toBeGreaterThan(0);
+  for (const call of calls) {
+    expect(call.type === 'invoke' && call.args).toEqual({ deviceId: 'peer-ok' });
+  }
 });

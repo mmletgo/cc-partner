@@ -943,6 +943,7 @@
     }
   },
   "userMirror": {
+    "closeAction": "Close",
     "pullTitle": "Mirror from peer (user scope)",
     "pushTitle": "Mirror to peers (user scope)",
     "pullHint": "Mirror every registered Agent's user-scope instructions and assets from the selected peer onto this device. Same-named Agents match in place; native files will be overwritten and extra user-scope assets on this device will be removed.",

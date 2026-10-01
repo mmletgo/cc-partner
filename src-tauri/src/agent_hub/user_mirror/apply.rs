@@ -319,15 +319,6 @@ fn write_dest_native_file(
     content: &str,
     expected_hash: Option<&str>,
 ) -> Result<(), AppError> {
-    write_dest_native_file_once(env, path, content, expected_hash)
-}
-
-fn write_dest_native_file_once(
-    env: &TargetEnvironment,
-    path: &Path,
-    content: &str,
-    expected_hash: Option<&str>,
-) -> Result<(), AppError> {
     let request = WriteUserNativeInstructionFileRequest {
         path: path.to_string_lossy().into_owned(),
         content: content.to_string(),

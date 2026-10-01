@@ -146,6 +146,7 @@ export const validPlan = {
     },
   ],
   blockingReasons: [] as string[],
+  peerPlans: [],
 };
 
 /** 合法 apply 结果。 */
@@ -155,6 +156,7 @@ export const validResult = {
   sourceDeviceId: 'dev-a',
   destinationDeviceId: 'dev-local',
   partial: false,
+  peerResults: [],
   agents: [
     {
       target: 'claude' as const,
@@ -166,6 +168,36 @@ export const validResult = {
 };
 
 describe('user-mirror schemas', () => {
+  test('preserves independent peer plans and the second peer failure', () => {
+    const plan = userMirrorPlanDecoder.decode({
+      ...validPlan,
+      direction: 'push',
+      peerPlans: ['peer-a', 'peer-b'].map((destinationDeviceId) => ({
+        destinationDeviceId,
+        remoteInventorySnapshotHash: `hash-${destinationDeviceId}`,
+        agents: validPlan.agents,
+        blockingReasons: [],
+      })),
+    });
+    expect(plan.peerPlans.map((peer) => peer.remoteInventorySnapshotHash)).toEqual([
+      'hash-peer-a', 'hash-peer-b',
+    ]);
+    const result = userMirrorResultDecoder.decode({
+      ...validResult,
+      partial: true,
+      peerResults: [
+        { destinationDeviceId: 'peer-a', partial: false, agents: validResult.agents },
+        {
+          destinationDeviceId: 'peer-b',
+          partial: true,
+          agents: [{ target: 'codex', state: 'failed', errorCode: 'USER_MIRROR_STALE', message: 'changed' }],
+        },
+      ],
+    });
+    expect(result.peerResults[1].agents[0].errorCode).toBe('USER_MIRROR_STALE');
+    expect(result.peerResults.map((peer) => peer.destinationDeviceId)).toEqual(['peer-a', 'peer-b']);
+  });
+
   test('decodes valid inventory/plan/result', () => {
     const inventory = userMirrorInventoryDecoder.decode(validInventory);
     expect(inventory.inventorySnapshotHash).toBe('inv-hash-1');

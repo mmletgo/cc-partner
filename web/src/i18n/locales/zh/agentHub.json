@@ -943,6 +943,7 @@
     }
   },
   "userMirror": {
+    "closeAction": "关闭",
     "pullTitle": "从对端镜像（用户级）",
     "pushTitle": "镜像到对端（用户级）",
     "pullHint": "将所选对端的全部已登记 Agent 用户级指令与资产镜像到本机。同类 Agent 对号入座；将覆盖原生文件并删除本机多出的用户级资产。",

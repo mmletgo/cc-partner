@@ -21,6 +21,7 @@ use crate::agent_hub::portable_inventory::{
 };
 use crate::agent_hub::service::instruction_document_from_block_dtos;
 use crate::agent_hub::snapshot::canonical_json::canonicalize_value;
+use crate::agent_hub::targets::portable::hash_skill_directory_dereferenced;
 use crate::agent_hub::targets::{TargetEnvironment, TargetPathResolver};
 use crate::agent_hub::user_instructions::{
     extract_slot_text, inspect_user_instruction_workspace_with_env, user_level_mirror_native_paths,
@@ -84,7 +85,7 @@ pub(crate) async fn build_local_user_mirror_inventory_with_env(
         )
         .into_iter()
         .map(|item| map_portable_item(&item, home_path.as_ref()))
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
         let native_files = native_specs
             .iter()
             .filter(|(spec_target, _, _)| *spec_target == target)
@@ -222,7 +223,7 @@ fn dedup_user_mirror_portable_items<'a>(
 }
 
 /// `keep` 是否优于 `other`（true 则不替换）。
-fn portable_item_outranks(
+pub(crate) fn portable_item_outranks(
     keep: &PortableInventoryItemDto,
     other: &PortableInventoryItemDto,
 ) -> bool {
@@ -244,13 +245,14 @@ fn portable_item_outranks(
 fn map_portable_item(
     item: &PortableInventoryItemDto,
     home_path: &str,
-) -> UserMirrorPortableItemDto {
-    UserMirrorPortableItemDto {
+) -> Result<UserMirrorPortableItemDto, AppError> {
+    let (content_hash, tree_hash) = effective_user_mirror_portable_hashes(item)?;
+    Ok(UserMirrorPortableItemDto {
         kind: item.kind,
         native_id: item.native_id.clone(),
         display_name: item.display_name.clone(),
-        content_hash: item.content_hash.clone(),
-        tree_hash: item.tree_hash.clone(),
+        content_hash,
+        tree_hash,
         actual_enabled: item.actual_enabled,
         mcp_credential: item.mcp_credential.as_ref().map(|credential| {
             UserMirrorMcpCredentialFactDto {
@@ -264,6 +266,46 @@ fn map_portable_item(
             .filter(|warning| home_path.is_empty() || !warning.contains(home_path))
             .cloned()
             .collect(),
+    })
+}
+
+/// Business Logic（为什么需要）:
+///     可解析的外部软链参与镜像时，预览必须绑定实际内容，不能把来源路径占位 hash 当正文。
+/// Code Logic（做什么）:
+///     普通项与断链保留扫描事实；可解析 EscapeLink 的 Skill/Command 按实际内容统一哈希。
+pub(crate) fn effective_user_mirror_portable_hashes(
+    item: &PortableInventoryItemDto,
+) -> Result<(Option<String>, Option<String>), AppError> {
+    let escape = item
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("store_symlink_escape") || warning == "source_blocked");
+    if !escape || portable_item_is_blocked_source(item) {
+        return Ok((item.content_hash.clone(), item.tree_hash.clone()));
+    }
+    let path = Path::new(
+        item.source_path
+            .as_deref()
+            .ok_or_else(|| AppError::validation("USER_MIRROR_SOURCE_BLOCKED"))?,
+    );
+    let resolved = fs::canonicalize(path)?;
+    match item.kind {
+        PortableAssetKind::Skill => {
+            let dir = if resolved.is_dir() {
+                resolved.as_path()
+            } else {
+                resolved
+                    .parent()
+                    .ok_or_else(|| AppError::validation("USER_MIRROR_SOURCE_BLOCKED"))?
+            };
+            let (content, tree, _, _) =
+                hash_skill_directory_dereferenced(dir).map_err(|error| {
+                    AppError::validation(format!("USER_MIRROR_SOURCE_BLOCKED:{error}"))
+                })?;
+            Ok((Some(content), Some(tree)))
+        }
+        PortableAssetKind::Command => Ok((Some(sha256_hex(&fs::read(resolved)?)), None)),
+        _ => Ok((item.content_hash.clone(), item.tree_hash.clone())),
     }
 }
 

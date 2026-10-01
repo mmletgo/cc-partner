@@ -28,7 +28,7 @@
 | # | 决策 | 说明 |
 |---|------|------|
 | M1 | 镜像对齐 | 目标用户级变成源的完整副本。源有的覆盖；目标多出来的同类资产删除或停用。 |
-| M2 | 一次全部已登记 Agent | 一次处理 catalog 中全部 Hub Agent（当前：`claude` / `codex` / `opencode` / `grok` / `gemini` / `cursor` / `pi`）。同名对号入座，禁止跨 Agent 翻译。 |
+| M2 | 一次全部已登记 Agent | 一次处理 catalog 中全部 Hub Agent（当前：`claude` / `codex` / `opencode` / `grok` / `gemini` / `cursor` / `pi` / `zcode`）。同名对号入座，禁止跨 Agent 翻译。 |
 | M3 | 立刻写盘 | 成功项同时更新 Hub 账本与该 Agent 会写的用户级原生文件 / 配置 leaf。 |
 | M4 | Pull 与 Push 都改 | Pull：对端覆盖本机。Push：本机覆盖所选对端。不再勾选单条，不再选 full/user/project/assets。 |
 | M5 | 新操作，不打补丁 | 领域操作 `user_mirror`。新能力 token 与路由同发。旧逐项逻辑不作成功回落。 |
@@ -132,9 +132,10 @@
 ### 5.4 预览与幂等
 
 - Preview 在 apply 端对比「源 inventory 快照」与「目标当前用户级扫描」，生成 plan（TTL **15 分钟**）。
-- Plan 绑定：源/目标 inventory hash、peer id、catalog Agent 集合。任一侧漂移 → `USER_MIRROR_STALE`，必须重新预览。
+- 库存 hash 只绑定 Agent/资产身份、槽与原生文件内容、portable 内容/树/启用态和凭据事实；展示名、warnings 与刷新时间不参与绑定。可解析外部软链以实际内容哈希进入预览，portable-store 迁移不能因来源诊断变化自触发 stale。
+- Plan 绑定：源/目标 inventory hash、peer id、catalog Agent 集合。任一侧漂移 → `USER_MIRROR_STALE`，必须重新预览。Push 的 `peerPlans[]` 为每台目标保存独立 `destinationDeviceId`、`remoteInventorySnapshotHash`、`agents`、`blockingReasons`，不得复用第一台设备的目标差异。catalog 不一致的设备不可按空库存删除缺失 Agent，必须明确报告不支持；其他设备继续。
 - Apply 带 `planToken` + `clientRequestId`。同对同结果重放；同 id 不同 plan → 409。
-- 崩溃后 `get(clientRequestId)` 可对账；未完成标 `outcomeUnknown`，并 best-effort 附带 rescan 观察。禁止把未知标成成功。
+- 崩溃后 `get(clientRequestId)` 可对账；未完成标 `outcomeUnknown`，并 best-effort 附带 rescan 观察。禁止把未知标成成功。Push `peerResults[]` 保留每个 `destinationDeviceId`、`partial` 与完整 `agents`（状态、错误码、原因），顶层汇总不能丢失失败设备。
 
 ### 5.5 控制面
 
@@ -202,9 +203,11 @@ Tauri / control op 名称固定为：
 
 - 只选对端（可多选）。去掉 full/user/project/assets 与手工 asset id。
 - 预览、确认、凭据披露、LAN 风险提示与 Pull 相同。
-- 每 peer 独立报告（与现 multi-target 一致）。
+- 每 peer 独立预览并报告；设备库存不同也必须应用各自差异。
 
 文案标明：同类 Agent 对号入座、将覆盖原生文件、将删除目标多出的用户级资产、LAN 无调用者身份校验。
+
+交互状态（2026-10-01）：预览计数随选择过滤，不展示未选中项的写入/删除数量与凭据披露；全不选不提交。提交后锁定选择与重复 Apply，transport/timeout 后仍提供原请求 id 的核对。开始新一轮须重新预览，保留用户先前选择并重新确认，禁止静默扩大为全量。内容区独立滚动，操作区始终可见。在线设备不受 mDNS 非权威能力列表阻挡，实际能力由后端 health 校验；任何失败不得回落本机。
 
 ## 8. 错误与注意力
 
@@ -219,6 +222,10 @@ Tauri / control op 名称固定为：
 | `USER_MIRROR_TRANSFER_LIMIT` | 超过 512 MiB |
 | `USER_MIRROR_NATIVE_PATH_FORBIDDEN` | 解析到白名单外路径 |
 | `USER_MIRROR_LEGACY_LOSSY_BLOCKED` | MCP 占位凭据 |
+| `USER_MIRROR_SOURCE_BLOCKED` | 所选源资产不可打包或安装，报告该 Agent 失败并继续独立项 |
+| `USER_MIRROR_MCP_DEST_UNSUPPORTED` | 目标 Agent 没有 MCP 写盘落点，不得报告成功 |
+| `USER_MIRROR_MCP_LEAF_INVALID` | 所选 MCP leaf 为空或无法解析，不得静默跳过 |
+| `USER_MIRROR_NO_APPLICABLE_PEERS` | 所有目标都在预览中阻断，必须调整设备或升级后重新预览 |
 | `USER_MIRROR_PARTIAL` | 结果 DTO `partial=true`（不是 transport 错误） |
 
 Push 单 peer 失败可进 Attention，稳定 id `agent-hub:mirror-failed:<requestId>:<peerId>`，只导航到 Agent Hub，Inbox 内不执行。摘要不含 payload/secret。

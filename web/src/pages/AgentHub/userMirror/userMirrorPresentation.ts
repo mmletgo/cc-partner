@@ -154,7 +154,10 @@ export function canApplyUserMirror(input: {
   hasSelection?: boolean;
 }): boolean {
   return (
-    Boolean(input.plan) &&
+    input.plan !== null &&
+    input.plan.blockingReasons.length === 0 &&
+    (input.plan.peerPlans.length === 0 ||
+      input.plan.peerPlans.some((peer) => peer.blockingReasons.length === 0)) &&
     input.confirmed &&
     !input.busy &&
     !input.stale &&

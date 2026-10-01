@@ -8,6 +8,7 @@
 //!     按 inventory 身份读源文件 → `ObjectStore::put_blob` / tree → 组装 envelope 与
 //!     item_bindings；累计超 512 MiB fail-closed；legacyLossy MCP 标 blocked 且不把占位当凭据。
 
+use super::inventory::{effective_user_mirror_portable_hashes, portable_item_outranks};
 use super::models::{
     UserMirrorAgentInventoryDto, UserMirrorInventoryDto, UserMirrorSelectionFilterDto,
     UserMirrorSlotHashesDto, USER_MIRROR_DEST_MAX_TOTAL_BYTES, USER_MIRROR_PLAN_TTL_MINUTES,
@@ -201,7 +202,14 @@ pub(crate) async fn freeze_user_mirror_selection_with_env(
         asset_heads: BTreeMap::new(),
         bindings: Vec::new(),
     };
-    freeze_native_and_hub_slots(&mut acc, state, inventory, env).await?;
+    if inventory.agents.iter().any(|agent| {
+        !agent.native_files.is_empty()
+            || agent.slots.common.is_some()
+            || agent.slots.adapted.is_some()
+            || agent.slots.exclusive.is_some()
+    }) {
+        freeze_native_and_hub_slots(&mut acc, state, inventory, env).await?;
+    }
     freeze_portable_items(&mut acc, state, inventory, env).await?;
     let envelope = finish_envelope(&mut acc, inventory)?;
     let transfer_id = format!("umirror-src-{}", Uuid::now_v7());
@@ -444,7 +452,14 @@ async fn freeze_portable_items(
         if item.scope_kind != ScopeKind::User {
             continue;
         }
-        live.insert((item.target, item.kind, item.native_id.clone()), item);
+        let key = (item.target, item.kind, item.native_id.clone());
+        if live
+            .get(&key)
+            .is_some_and(|current| portable_item_outranks(current, &item))
+        {
+            continue;
+        }
+        live.insert(key, item);
     }
     let mut frozen: HashSet<(AgentTarget, PortableAssetKind, String)> = HashSet::new();
     for agent in &inventory.agents {
@@ -456,7 +471,7 @@ async fn freeze_portable_items(
             let Some(item) = live.get(&key).cloned() else {
                 return Err(AppError::conflict("USER_MIRROR_STALE".to_string()));
             };
-            if !portable_live_matches_preview(listed, &item) {
+            if !portable_live_matches_preview(listed, &item)? {
                 return Err(AppError::conflict("USER_MIRROR_STALE".to_string()));
             }
             freeze_one_portable(acc, agent.target, listed, &item).await?;
@@ -472,9 +487,10 @@ async fn freeze_portable_items(
 fn portable_live_matches_preview(
     listed: &super::models::UserMirrorPortableItemDto,
     live: &PortableInventoryItemDto,
-) -> bool {
-    listed.content_hash == live.content_hash
-        && listed.tree_hash == live.tree_hash
+) -> Result<bool, AppError> {
+    let (content_hash, tree_hash) = effective_user_mirror_portable_hashes(live)?;
+    Ok(listed.content_hash == content_hash
+        && listed.tree_hash == tree_hash
         && listed.actual_enabled == live.actual_enabled
         && match (&listed.mcp_credential, &live.mcp_credential) {
             (None, None) => true,
@@ -482,7 +498,7 @@ fn portable_live_matches_preview(
                 expected.present == actual.present && expected.hash == actual.hash
             }
             _ => false,
-        }
+        })
 }
 
 /// 冻结单条 portable 资产。
@@ -608,7 +624,7 @@ fn validate_frozen_portable_source(
                 && listed
                     .tree_hash
                     .as_deref()
-                    .is_none_or(|expected| expected == tree_hash)
+                    .map_or(true, |expected| expected == tree_hash)
         }
         PortableAssetKind::Command => {
             let bytes = fs::read(&source_path)?;
@@ -1009,6 +1025,77 @@ mod tests {
             env.home.join(".claude.json").as_path(),
             r#"{"mcpServers":{"s":{"command":"uvx","args":["srv"],"env":{"TOKEN":"plain-secret-xyz"},"enabled":true}}}"#,
         );
+    }
+
+    /// Business Logic（为什么需要这个测试）:
+    ///     用户关闭指令同步时，实际 Canonical 非空也不能被误判为源漂移或进入对象包。
+    /// Code Logic（这个测试做什么）:
+    ///     保存公共槽，按 includeInstructions=false 裁剪后冻结，只允许 portable binding。
+    #[tokio::test]
+    async fn freeze_without_instructions_preserves_selected_portables() {
+        use crate::agent_hub::service::{AgentHubService, InstructionBlockDto};
+        use crate::agent_hub::user_instructions::{
+            inspect_user_instruction_workspace, SaveUserInstructionBlocksRequest,
+        };
+        let env = seed_user_mirror_homes().await;
+        seed_claude_native_skill_and_mcp(&env);
+        crate::agent_hub::migration::seed_user_instruction_if_head_null(
+            &env.app_state,
+            &env.claude_home.join("CLAUDE.md"),
+            &crate::config::data_dir().unwrap(),
+        )
+        .await
+        .unwrap();
+        let workspace = inspect_user_instruction_workspace(&env.app_state)
+            .await
+            .unwrap();
+        AgentHubService::save_user_instruction_blocks(
+            &env.app_state,
+            SaveUserInstructionBlocksRequest {
+                blocks: vec![InstructionBlockDto {
+                    id: "shared".into(),
+                    mode: "shared".into(),
+                    common_markdown: "NOT SELECTED".into(),
+                    variants: None,
+                    heading_path: None,
+                    source_target: None,
+                    needs_adaptation: false,
+                }],
+                base_revision_id: workspace
+                    .canonical
+                    .as_ref()
+                    .and_then(|canonical| canonical.head_revision_id.clone()),
+                inventory_snapshot_hash: workspace.inventory_snapshot_hash,
+            },
+        )
+        .await
+        .unwrap();
+        let inventory = build_local_user_mirror_inventory(&env.app_state, "dev-a")
+            .await
+            .unwrap();
+        assert!(inventory
+            .agents
+            .iter()
+            .any(|agent| agent.slots.common.is_some()));
+        let filtered = filter_inventory_for_freeze(
+            &inventory,
+            Some(&UserMirrorSelectionFilterDto {
+                include_instructions: false,
+                portable_keys: None,
+            }),
+        );
+        let built = freeze_user_mirror_selection(&env.app_state, &filtered)
+            .await
+            .unwrap();
+        assert!(!built.item_bindings.is_empty());
+        assert!(built
+            .item_bindings
+            .iter()
+            .all(|binding| binding.kind.is_some()));
+        assert!(!built
+            .object_bytes
+            .values()
+            .any(|bytes| bytes == b"NOT SELECTED"));
     }
 
     /// Business Logic（为什么需要这个测试）:

@@ -22,7 +22,7 @@ import {
   useProjectInstructionFilesController,
   type UseProjectInstructionFilesControllerResult,
 } from './projectInstructions';
-import { peerAllowsUserInstructionThreePane } from './context/agentHubContext';
+import { isAgentHubPeerOnline } from './context/agentHubContext';
 import type { UseAgentHubControllerResult } from './useAgentHubController';
 import styles from './AgentHub.module.css';
 
@@ -72,7 +72,7 @@ export function useAgentHubSession(
       (committedHubContext.tab === 'instructions' || committedHubContext.adaptView) &&
       committedHubContext.scope === 'user' &&
       (committedHubContext.deviceId === null ||
-        peerAllowsUserInstructionThreePane(selectedCommittedPeer)),
+        isAgentHubPeerOnline(selectedCommittedPeer)),
   });
   const projectInstructionFiles = useProjectInstructionFilesController({
     projectKey: committedHubContext.projectKey,

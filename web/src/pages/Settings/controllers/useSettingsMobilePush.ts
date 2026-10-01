@@ -51,6 +51,7 @@ export function useSettingsMobilePush(): UseSettingsMobilePushResult {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 初始网络加载复用手动刷新入口，与 useSettingsRelay 的挂载合同一致。
     void refresh();
   }, [refresh]);
 

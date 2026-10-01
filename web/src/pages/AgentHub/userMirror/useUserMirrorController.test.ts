@@ -160,6 +160,24 @@ afterEach(() => {
 });
 
 describe('useUserMirrorController', () => {
+  test('a globally blocked preview cannot apply and its selection remains editable', async () => {
+    const mirrorApi = createMirrorApi({
+      preview: vi.fn(async () => planFixture({ blockingReasons: ['USER_MIRROR_CAPABILITY_UNSUPPORTED'] })),
+    });
+    const { result } = renderHook(() => useUserMirrorController({
+      open: true, direction: 'pull', mirrorApi, listDevices: vi.fn(async () => devices),
+    }));
+    await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
+    await act(async () => { await result.current.preview(); });
+    act(() => { result.current.setConfirmed(true); });
+    expect(result.current.canApply).toBe(false);
+    await act(async () => { await result.current.apply(); });
+    expect(mirrorApi.apply).not.toHaveBeenCalled();
+    act(() => { result.current.setIncludeInstructions(false); });
+    expect(result.current.includeInstructions).toBe(false);
+    expect(result.current.submitted).toBe(false);
+  });
+
   test('apply without preview is blocked and never calls apply', async () => {
     const mirrorApi = createMirrorApi();
     const { result } = renderHook(() =>

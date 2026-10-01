@@ -81,25 +81,15 @@ export const AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY = 'agent-hub.user-instructio
 export const AGENT_HUB_PORTABLE_USER_CAPABILITY = 'agent-hub.portable-user.v1';
 
 /**
- * Business Logic: 远端用户级三栏只在对端在线且宣告 user-instructions 时挂载，缺能力保持 hint。
- * Code Logic: online + capabilities 精确包含 token；views 不得 import @/api。
+ * Business Logic（为什么需要）:
+ *   mDNS 能力列表可能截断，在线对端应通过实际请求探测能力，避免误挡远程管理。
+ * Code Logic（做什么）:
+ *   仅判断设备在线；后端通过 health 校验能力与设备身份，失败不得回落本机。
  */
-export function peerAllowsUserInstructionThreePane(
+export function isAgentHubPeerOnline(
   peer: { online: boolean; capabilities?: readonly string[] | null } | null | undefined,
 ): boolean {
-  if (!peer?.online) return false;
-  return (peer.capabilities ?? []).includes(AGENT_HUB_USER_INSTRUCTIONS_CAPABILITY);
-}
-
-/**
- * Business Logic: 远端用户级 skill/command/plugin/mcp 主列表只在对端在线且宣告 portable-user 时挂载。
- * Code Logic: online + capabilities 精确包含 token；缺能力保持 Pull/Push hint。
- */
-export function peerAllowsUserPortableInventory(
-  peer: { online: boolean; capabilities?: readonly string[] | null } | null | undefined,
-): boolean {
-  if (!peer?.online) return false;
-  return (peer.capabilities ?? []).includes(AGENT_HUB_PORTABLE_USER_CAPABILITY);
+  return peer?.online === true;
 }
 
 /** 草稿所属身份；lane 不在其中，因为同一 Agent 的三槽共享一个 Canonical 文档。 */

@@ -40,7 +40,7 @@ use crate::agent_hub::user_mirror::{
     freeze_user_mirror_selection, migrate_portable_assets_into_store, prepare_user_mirror,
     put_user_mirror_object, source_read_user_mirror_object_chunk, CommitUserMirrorRequest,
     PrepareUserMirrorRequest, UserMirrorInventoryDto, UserMirrorSelectionQuery,
-    UserMirrorSelectionResponse,
+    UserMirrorSelectionResponse, USER_MIRROR_STALE,
 };
 use crate::net::error_response::{P2pError, P2pResult};
 // CAPABILITY_* used in tests module for wire-token assertions
@@ -690,7 +690,7 @@ pub async fn agent_hub_user_mirror_inventory(
 ///
 /// Business Logic: 按 inventory 冻结 SnapshotEnvelope/CAS；源端不得 adoption；
 ///     selection 只裁剪打包范围（缺省 None = 全量），inventory 身份 hash 不变。
-/// Code Logic: 解析 selection query → `filter_inventory_for_freeze` 裁剪本机 inventory
+/// Code Logic: 校验预览库存与重扫快照一致 → `filter_inventory_for_freeze` 裁剪本机 inventory
 ///     副本 → `freeze_user_mirror_selection`；返回 transferId + envelope + bindings。
 pub async fn agent_hub_user_mirror_selection(
     State(state): State<AppState>,
@@ -698,16 +698,17 @@ pub async fn agent_hub_user_mirror_selection(
     Json(body): Json<serde_json::Value>,
 ) -> P2pResult<Json<UserMirrorSelectionResponse>> {
     reject_nested_user_instruction_device_id(&body, &ctx)?;
-    // body 仍按 wire 合同解析校验；冻结用重建后的本机 inventory，不用请求体里的 inventory。
     let query = serde_json::from_value::<UserMirrorSelectionQuery>(body)
         .map_err(|e| P2pError::validation(format!("user-mirror selection body: {e}"), &ctx))?;
     // Pull 链路对端 freeze 前：先把 user-scope Skill/Command 收编进本机 portable-store，
-    // 再重建本机 inventory 并冻结；调用方的 stale 校验用的是它自己探测的 inventory，互不影响。
+    // 再重建本机 inventory；变化后必须重新预览，不能把未预览内容当作旧快照发送。
     migrate_portable_assets_into_store(&state)
         .await
         .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.selection"))?;
     let inventory = build_local_user_mirror_inventory(&state, state.device_id.as_str())
         .await
+        .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.selection"))?;
+    ensure_user_mirror_selection_inventory(&query.inventory, &inventory)
         .map_err(|e| P2pError::from_app_error(e, &ctx, "agent_hub.user_mirror.selection"))?;
     let frozen = filter_inventory_for_freeze(&inventory, query.selection.as_ref());
     let built = freeze_user_mirror_selection(&state, &frozen)
@@ -725,6 +726,22 @@ pub async fn agent_hub_user_mirror_selection(
         item_bindings: built.item_bindings,
         missing_object_hashes,
     }))
+}
+
+/// Business Logic（为什么需要）:
+///     源端在库存读取和冻结之间可能被修改，不能发送用户未预览的内容。
+/// Code Logic（做什么）:
+///     绑定源设备与完整库存 hash；时间戳变化不影响 hash，内容漂移返回 STALE。
+fn ensure_user_mirror_selection_inventory(
+    expected: &UserMirrorInventoryDto,
+    actual: &UserMirrorInventoryDto,
+) -> Result<(), crate::error::AppError> {
+    if expected.source_device_id != actual.source_device_id
+        || expected.inventory_snapshot_hash != actual.inventory_snapshot_hash
+    {
+        return Err(crate::error::AppError::conflict(USER_MIRROR_STALE));
+    }
+    Ok(())
 }
 
 /// GET /api/agent-hub/user-mirror/objects/:transferId/:objectHash?offset=
@@ -1030,6 +1047,28 @@ mod tests {
         assert!(!lower.contains("authorization"));
         assert!(!lower.contains("/users/"));
         assert!(!lower.contains("\"env\""));
+    }
+
+    /// Business Logic: 库存读取后源内容变化或设备错配，冻结必须失败而不是传输新内容。
+    /// Code Logic: 同 hash 不受 refreshed_at 影响；内容 hash / source id 漂移返回 STALE。
+    #[test]
+    fn user_mirror_selection_rejects_source_drift() {
+        let expected = UserMirrorInventoryDto {
+            source_device_id: "source-a".into(),
+            inventory_snapshot_hash: "preview-hash".into(),
+            refreshed_at: "2026-10-01T00:00:00Z".into(),
+            agents: vec![],
+            credential_bearing_count: 0,
+        };
+        let mut actual = expected.clone();
+        actual.refreshed_at = "2026-10-01T00:00:01Z".into();
+        assert!(ensure_user_mirror_selection_inventory(&expected, &actual).is_ok());
+        actual.inventory_snapshot_hash = "changed-content".into();
+        let error = ensure_user_mirror_selection_inventory(&expected, &actual).unwrap_err();
+        assert!(error.to_string().contains(USER_MIRROR_STALE));
+        actual.inventory_snapshot_hash = expected.inventory_snapshot_hash.clone();
+        actual.source_device_id = "source-b".into();
+        assert!(ensure_user_mirror_selection_inventory(&expected, &actual).is_err());
     }
 
     fn sample_envelope() -> (SnapshotEnvelopeV1, Vec<u8>) {

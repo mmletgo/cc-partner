@@ -516,7 +516,7 @@ export function UserMirrorDialog(props: UserMirrorDialogProps): JSX.Element | nu
               </Button>
             ) : null}
             <Button type="button" variant="ghost" onClick={onClose} disabled={busy}>
-              {t('common:action.cancel')}
+              {submitted ? t('agentHub:userMirror.closeAction') : t('common:action.cancel')}
             </Button>
           </div>
         </div>

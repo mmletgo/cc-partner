@@ -364,6 +364,7 @@ function buildProps(
       clientRequestId: null,
       confirmed: false,
       busy: false,
+      submitted: false,
       error: null,
       stale: false,
       canApply: false,
@@ -699,7 +700,7 @@ describe('AgentHub page characterization', () => {
     expect(screen.queryByTestId('agent-hub-reload')).toBeNull();
   });
 
-  test('online peer missing user-instructions capability keeps remote hint', () => {
+  test('online peer with missing mDNS capability still mounts remote instructions', () => {
     renderView({
       hubContext: {
         ...buildProps().hubContext,
@@ -709,8 +710,8 @@ describe('AgentHub page characterization', () => {
       shellPeers: [{ deviceId: 'peer-a', name: 'Peer A', online: true, capabilities: [] }],
       instructionThreePane: stubThreePane(),
     });
-    expect(screen.getByTestId('agent-hub-remote-management')).toBeTruthy();
-    expect(screen.queryByTestId('instruction-three-pane')).toBeNull();
+    expect(screen.queryByTestId('agent-hub-remote-management')).toBeNull();
+    expect(screen.getByTestId('instruction-three-pane')).toBeTruthy();
   });
 
   test('offline peer with user-instructions capability keeps remote hint', () => {

@@ -198,6 +198,14 @@ export interface UserMirrorAgentPlanDto {
   mcpDeletes: UserMirrorPortableChangeDto[];
 }
 
+/** 单台 Push 目标的独立库存差异；不得把第一台设备的计划用于其他设备。 */
+export interface UserMirrorPeerPlanDto {
+  destinationDeviceId: string;
+  remoteInventorySnapshotHash: string;
+  agents: UserMirrorAgentPlanDto[];
+  blockingReasons: string[];
+}
+
 /**
  * portable 资产选择键：跨 Agent 联动（同名 skill 在多个 Agent 上算同一资产）。
  *
@@ -239,6 +247,8 @@ export interface UserMirrorPlanDto {
   hasCredentialBearingAssets: boolean;
   agents: UserMirrorAgentPlanDto[];
   blockingReasons: string[];
+  /** Push 各目标独立计划；Pull 为空，使用顶层单机计划。 */
+  peerPlans: UserMirrorPeerPlanDto[];
   /** apply 时写入的同步范围；缺省/null = 全量（preview 恒为 null）。 */
   selection?: UserMirrorSelectionFilterDto | null;
 }
@@ -268,6 +278,13 @@ export interface UserMirrorAgentResultDto {
   message: string | null;
 }
 
+/** 单台目标设备的结果，保留每个 Agent 的状态与失败原因。 */
+export interface UserMirrorPeerResultDto {
+  destinationDeviceId: string;
+  partial: boolean;
+  agents: UserMirrorAgentResultDto[];
+}
+
 /**
  * 一次镜像 apply 的整次结果。
  *
@@ -281,6 +298,8 @@ export interface UserMirrorResultDto {
   destinationDeviceId: string;
   partial: boolean;
   agents: UserMirrorAgentResultDto[];
+  /** Push 各目标结果；Pull 为空，使用顶层单机结果。 */
+  peerResults: UserMirrorPeerResultDto[];
 }
 
 /**
