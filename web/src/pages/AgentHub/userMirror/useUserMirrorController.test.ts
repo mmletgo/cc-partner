@@ -107,6 +107,7 @@ function planFixture(overrides: Partial<UserMirrorPlanDto> = {}): UserMirrorPlan
       },
     ],
     blockingReasons: [],
+    peerPlans: [],
     ...overrides,
   };
 }
@@ -126,8 +127,23 @@ function resultFixture(overrides: Partial<UserMirrorResultDto> = {}): UserMirror
         message: null,
       },
     ],
+    peerResults: [],
     ...overrides,
   };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function createMirrorApi(overrides: Partial<UserMirrorApi> = {}): UserMirrorApi {
@@ -384,6 +400,7 @@ describe('useUserMirrorController', () => {
 
     await act(async () => {
       result.current.toggleAsset('skill:skill-a');
+      result.current.setConfirmed(true);
     });
     expect(result.current.selectedAssetKeys).toEqual([
       'command:cmd-x',
@@ -391,7 +408,14 @@ describe('useUserMirrorController', () => {
       'mcp:github',
     ]);
 
+    // 全选快捷操作回到默认，并按新范围重新确认。
     await act(async () => {
+      result.current.selectAllAssets();
+    });
+    expect(result.current.selectedAssetKeys).toHaveLength(4);
+    await act(async () => {
+      result.current.toggleAsset('skill:skill-a');
+      result.current.setConfirmed(true);
       await result.current.apply();
     });
     const payload = (mirrorApi.apply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
@@ -405,18 +429,6 @@ describe('useUserMirrorController', () => {
         { kind: 'mcp', nativeId: 'github' },
       ],
     });
-
-    // 全选快捷操作回到默认：等重渲染后再 apply，不带 selection。
-    await act(async () => {
-      result.current.selectAllAssets();
-    });
-    await act(async () => {
-      await result.current.apply();
-    });
-    const second = (mirrorApi.apply as ReturnType<typeof vi.fn>).mock.calls[1]?.[0] as {
-      selection?: unknown;
-    };
-    expect('selection' in second).toBe(false);
   });
 
   test('turning includeInstructions off sends includeInstructions=false', async () => {
@@ -437,6 +449,7 @@ describe('useUserMirrorController', () => {
 
     await act(async () => {
       result.current.setIncludeInstructions(false);
+      result.current.setConfirmed(true);
     });
     expect(result.current.includeInstructions).toBe(false);
 
@@ -448,11 +461,208 @@ describe('useUserMirrorController', () => {
     };
     expect(payload.selection).toEqual({ includeInstructions: false, portableKeys: null });
 
-    // 重新预览后选择重置为默认（全选 + 指令开）。
+    // 重新预览必须保留用户缩小后的范围，不能静默扩大回全量。
     await act(async () => {
       await result.current.preview();
     });
-    expect(result.current.includeInstructions).toBe(true);
+    expect(result.current.includeInstructions).toBe(false);
     expect(result.current.selectedAssetKeys).toHaveLength(4);
+  });
+
+  test('synchronous operation latch coalesces apply double-clicks', async () => {
+    const pendingApply = deferred<UserMirrorResultDto>();
+    const mirrorApi = createMirrorApi({
+      apply: vi.fn(() => pendingApply.promise),
+    });
+    const { result } = renderHook(() =>
+      useUserMirrorController({
+        open: true,
+        direction: 'pull',
+        mirrorApi,
+        listDevices: vi.fn(async () => devices),
+      }),
+    );
+    await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
+    await act(async () => {
+      await result.current.preview();
+      result.current.setConfirmed(true);
+    });
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.apply();
+      second = result.current.apply();
+    });
+    expect(mirrorApi.apply).toHaveBeenCalledTimes(1);
+
+    pendingApply.resolve(resultFixture());
+    await act(async () => {
+      await Promise.all([first, second]);
+    });
+    expect(mirrorApi.apply).toHaveBeenCalledTimes(1);
+  });
+
+  test('apply transport failure exposes same-request reconciliation and recovers the result', async () => {
+    const mirrorApi = createMirrorApi({
+      apply: vi.fn(async () => {
+        throw new Error('network timeout');
+      }),
+      get: vi.fn(async () => resultFixture()),
+    });
+    const { result } = renderHook(() =>
+      useUserMirrorController({
+        open: true,
+        direction: 'pull',
+        mirrorApi,
+        listDevices: vi.fn(async () => devices),
+      }),
+    );
+    await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
+    await act(async () => {
+      await result.current.preview();
+      result.current.setConfirmed(true);
+      await result.current.apply();
+    });
+
+    expect(result.current.clientRequestId).toBeTruthy();
+    expect(result.current.canApply).toBe(false);
+    expect(result.current.canReconcile).toBe(true);
+    const failedRequestId = result.current.clientRequestId;
+
+    await act(async () => {
+      await result.current.reconcile();
+    });
+    expect(mirrorApi.get).toHaveBeenCalledWith(failedRequestId);
+    expect(result.current.result?.partial).toBe(false);
+    expect(result.current.canReconcile).toBe(false);
+  });
+
+  test('successful apply cannot be submitted again until a new preview', async () => {
+    const mirrorApi = createMirrorApi();
+    const { result } = renderHook(() =>
+      useUserMirrorController({
+        open: true,
+        direction: 'pull',
+        mirrorApi,
+        listDevices: vi.fn(async () => devices),
+      }),
+    );
+    await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
+    await act(async () => {
+      await result.current.preview();
+      result.current.setConfirmed(true);
+      await result.current.apply();
+      await result.current.apply();
+    });
+
+    expect(mirrorApi.apply).toHaveBeenCalledTimes(1);
+    expect(result.current.canApply).toBe(false);
+
+    await act(async () => {
+      await result.current.preview();
+    });
+    expect(result.current.result).toBeNull();
+    expect(result.current.confirmed).toBe(false);
+  });
+
+  test('selection changes preserve the plan, reset confirmation, and empty selection cannot apply', async () => {
+    const mirrorApi = createMirrorApi();
+    const { result } = renderHook(() =>
+      useUserMirrorController({
+        open: true,
+        direction: 'pull',
+        mirrorApi,
+        listDevices: vi.fn(async () => devices),
+      }),
+    );
+    await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
+    await act(async () => {
+      await result.current.preview();
+      result.current.setConfirmed(true);
+      result.current.setIncludeInstructions(false);
+      result.current.deselectAllAssets();
+    });
+
+    expect(result.current.plan?.planToken).toBe('plan-1');
+    expect(result.current.confirmed).toBe(false);
+    expect(result.current.selectedAssetKeys).toEqual([]);
+    expect(result.current.canApply).toBe(false);
+  });
+
+  test('new preview preserves the selected scope and leaves newly discovered assets unselected', async () => {
+    const secondPlan = planFixture({
+      planToken: 'plan-2',
+      agents: [
+        {
+          ...planFixture().agents[0],
+          portableUpserts: [
+            ...planFixture().agents[0].portableUpserts,
+            {
+              kind: 'skill',
+              nativeId: 'skill-new',
+              displayName: 'New Skill',
+              op: 'write',
+              credentialBearing: false,
+            },
+          ],
+        },
+      ],
+    });
+    const mirrorApi = createMirrorApi({
+      preview: vi
+        .fn<() => Promise<UserMirrorPlanDto>>()
+        .mockResolvedValueOnce(planFixture())
+        .mockResolvedValueOnce(secondPlan),
+    });
+    const { result } = renderHook(() =>
+      useUserMirrorController({
+        open: true,
+        direction: 'pull',
+        mirrorApi,
+        listDevices: vi.fn(async () => devices),
+      }),
+    );
+    await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
+    await act(async () => {
+      await result.current.preview();
+      result.current.toggleAsset('command:cmd-x');
+      await result.current.preview();
+    });
+
+    expect(result.current.plan?.planToken).toBe('plan-2');
+    expect(result.current.selectedAssetKeys).toEqual([
+      'skill:skill-a',
+      'plugin:plug-x',
+      'mcp:github',
+    ]);
+  });
+
+  test('reopening clears the previous peer list while devices reload', async () => {
+    const secondLoad = deferred<Device[]>();
+    const listDevices = vi
+      .fn<() => Promise<Device[]>>()
+      .mockResolvedValueOnce(devices)
+      .mockImplementationOnce(() => secondLoad.promise);
+    let open = true;
+    const { result, rerender } = renderHook(() =>
+      useUserMirrorController({
+        open,
+        direction: 'pull',
+        mirrorApi: createMirrorApi(),
+        listDevices,
+      }),
+    );
+    await waitFor(() => expect(result.current.devices).toHaveLength(2));
+
+    open = false;
+    rerender();
+    open = true;
+    rerender();
+    await waitFor(() => expect(result.current.devices).toEqual([]));
+    expect(result.current.sourceDeviceId).toBe('');
+
+    secondLoad.resolve(devices);
+    await waitFor(() => expect(result.current.devices).toHaveLength(2));
   });
 });

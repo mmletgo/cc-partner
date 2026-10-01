@@ -9,7 +9,7 @@
  * Code Logic（这个 hook 做什么）:
  *   持有 direction / 设备选择 / plan / result / confirmed / stale 与同步内容选择
  *   （includeInstructions + 跨 Agent 去重的资产勾选，默认全选）；
- *   preview/apply/get 走 userMirrorApi；全选时 apply 不带 selection（等价默认全量）。
+ *   preview/apply/get 走 userMirrorApi；共享同步操作门闩；新预览保留已缩小的选择范围。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -80,13 +80,10 @@ export interface UseUserMirrorControllerResult {
 
 /**
  * Business Logic: apply 幂等键在同一 plan 内复用，新 plan 才 mint。
- * Code Logic: crypto.randomUUID 优先，否则时间+随机串。
+ * Code Logic: Tauri WebView 与项目测试运行时均提供 Web Crypto randomUUID。
  */
 function createClientRequestId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `user-mirror-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return globalThis.crypto.randomUUID();
 }
 
 /**
@@ -122,13 +119,23 @@ export function useUserMirrorController(
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [staleFlag, setStaleFlag] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [reconcilePending, setReconcilePending] = useState(false);
   const [includeInstructions, setIncludeInstructionsState] = useState(true);
   const [deselectedAssetKeys, setDeselectedAssetKeys] = useState<ReadonlySet<string>>(new Set());
 
   const mountedRef = useRef(true);
   const previewSeqRef = useRef(0);
   const applySeqRef = useRef(0);
+  const operationInFlightRef = useRef<symbol | null>(null);
   const planRequestIdRef = useRef<{ planToken: string; clientRequestId: string } | null>(null);
+  const planRef = useRef<UserMirrorPlanDto | null>(null);
+  const submittedRef = useRef(false);
+  const confirmedRef = useRef(false);
+  const staleFlagRef = useRef(false);
+  const includeInstructionsRef = useRef(true);
+  const deselectedAssetKeysRef = useRef<ReadonlySet<string>>(new Set());
+  const selectionInitializedRef = useRef(false);
   const sourceDeviceIdRef = useRef(sourceDeviceId);
   const selectedPeerIdsRef = useRef(selectedPeerIds);
   const directionRef = useRef(direction);
@@ -162,34 +169,78 @@ export function useUserMirrorController(
     directionRef.current = direction;
   }, [direction]);
 
+  /**
+   * Business Logic: preview/apply/reconcile 共享同一同步门闩，阻止同一 tick 双击与跨动作竞态。
+   * Code Logic: 返回本次唯一 token；已有操作时返回 null。
+   */
+  const beginOperation = useCallback((): symbol | null => {
+    if (operationInFlightRef.current) return null;
+    const token = Symbol('user-mirror-operation');
+    operationInFlightRef.current = token;
+    setBusy(true);
+    return token;
+  }, []);
+
+  /**
+   * Business Logic: 旧会话 finally 不得清掉新会话的 busy 门闩。
+   * Code Logic: 仅 token 仍匹配时清 ref 与 busy。
+   */
+  const endOperation = useCallback((token: symbol): void => {
+    if (operationInFlightRef.current !== token) return;
+    operationInFlightRef.current = null;
+    if (mountedRef.current) setBusy(false);
+  }, []);
+
   const invalidatePlan = useCallback(() => {
     previewSeqRef.current += 1;
+    applySeqRef.current += 1;
     planRequestIdRef.current = null;
+    planRef.current = null;
+    submittedRef.current = false;
+    confirmedRef.current = false;
+    staleFlagRef.current = false;
     setPlan(null);
     setResult(null);
     setClientRequestId(null);
+    setSubmitted(false);
+    setReconcilePending(false);
     setConfirmedState(false);
     setStaleFlag(false);
-    setBusy(false);
   }, []);
 
   useEffect(() => {
     if (!open) {
       previewSeqRef.current += 1;
       applySeqRef.current += 1;
+      operationInFlightRef.current = null;
       planRequestIdRef.current = null;
       return;
     }
 
     previewSeqRef.current += 1;
     applySeqRef.current += 1;
+    operationInFlightRef.current = null;
     planRequestIdRef.current = null;
+    planRef.current = null;
+    submittedRef.current = false;
+    confirmedRef.current = false;
+    staleFlagRef.current = false;
+    includeInstructionsRef.current = true;
+    deselectedAssetKeysRef.current = new Set();
+    selectionInitializedRef.current = false;
     /* eslint-disable react-hooks/set-state-in-effect -- open-session hydration is the effect's contract. */
+    setDevices([]);
+    setSourceDeviceId('');
+    sourceDeviceIdRef.current = '';
+    setSelectedPeerIds([]);
+    selectedPeerIdsRef.current = [];
     setPlan(null);
     setResult(null);
     setClientRequestId(null);
     setConfirmedState(false);
     setStaleFlag(false);
+    setSubmitted(false);
+    setReconcilePending(false);
     setError(null);
     setBusy(false);
     setIncludeInstructionsState(true);
@@ -231,8 +282,6 @@ export function useUserMirrorController(
   }, [open, direction, initialSourceDeviceId]);
 
   const stale = staleFlag || isUserMirrorPlanExpired(plan);
-  const canApply = canApplyUserMirror({ plan, confirmed, busy, stale });
-  const canReconcile = needsUserMirrorReconcile(result);
   const assetOptions = useMemo(() => collectPlanAssetOptions(plan), [plan]);
   const selectedAssetKeys = useMemo(
     () => assetOptions.filter((option) => !deselectedAssetKeys.has(option.key)).map((option) => option.key),
@@ -243,6 +292,18 @@ export function useUserMirrorController(
   useEffect(() => {
     assetOptionsRef.current = assetOptions;
   }, [assetOptions]);
+
+  const hasSelection = includeInstructions || selectedAssetKeys.length > 0;
+  const canApply = canApplyUserMirror({
+    plan,
+    confirmed,
+    busy,
+    stale,
+    submitted,
+    hasSelection,
+  });
+  const canReconcile =
+    Boolean(clientRequestId) && (reconcilePending || needsUserMirrorReconcile(result));
 
   const selectSourceDevice = useCallback(
     (deviceId: string) => {
@@ -268,6 +329,8 @@ export function useUserMirrorController(
   );
 
   const setConfirmed = useCallback((value: boolean) => {
+    if (submittedRef.current || operationInFlightRef.current) return;
+    confirmedRef.current = value;
     setConfirmedState(value);
   }, []);
 
@@ -276,32 +339,46 @@ export function useUserMirrorController(
    * Code Logic: 维护「被取消勾选」集合：已取消则恢复，未取消则加入。
    */
   const toggleAsset = useCallback((key: string) => {
-    setDeselectedAssetKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      return next;
-    });
+    if (submittedRef.current || operationInFlightRef.current) return;
+    const next = new Set(deselectedAssetKeysRef.current);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    deselectedAssetKeysRef.current = next;
+    setDeselectedAssetKeys(next);
+    confirmedRef.current = false;
+    setConfirmedState(false);
   }, []);
 
   /** Business Logic: 全选快捷操作 = 清空取消勾选集合（回到默认全量）。 */
   const selectAllAssets = useCallback(() => {
-    setDeselectedAssetKeys(new Set());
+    if (submittedRef.current || operationInFlightRef.current) return;
+    const next = new Set<string>();
+    deselectedAssetKeysRef.current = next;
+    setDeselectedAssetKeys(next);
+    confirmedRef.current = false;
+    setConfirmedState(false);
   }, []);
 
   /** Business Logic: 全不选快捷操作 = 取消全部资产（指令仍由 includeInstructions 控制）。 */
   const deselectAllAssets = useCallback(() => {
-    setDeselectedAssetKeys((prev) => {
-      const keys = assetOptionsRef.current.map((option) => option.key);
-      return new Set(keys.length > 0 ? keys : prev);
-    });
+    if (submittedRef.current || operationInFlightRef.current) return;
+    const keys = assetOptionsRef.current.map((option) => option.key);
+    const next = new Set(keys.length > 0 ? keys : deselectedAssetKeysRef.current);
+    deselectedAssetKeysRef.current = next;
+    setDeselectedAssetKeys(next);
+    confirmedRef.current = false;
+    setConfirmedState(false);
   }, []);
 
   const setIncludeInstructions = useCallback((value: boolean) => {
+    if (submittedRef.current || operationInFlightRef.current) return;
+    includeInstructionsRef.current = value;
     setIncludeInstructionsState(value);
+    confirmedRef.current = false;
+    setConfirmedState(false);
   }, []);
 
   const preview = useCallback(async () => {
@@ -314,83 +391,128 @@ export function useUserMirrorController(
       setError(USER_MIRROR_PREVIEW_REQUIRED);
       return;
     }
+    const operationToken = beginOperation();
+    if (!operationToken) return;
     const seq = ++previewSeqRef.current;
-    setBusy(true);
     setError(null);
+    staleFlagRef.current = false;
     setStaleFlag(false);
     try {
       const nextPlan = await mirrorApiRef.current.preview(request);
       if (!mountedRef.current || seq !== previewSeqRef.current) return;
+      const nextOptions = collectPlanAssetOptions(nextPlan);
+      let nextDeselectedKeys: ReadonlySet<string>;
+      if (selectionInitializedRef.current) {
+        const previouslySelectedKeys = new Set(
+          assetOptionsRef.current
+            .filter((option) => !deselectedAssetKeysRef.current.has(option.key))
+            .map((option) => option.key),
+        );
+        nextDeselectedKeys = new Set(
+          nextOptions
+            .filter((option) => !previouslySelectedKeys.has(option.key))
+            .map((option) => option.key),
+        );
+      } else {
+        selectionInitializedRef.current = true;
+        nextDeselectedKeys = new Set();
+      }
+      assetOptionsRef.current = nextOptions;
+      deselectedAssetKeysRef.current = nextDeselectedKeys;
+      planRef.current = nextPlan;
+      submittedRef.current = false;
+      confirmedRef.current = false;
       setPlan(nextPlan);
       setResult(null);
       planRequestIdRef.current = null;
       setClientRequestId(null);
+      setSubmitted(false);
+      setReconcilePending(false);
       setConfirmedState(false);
-      // 新 plan 重新给出「默认全选」的同步内容选择。
-      setIncludeInstructionsState(true);
-      setDeselectedAssetKeys(new Set());
+      setDeselectedAssetKeys(nextDeselectedKeys);
     } catch (reason) {
       if (!mountedRef.current || seq !== previewSeqRef.current) return;
-      setPlan(null);
-      if (isUserMirrorStaleError(reason)) setStaleFlag(true);
+      if (isUserMirrorStaleError(reason)) {
+        staleFlagRef.current = true;
+        setStaleFlag(true);
+      }
       setError(formatUserMirrorError(reason));
     } finally {
-      if (mountedRef.current && seq === previewSeqRef.current) {
-        setBusy(false);
-      }
+      endOperation(operationToken);
     }
-  }, []);
+  }, [beginOperation, endOperation]);
 
   const apply = useCallback(async () => {
-    if (!plan) {
+    const currentPlan = planRef.current;
+    if (!currentPlan) {
       setError(USER_MIRROR_PREVIEW_REQUIRED);
       return;
     }
-    if (!canApplyUserMirror({ plan, confirmed, busy: false, stale })) {
+    const currentStale = staleFlagRef.current || isUserMirrorPlanExpired(currentPlan);
+    const hasCurrentSelection =
+      includeInstructionsRef.current ||
+      assetOptionsRef.current.some((option) => !deselectedAssetKeysRef.current.has(option.key));
+    if (
+      !canApplyUserMirror({
+        plan: currentPlan,
+        confirmed: confirmedRef.current,
+        busy: Boolean(operationInFlightRef.current),
+        stale: currentStale,
+        submitted: submittedRef.current,
+        hasSelection: hasCurrentSelection,
+      })
+    ) {
       return;
     }
+    const operationToken = beginOperation();
+    if (!operationToken) return;
     const existing = planRequestIdRef.current;
     const requestId =
-      existing && existing.planToken === plan.planToken
+      existing && existing.planToken === currentPlan.planToken
         ? existing.clientRequestId
         : createClientRequestId();
-    planRequestIdRef.current = { planToken: plan.planToken, clientRequestId: requestId };
+    planRequestIdRef.current = { planToken: currentPlan.planToken, clientRequestId: requestId };
+    submittedRef.current = true;
     setClientRequestId(requestId);
+    setSubmitted(true);
+    setReconcilePending(true);
 
     const seq = ++applySeqRef.current;
-    setBusy(true);
     setError(null);
     // 全选 + 指令开 → selection 为 null，apply 请求不带该字段（等价默认全量）。
     const selection: UserMirrorSelectionFilterDto | null = buildSelectionFilter({
-      includeInstructions,
+      includeInstructions: includeInstructionsRef.current,
       options: assetOptionsRef.current,
-      deselectedKeys: deselectedAssetKeys,
+      deselectedKeys: deselectedAssetKeysRef.current,
     });
     try {
       const requestPayload = selection
         ? {
-            planToken: plan.planToken,
+            planToken: currentPlan.planToken,
             clientRequestId: requestId,
             selection,
           }
         : {
-            planToken: plan.planToken,
+            planToken: currentPlan.planToken,
             clientRequestId: requestId,
           };
       const nextResult = await mirrorApiRef.current.apply(requestPayload);
       if (!mountedRef.current || seq !== applySeqRef.current) return;
       setResult(nextResult);
       setClientRequestId(nextResult.clientRequestId);
+      setReconcilePending(false);
     } catch (reason) {
       if (!mountedRef.current || seq !== applySeqRef.current) return;
-      if (isUserMirrorStaleError(reason)) setStaleFlag(true);
+      if (isUserMirrorStaleError(reason)) {
+        staleFlagRef.current = true;
+        setStaleFlag(true);
+        setReconcilePending(false);
+      }
       setError(formatUserMirrorError(reason));
     } finally {
-      if (mountedRef.current && seq === applySeqRef.current) {
-        setBusy(false);
-      }
+      endOperation(operationToken);
     }
-  }, [plan, confirmed, stale, includeInstructions, deselectedAssetKeys]);
+  }, [beginOperation, endOperation]);
 
   const reconcile = useCallback(async () => {
     const requestId = clientRequestId ?? planRequestIdRef.current?.clientRequestId ?? null;
@@ -398,24 +520,28 @@ export function useUserMirrorController(
       setError(USER_MIRROR_PREVIEW_REQUIRED);
       return;
     }
+    const operationToken = beginOperation();
+    if (!operationToken) return;
     const seq = ++applySeqRef.current;
-    setBusy(true);
     setError(null);
     try {
       const nextResult = await mirrorApiRef.current.get(requestId);
       if (!mountedRef.current || seq !== applySeqRef.current) return;
       setResult(nextResult);
       setClientRequestId(nextResult.clientRequestId);
+      setReconcilePending(false);
     } catch (reason) {
       if (!mountedRef.current || seq !== applySeqRef.current) return;
-      if (isUserMirrorStaleError(reason)) setStaleFlag(true);
+      if (isUserMirrorStaleError(reason)) {
+        staleFlagRef.current = true;
+        setStaleFlag(true);
+      }
+      setReconcilePending(true);
       setError(formatUserMirrorError(reason));
     } finally {
-      if (mountedRef.current && seq === applySeqRef.current) {
-        setBusy(false);
-      }
+      endOperation(operationToken);
     }
-  }, [clientRequestId]);
+  }, [beginOperation, clientRequestId, endOperation]);
 
   return {
     direction,

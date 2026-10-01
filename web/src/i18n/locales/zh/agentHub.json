@@ -971,6 +971,21 @@
     "selectionAria": "选择要同步的内容",
     "includeInstructions": "包含指令文件（CLAUDE.md / AGENTS.md 三槽等）",
     "assetSelectAll": "全选资产",
-    "assetDeselectAll": "全不选资产"
+    "assetDeselectAll": "全不选资产",
+    "selectionRequired": "至少选择指令文件或一项资产后才能应用镜像。",
+    "directionFromPeer": "{{peer}} → 本机",
+    "directionToPeer": "本机 → {{peer}}",
+    "blocked": "该设备无法应用：{{reasons}}",
+    "outcomeUnknown": "提交结果暂时未知。请使用同一请求核对，避免重复应用。",
+    "completed": "镜像已完成。需要再次同步时请重新预览。",
+    "errorWithDetail": "镜像失败：{{detail}}",
+    "errorCode": "错误码：{{code}}",
+    "errorMessage": "详情：{{message}}",
+    "itemState": {
+      "succeeded": "成功",
+      "failed": "失败",
+      "skipped": "已跳过",
+      "outcomeUnknown": "结果未知"
+    }
   }
 }

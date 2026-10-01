@@ -34,22 +34,59 @@ export interface UserMirrorAgentSummary {
   credentialBearing: boolean;
 }
 
+/** 选择范围投影；用于让预览计数严格对应本次将提交的内容。 */
+export interface UserMirrorSelectionProjection {
+  includeInstructions: boolean;
+  selectedAssetKeys: ReadonlySet<string>;
+}
+
+/** 单台目标设备的预览计划。 */
+export interface UserMirrorPeerPlanView {
+  destinationDeviceId: string;
+  agents: UserMirrorAgentPlanDto[];
+  blockingReasons: string[];
+}
+
+/** 单台目标设备的执行结果。 */
+export interface UserMirrorPeerResultView {
+  destinationDeviceId: string;
+  partial: boolean;
+  agents: UserMirrorResultDto['agents'];
+}
+
 /**
  * Business Logic: 用户按 Agent 看到将写入、新增/替换、删除、停用的数量，而不是笼统「同步」。
  * Code Logic: writes=指令文件；upserts=portable 新增/替换；deletes=portable+MCP；disables=Plugin。
  */
-export function summarizeAgentPlan(agent: UserMirrorAgentPlanDto): UserMirrorAgentSummary {
+export function summarizeAgentPlan(
+  agent: UserMirrorAgentPlanDto,
+  selection?: UserMirrorSelectionProjection,
+): UserMirrorAgentSummary {
+  const includesAsset = (kind: PortableAssetKind, nativeId: string): boolean =>
+    selection?.selectedAssetKeys.has(userMirrorAssetKey(kind, nativeId)) ?? true;
+  const portableUpserts = agent.portableUpserts.filter((change) =>
+    includesAsset(change.kind, change.nativeId),
+  );
+  const portableDeletes = agent.portableDeletes.filter((change) =>
+    includesAsset(change.kind, change.nativeId),
+  );
+  const pluginDisables = agent.pluginDisables.filter((change) =>
+    includesAsset(change.kind, change.nativeId),
+  );
+  const mcpDeletes = agent.mcpDeletes.filter((change) =>
+    includesAsset(change.kind, change.nativeId),
+  );
   return {
     target: agent.target,
-    writes: agent.instructionWrites.length,
-    upserts: agent.portableUpserts.length,
-    deletes: agent.portableDeletes.length + agent.mcpDeletes.length,
-    disables: agent.pluginDisables.length,
+    writes: selection?.includeInstructions === false ? 0 : agent.instructionWrites.length,
+    upserts: portableUpserts.length,
+    deletes: portableDeletes.length + mcpDeletes.length,
+    disables: pluginDisables.length,
     credentialBearing:
-      agent.portableUpserts.some((change) => change.credentialBearing) ||
-      agent.portableDeletes.some((change) => change.credentialBearing) ||
-      agent.pluginDisables.some((change) => change.credentialBearing) ||
-      agent.mcpDeletes.some((change) => change.credentialBearing),
+      portableUpserts.some((change) => change.credentialBearing) ||
+      portableDeletes.some((change) => change.credentialBearing) ||
+      pluginDisables.some((change) => change.credentialBearing) ||
+      mcpDeletes.some((change) => change.credentialBearing),
   };
 }
 
@@ -57,9 +94,73 @@ export function summarizeAgentPlan(agent: UserMirrorAgentPlanDto): UserMirrorAge
  * Business Logic: 预览区按 Agent 分组列出计数。
  * Code Logic: plan 为空则空数组。
  */
-export function summarizePlanAgents(plan: UserMirrorPlanDto | null): UserMirrorAgentSummary[] {
+export function summarizePlanAgents(
+  plan: UserMirrorPlanDto | null,
+  selection?: UserMirrorSelectionProjection,
+): UserMirrorAgentSummary[] {
   if (!plan) return [];
-  return plan.agents.map(summarizeAgentPlan);
+  return plan.agents.map((agent) => summarizeAgentPlan(agent, selection));
+}
+
+/**
+ * Business Logic: Push 预览按每台目标独立展示；Pull 仍使用顶层单目标计划。
+ * Code Logic: peerPlans 非空时逐台返回，否则把顶层 agents/blockingReasons 包成一项。
+ */
+export function userMirrorPlanPeers(plan: UserMirrorPlanDto | null): UserMirrorPeerPlanView[] {
+  if (!plan) return [];
+  if (plan.peerPlans.length > 0) {
+    return plan.peerPlans.map((peerPlan) => ({
+      destinationDeviceId: peerPlan.destinationDeviceId,
+      agents: peerPlan.agents,
+      blockingReasons: peerPlan.blockingReasons,
+    }));
+  }
+  return [
+    {
+      destinationDeviceId: plan.destinationDeviceId,
+      agents: plan.agents,
+      blockingReasons: plan.blockingReasons,
+    },
+  ];
+}
+
+/**
+ * Business Logic: Push 结果按每台目标独立展示；Pull 使用顶层单目标结果。
+ * Code Logic: peerResults 非空时逐台返回，否则包装顶层结果。
+ */
+export function userMirrorResultPeers(result: UserMirrorResultDto | null): UserMirrorPeerResultView[] {
+  if (!result) return [];
+  if (result.peerResults.length > 0) return result.peerResults;
+  return [
+    {
+      destinationDeviceId: result.destinationDeviceId,
+      partial: result.partial,
+      agents: result.agents,
+    },
+  ];
+}
+
+/**
+ * Business Logic: 凭据披露必须随勾选范围缩小，避免展示全量计划的误导数字。
+ * Code Logic: 按 portable key 去重统计选中且 credentialBearing 的资产。
+ */
+export function countSelectedCredentialAssets(
+  agents: readonly UserMirrorAgentPlanDto[],
+  selectedAssetKeys: ReadonlySet<string>,
+): number {
+  const credentialKeys = new Set<string>();
+  for (const agent of agents) {
+    for (const change of [
+      ...agent.portableUpserts,
+      ...agent.portableDeletes,
+      ...agent.pluginDisables,
+      ...agent.mcpDeletes,
+    ]) {
+      const key = userMirrorAssetKey(change.kind, change.nativeId);
+      if (change.credentialBearing && selectedAssetKeys.has(key)) credentialKeys.add(key);
+    }
+  }
+  return credentialKeys.size;
 }
 
 /**
@@ -71,8 +172,17 @@ export function canApplyUserMirror(input: {
   confirmed: boolean;
   busy: boolean;
   stale: boolean;
+  submitted?: boolean;
+  hasSelection?: boolean;
 }): boolean {
-  return Boolean(input.plan) && input.confirmed && !input.busy && !input.stale;
+  return (
+    Boolean(input.plan) &&
+    input.confirmed &&
+    !input.busy &&
+    !input.stale &&
+    !input.submitted &&
+    input.hasSelection !== false
+  );
 }
 
 /**
@@ -82,7 +192,13 @@ export function canApplyUserMirror(input: {
 export function needsUserMirrorReconcile(result: UserMirrorResultDto | null): boolean {
   if (!result) return false;
   if (result.partial) return true;
-  return result.agents.some((agent) => agent.state === 'outcomeUnknown' || agent.state === 'failed');
+  return userMirrorResultPeers(result).some(
+    (peerResult) =>
+      peerResult.partial ||
+      peerResult.agents.some(
+        (agent) => agent.state === 'outcomeUnknown' || agent.state === 'failed',
+      ),
+  );
 }
 
 /**
@@ -197,21 +313,23 @@ export interface UserMirrorAssetOption {
 export function collectPlanAssetOptions(plan: UserMirrorPlanDto | null): UserMirrorAssetOption[] {
   if (!plan) return [];
   const seen = new Map<string, UserMirrorAssetOption>();
-  for (const agent of plan.agents) {
-    for (const change of [
-      ...agent.portableUpserts,
-      ...agent.portableDeletes,
-      ...agent.pluginDisables,
-      ...agent.mcpDeletes,
-    ]) {
-      const key = userMirrorAssetKey(change.kind, change.nativeId);
-      if (!seen.has(key)) {
-        seen.set(key, {
-          key,
-          kind: change.kind,
-          nativeId: change.nativeId,
-          displayName: change.displayName,
-        });
+  for (const peerPlan of userMirrorPlanPeers(plan)) {
+    for (const agent of peerPlan.agents) {
+      for (const change of [
+        ...agent.portableUpserts,
+        ...agent.portableDeletes,
+        ...agent.pluginDisables,
+        ...agent.mcpDeletes,
+      ]) {
+        const key = userMirrorAssetKey(change.kind, change.nativeId);
+        if (!seen.has(key)) {
+          seen.set(key, {
+            key,
+            kind: change.kind,
+            nativeId: change.nativeId,
+            displayName: change.displayName,
+          });
+        }
       }
     }
   }
