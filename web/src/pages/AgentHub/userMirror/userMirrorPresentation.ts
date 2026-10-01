@@ -40,20 +40,6 @@ export interface UserMirrorSelectionProjection {
   selectedAssetKeys: ReadonlySet<string>;
 }
 
-/** 单台目标设备的预览计划。 */
-export interface UserMirrorPeerPlanView {
-  destinationDeviceId: string;
-  agents: UserMirrorAgentPlanDto[];
-  blockingReasons: string[];
-}
-
-/** 单台目标设备的执行结果。 */
-export interface UserMirrorPeerResultView {
-  destinationDeviceId: string;
-  partial: boolean;
-  agents: UserMirrorResultDto['agents'];
-}
-
 /**
  * Business Logic: 用户按 Agent 看到将写入、新增/替换、删除、停用的数量，而不是笼统「同步」。
  * Code Logic: writes=指令文件；upserts=portable 新增/替换；deletes=portable+MCP；disables=Plugin。
@@ -91,22 +77,12 @@ export function summarizeAgentPlan(
 }
 
 /**
- * Business Logic: 预览区按 Agent 分组列出计数。
- * Code Logic: plan 为空则空数组。
- */
-export function summarizePlanAgents(
-  plan: UserMirrorPlanDto | null,
-  selection?: UserMirrorSelectionProjection,
-): UserMirrorAgentSummary[] {
-  if (!plan) return [];
-  return plan.agents.map((agent) => summarizeAgentPlan(agent, selection));
-}
-
-/**
  * Business Logic: Push 预览按每台目标独立展示；Pull 仍使用顶层单目标计划。
  * Code Logic: peerPlans 非空时逐台返回，否则把顶层 agents/blockingReasons 包成一项。
  */
-export function userMirrorPlanPeers(plan: UserMirrorPlanDto | null): UserMirrorPeerPlanView[] {
+export function userMirrorPlanPeers(
+  plan: UserMirrorPlanDto | null,
+): Array<Pick<UserMirrorPlanDto, 'destinationDeviceId' | 'agents' | 'blockingReasons'>> {
   if (!plan) return [];
   if (plan.peerPlans.length > 0) {
     return plan.peerPlans.map((peerPlan) => ({
@@ -128,7 +104,9 @@ export function userMirrorPlanPeers(plan: UserMirrorPlanDto | null): UserMirrorP
  * Business Logic: Push 结果按每台目标独立展示；Pull 使用顶层单目标结果。
  * Code Logic: peerResults 非空时逐台返回，否则包装顶层结果。
  */
-export function userMirrorResultPeers(result: UserMirrorResultDto | null): UserMirrorPeerResultView[] {
+export function userMirrorResultPeers(
+  result: UserMirrorResultDto | null,
+): Array<Pick<UserMirrorResultDto, 'destinationDeviceId' | 'partial' | 'agents'>> {
   if (!result) return [];
   if (result.peerResults.length > 0) return result.peerResults;
   return [

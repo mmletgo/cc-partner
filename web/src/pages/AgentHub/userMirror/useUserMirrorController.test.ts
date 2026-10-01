@@ -400,7 +400,6 @@ describe('useUserMirrorController', () => {
 
     await act(async () => {
       result.current.toggleAsset('skill:skill-a');
-      result.current.setConfirmed(true);
     });
     expect(result.current.selectedAssetKeys).toEqual([
       'command:cmd-x',
@@ -415,7 +414,11 @@ describe('useUserMirrorController', () => {
     expect(result.current.selectedAssetKeys).toHaveLength(4);
     await act(async () => {
       result.current.toggleAsset('skill:skill-a');
+    });
+    await act(async () => {
       result.current.setConfirmed(true);
+    });
+    await act(async () => {
       await result.current.apply();
     });
     const payload = (mirrorApi.apply as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
@@ -521,7 +524,11 @@ describe('useUserMirrorController', () => {
     await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
     await act(async () => {
       await result.current.preview();
+    });
+    await act(async () => {
       result.current.setConfirmed(true);
+    });
+    await act(async () => {
       await result.current.apply();
     });
 
@@ -551,8 +558,14 @@ describe('useUserMirrorController', () => {
     await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
     await act(async () => {
       await result.current.preview();
+    });
+    await act(async () => {
       result.current.setConfirmed(true);
+    });
+    await act(async () => {
       await result.current.apply();
+    });
+    await act(async () => {
       await result.current.apply();
     });
 
@@ -579,6 +592,8 @@ describe('useUserMirrorController', () => {
     await waitFor(() => expect(result.current.sourceDeviceId).toBe('device-a'));
     await act(async () => {
       await result.current.preview();
+    });
+    await act(async () => {
       result.current.setConfirmed(true);
       result.current.setIncludeInstructions(false);
       result.current.deselectAllAssets();
@@ -627,6 +642,8 @@ describe('useUserMirrorController', () => {
     await act(async () => {
       await result.current.preview();
       result.current.toggleAsset('command:cmd-x');
+    });
+    await act(async () => {
       await result.current.preview();
     });
 

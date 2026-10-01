@@ -42,6 +42,7 @@ export interface UserMirrorDialogProps {
   open: boolean;
   direction: UserMirrorDirection;
   busy: boolean;
+  submitted: boolean;
   error: string | null;
   stale: boolean;
   devices: UserMirrorPeerOption[];
@@ -103,6 +104,7 @@ export function UserMirrorDialog(props: UserMirrorDialogProps): JSX.Element | nu
     open,
     direction,
     busy,
+    submitted,
     error,
     stale,
     devices,
@@ -141,8 +143,7 @@ export function UserMirrorDialog(props: UserMirrorDialogProps): JSX.Element | nu
   const hintKey = direction === 'pull' ? 'agentHub:userMirror.pullHint' : 'agentHub:userMirror.pushHint';
   const canPreview =
     !busy && (direction === 'pull' ? Boolean(sourceDeviceId) : selectedSet.size > 0);
-  const selectionLocked =
-    busy || Boolean(result) || canReconcile || (Boolean(plan) && confirmed && !canApply);
+  const selectionLocked = busy || submitted;
   const emptySelection = Boolean(plan) && !includeInstructions && selectedAssetSet.size === 0;
   const hasIncompleteResult = Boolean(result) && canReconcile;
 

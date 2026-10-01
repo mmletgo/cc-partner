@@ -123,6 +123,7 @@ describe('UserMirrorDialog', () => {
         open
         direction="pull"
         busy={false}
+        submitted={false}
         error={null}
         stale={false}
         devices={[
@@ -189,6 +190,7 @@ describe('UserMirrorDialog', () => {
         open
         direction="pull"
         busy={false}
+        submitted={false}
         error={null}
         stale={false}
         devices={[{ deviceId: 'device-a', name: 'Alpha' }]}
@@ -247,6 +249,7 @@ describe('UserMirrorDialog', () => {
         open
         direction="pull"
         busy={false}
+        submitted
         error={null}
         stale={false}
         devices={[{ deviceId: 'device-a', name: 'Alpha' }]}
@@ -293,6 +296,7 @@ describe('UserMirrorDialog', () => {
         open
         direction="push"
         busy={false}
+        submitted
         error={null}
         stale={false}
         devices={[
@@ -366,6 +370,7 @@ describe('UserMirrorDialog', () => {
         open
         direction="pull"
         busy={false}
+        submitted={false}
         error={null}
         stale={false}
         devices={[{ deviceId: 'dev-a', name: 'Alpha' }]}
@@ -413,6 +418,7 @@ describe('UserMirrorDialog', () => {
         open
         direction="push"
         busy={false}
+        submitted={false}
         error={null}
         stale={false}
         devices={[
@@ -464,6 +470,7 @@ describe('UserMirrorDialog', () => {
         open
         direction="pull"
         busy={false}
+        submitted={false}
         error={null}
         stale={false}
         devices={[{ deviceId: 'dev-a', name: 'Alpha' }]}
