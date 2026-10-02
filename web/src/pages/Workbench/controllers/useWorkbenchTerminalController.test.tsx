@@ -646,7 +646,7 @@ describe('useWorkbenchTerminalController — load / focus', () => {
 
   test('focusSession keeps user selection while focus IPC in flight and interval polls stale backend window', async () => {
     // Regression（interval 路径）：用户点击第二个 window 后，本地 focusSession 立即设 active，
-    // 但后端 focus_workbench_session IPC 可能因远端/后端 busy 迟迟未确认；此时 700ms 轮询触发，
+    // 但后端 focus_workbench_session IPC 可能因远端/后端 busy 迟迟未确认；此时 2s 轮询触发，
     // 后端 tmux current 仍停在第一个 window。在 focus IPC 未确认成功前，轮询不得覆盖本地选择。
     const project = buildLocalProject();
     const worktree = buildWorktree();
@@ -697,9 +697,9 @@ describe('useWorkbenchTerminalController — load / focus', () => {
     });
     expect(result.current.activeSessionId).toBe('s2');
 
-    // 推进时间超过 grace(500ms) 与 interval(700ms)，触发轮询 syncFocusedSession。
+    // 推进时间超过 grace(500ms) 与 interval(2s)，触发轮询 syncFocusedSession。
     await act(async () => {
-      vi.advanceTimersByTime(800);
+      vi.advanceTimersByTime(2_100);
       await flushMicrotasks();
     });
 
@@ -714,7 +714,7 @@ describe('useWorkbenchTerminalController — load / focus', () => {
   });
 
   test('focusSession ignores in-flight tmux focused() that started before the local tab click', async () => {
-    // Regression（远端 ~50%）：700ms 轮询在用户仍停在第一个 window 时发出 focused()；
+    // Regression（远端 ~50%）：2s 轮询在用户仍停在第一个 window 时发出 focused()；
     // 远端 P2P 往返常 200–400ms，用户在结果回来前点了第二个 tab。过期 focused() 返回 s1
     // 时 grace/pending 可能已过期（focus IPC 已成功），不得把 UI 切回第一个 window。
     const project = buildLocalProject();
@@ -755,7 +755,7 @@ describe('useWorkbenchTerminalController — load / focus', () => {
 
     // 推进到 interval，让一轮 focused() 在用户仍选中 s1 时起飞并保持 pending。
     await act(async () => {
-      vi.advanceTimersByTime(700);
+      vi.advanceTimersByTime(2_000);
       await flushMicrotasks();
     });
     const stalePollCount = pendingFocusedResolvers.length;

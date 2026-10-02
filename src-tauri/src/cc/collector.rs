@@ -33,6 +33,10 @@ use tokio_util::sync::CancellationToken;
 const SCAN_INTERVAL_SECS: u64 = 300;
 /// 扫描状态版本前缀；过滤规则升级时改变前缀，触发存量 transcript 一次性重扫与清理。
 const SCAN_STATE_FILTER_VERSION: &str = "user-authored-v2:";
+/// 单次回收的僵尸扫描状态行上限（fs stat 成本与写租约时长的有界批）。
+const SCAN_STATE_PRUNE_BATCH: i64 = 10_000;
+/// 扫描状态行视为僵尸前必须未被更新的天数（容忍外置卷临时离线）。
+const SCAN_STATE_STALE_DAYS: i64 = 14;
 
 /// 返回 Claude Code projects 目录：`~/.claude/projects`。
 ///
@@ -304,7 +308,31 @@ pub async fn scan_once(state: &AppState) -> Result<usize, AppError> {
         Ok(n) => total += n,
         Err(e) => tracing::error!("Gemini Prompt 扫描失败: {e}"),
     }
+    // 僵尸扫描状态治理：已删除文件且 14 天未更新的状态行分批回收
+    // （五源共享表，删除仅影响增量跳过缓存，误删代价是重扫，详见 repo 文档）。
+    match prune_stale_scan_state(state).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("回收 {n} 条已删除文件的扫描状态行"),
+        Err(e) => tracing::error!("扫描状态僵尸行回收失败: {e}"),
+    }
     Ok(total)
+}
+
+/// 回收僵尸扫描状态行：文件已删除且 `SCAN_STATE_STALE_DAYS` 天未更新的 key 分批删除。
+///
+/// Business Logic（为什么需要这个函数）:
+///     会话文件被用户/工具删除后，scan_state 行永不回收，长期累积成数万僵尸行；
+///     每个扫描周期还会全量加载进内存。挂在 `scan_once` 末尾让治理与采集同节奏推进。
+///
+/// Code Logic（这个函数做什么）:
+///     以「当前时间 - 14 天」为 cutoff、单批至多 `SCAN_STATE_PRUNE_BATCH` 行，
+///     委托 `ClaudeHistoryRepo::prune_stale_scan_state` 完成选择、fs 检查与删除。
+async fn prune_stale_scan_state(state: &AppState) -> Result<u64, AppError> {
+    let cutoff = (Utc::now() - chrono::Duration::days(SCAN_STATE_STALE_DAYS)).to_rfc3339();
+    state
+        .cc_history_repo
+        .prune_stale_scan_state(&cutoff, SCAN_STATE_PRUNE_BATCH)
+        .await
 }
 
 /// 扫描 Claude Code projects jsonl。

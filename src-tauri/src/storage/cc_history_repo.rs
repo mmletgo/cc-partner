@@ -771,6 +771,78 @@ impl ClaudeHistoryRepo {
         }
         Ok(out)
     }
+
+    /// 回收指向已删除文件的过期扫描状态行（僵尸行治理）。
+    ///
+    /// Business Logic（为什么需要这个函数）:
+    ///     五个来源（Claude/Codex/OpenCode/Grok/Gemini）共享 scan_state 表按 file_path 累积，
+    ///     会话文件被删除后状态行永不回收：实测 9.9 万行中约 97% 为已删除文件的僵尸行
+    ///     （表+索引约 32MB），且 `get_scan_states` 每个扫描周期都把它们全量加载进内存。
+    ///     需要按「文件已不存在 + 长期未扫」分批回收；误删的代价只是该文件下次被全量
+    ///     重扫（入库幂等，绝不覆盖既有因果历史）。
+    ///
+    /// Code Logic（这个函数做什么）:
+    ///     取 scanned_at < cutoff 的至多 limit 行（RFC3339 UTC 文本字典序比较）；在
+    ///     spawn_blocking 内剥离来源前缀后用 fs metadata 检查文件是否仍存在（检查期间
+    ///     不持有写租约）；仅对确认不存在的行在 shared write lease 下逐行 DELETE，
+    ///     返回删除行数。
+    pub async fn prune_stale_scan_state(
+        &self,
+        cutoff_rfc3339: &str,
+        limit: i64,
+    ) -> Result<u64, AppError> {
+        let rows = sqlx::query(
+            "SELECT file_path FROM claude_history_scan_state WHERE scanned_at < ? LIMIT ?",
+        )
+        .bind(cutoff_rfc3339)
+        .bind(limit)
+        .fetch_all(&self.db)
+        .await?;
+        let keys: Vec<String> = rows
+            .iter()
+            .map(|r| r.try_get::<String, _>("file_path"))
+            .collect::<Result<_, _>>()?;
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let missing = tokio::task::spawn_blocking(move || {
+            keys.into_iter()
+                .filter(|key| !std::path::Path::new(&strip_scan_state_prefix(key)).exists())
+                .collect::<Vec<String>>()
+        })
+        .await
+        .map_err(|e| AppError::generic(format!("scan_state 僵尸行 fs 检查任务失败: {e}")))?;
+        if missing.is_empty() {
+            return Ok(0);
+        }
+        with_shared_write_lease(&self.gate, async {
+            let mut removed = 0u64;
+            for key in &missing {
+                let res = sqlx::query("DELETE FROM claude_history_scan_state WHERE file_path = ?")
+                    .bind(key)
+                    .execute(&self.db)
+                    .await?;
+                removed += res.rows_affected();
+            }
+            Ok::<u64, AppError>(removed)
+        })
+        .await
+    }
+}
+
+/// 剥离扫描状态 key 的来源前缀，还原可 fs 检查的绝对路径。
+///
+/// Business Logic（为什么需要这个函数）:
+///     各来源以 `{source}-user-vN:{absolute_path}` 形态写 key，历史遗留行是无前缀裸路径；
+///     僵尸行判定需要还原出真实路径做存在性检查，且不应感知各来源的前缀常量。
+///
+/// Code Logic（这个函数做什么）:
+///     含 `:/` 分隔的取首个 `:/` 之后的部分（必以 `/` 开头的绝对路径）；否则原样返回。
+fn strip_scan_state_prefix(key: &str) -> &str {
+    match key.find(":/") {
+        Some(idx) => &key[idx + 1..],
+        None => key,
+    }
 }
 
 #[cfg(test)]
@@ -894,6 +966,44 @@ mod tests {
                 linked: linked.canonicalize().expect("linked worktree 应可规范化"),
             }
         }
+    }
+
+    /// Business Logic: scan_state 僵尸行治理只应回收「已过期且文件已删除」的行；
+    ///     文件仍在的行（外置卷临时离线保护）与未过期行都必须保留。
+    /// Code Logic: 内存库写入三行——过期+文件不存在、过期+文件存在（临时文件）、
+    ///     未过期+文件不存在；断言只删除第一行，且返回删除数为 1。
+    #[tokio::test]
+    async fn prune_stale_scan_state_removes_only_missing_files() {
+        let repo = setup_repo().await;
+        let unique = format!("cc-partner-prune-test-{}", std::process::id());
+        let gone = std::env::temp_dir().join(format!("{unique}-gone.jsonl"));
+        let alive = std::env::temp_dir().join(format!("{unique}-alive.jsonl"));
+        std::fs::write(&alive, b"{}\n").unwrap();
+
+        let gone_key = format!("codex-user-v1:{}", gone.display());
+        let alive_key = format!("codex-user-v1:{}", alive.display());
+        let legacy_gone_key = gone.to_string_lossy().to_string();
+        repo.update_scan_state(&gone_key, 1, 1, "2026-01-01T00:00:00+00:00")
+            .await
+            .unwrap();
+        repo.update_scan_state(&alive_key, 1, 1, "2026-01-01T00:00:00+00:00")
+            .await
+            .unwrap();
+        repo.update_scan_state(&legacy_gone_key, 1, 1, "2030-01-01T00:00:00+00:00")
+            .await
+            .unwrap();
+
+        let removed = repo
+            .prune_stale_scan_state("2026-06-01T00:00:00+00:00", 100)
+            .await
+            .unwrap();
+
+        assert_eq!(removed, 1);
+        let states = repo.get_scan_states().await.unwrap();
+        assert!(states.contains_key(&alive_key));
+        assert!(states.contains_key(&legacy_gone_key));
+        assert!(!states.contains_key(&gone_key));
+        std::fs::remove_file(&alive).ok();
     }
 
     #[tokio::test]

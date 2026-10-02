@@ -103,7 +103,7 @@ interface WorkbenchTerminalInputStateEvent {
  */
 const MIN_TERMINAL_COLS = 20;
 const MIN_TERMINAL_ROWS = 6;
-const TMUX_FOCUS_SYNC_INTERVAL_MS = 700;
+const TMUX_FOCUS_SYNC_INTERVAL_MS = 2_000;
 const LOCAL_FOCUS_GRACE_MS = 500;
 
 /**
@@ -839,8 +839,10 @@ export function useWorkbenchTerminalController(
   // Business Logic: 每 TMUX_FOCUS_SYNC_INTERVAL_MS 轮询后端 get_focused_workbench_session，
   // 把外部（如另一台设备/移动端）的焦点变化同步到当前 worktree 的 active session。
   // 最近的本地 focus 操作在 LOCAL_FOCUS_GRACE_MS 内抑制轮询，避免与用户刚点击的 tab 冲突。
-  // 已发出的 focused() 在返回时必须再核对 localFocusEpochRef：远端往返常与 700ms 间隔重叠，
+  // 已发出的 focused() 在返回时必须再核对 localFocusEpochRef：远端往返常与轮询间隔重叠，
   // 仅在发请求时检查挡不住「点击前已在飞行、点击后才返回第一个 window」的过期结果。
+  // （2026-10-02 从 700ms 降频到 2s：每次轮询是一次 IPC + tmux/远端往返，700ms 在
+  // 后端繁忙时放大延迟且无事件兜底必要；2s 的外部焦点跟随延迟可接受。）
   //
   // 关键：effect 依赖只含 [activeProjectId, activeWorktreeId]，**不**含 scopedSessions。
   // 否则 terminal-status 事件（setSessions(.map) 产生新数组引用）会让 effect 反复 cleanup+setup，

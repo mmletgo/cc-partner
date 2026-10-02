@@ -537,7 +537,7 @@ New↔new peers use the three routes above when health advertises
 | Partial batch | push-batch is **all-or-nothing** in one DB transaction. There is no partial `accepted` subset for a failed batch. |
 | Retry / restart-from-zero | Interrupted paged rounds do **not** persist remote cursors. The next sync restarts summary exchange from the first page. Vector-clock merge + upsert make replaying whole batches safe. On `batch_too_large` the client may bisect the id list down to one; a single `item_too_large` ends that round for the offending item (no silent skip). |
 | Metrics privacy | Process-local `RuntimeMetrics` may record fixed names such as `cc_history.sync_batch.*` / `cc_history.sync_round_ms` and orchestrator claim counters. Metrics stay in-process / sanitized tracing only — **no** telemetry upload, and **never** content, paths, project/device names, host, SQL, or credentials. |
-| SQLite pool | Production remains `max_connections(1)` with WAL and `busy_timeout=5s` unless a separate Task 8 load-gate commit documents evidence to raise it to **2** (never 3+). |
+| SQLite pool | Production is `max_connections(8)` with WAL and `busy_timeout=15s` (expanded 2026-10-02 with user approval: live logs showed 14k+ slow-acquire ≥1s warnings starving the terminal-input keystroke path; supersedes the old Task 8 "keep 1 / never 3+" cap). |
 
 ## Content sync v2 contract (`sync.manifest.v2`)
 

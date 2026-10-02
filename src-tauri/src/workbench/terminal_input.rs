@@ -330,22 +330,20 @@ pub async fn serve_terminal_input_socket(
     writer.abort();
 }
 
+/// 将输入写入本机 PTY 会话（按键热路径，禁止逐键数据库访问）。
+///
+/// Business Logic（为什么需要这个函数）:
+///     交互式按键每帧都走这里；共享 SQLite 连接池被周期任务占住时，逐键查库会让
+///     打字出现秒级卡顿。本机合法会话的权威是内存注册表——只有本机 PTY 会话才会
+///     持有句柄，远端会话 ID 带 remote 前缀在网关上层已分流，无需逐键查库校验。
+///
+/// Code Logic（这个函数做什么）:
+///     校验 owner 后直接写内存注册表对应会话的 PTY 并 flush；
+///     会话不存在或未运行由注册表返回 not_found/generic 错误。
 async fn write_local_input(state: &AppState, session_id: &str, data: &str) -> Result<(), AppError> {
-    let row = state
-        .workbench_session_repo
-        .get(session_id)
-        .await?
-        .ok_or_else(|| AppError::not_found("Workbench 会话不存在"))?;
-    let project = state
-        .workbench_project_repo
-        .get(&row.project_id)
-        .await?
-        .ok_or_else(|| AppError::not_found("Workbench 项目不存在"))?;
-    if project.kind != "local" {
-        return Err(AppError::validation("输入网关只接受本机项目会话"));
-    }
-    local_write_workbench_session_input(state, session_id.to_string(), data.to_string()).await?;
-    Ok(())
+    local_write_workbench_session_input(state, session_id.to_string(), data.to_string())
+        .await
+        .map(|_| ())
 }
 
 async fn peer_link_for_device(

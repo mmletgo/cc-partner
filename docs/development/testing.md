@@ -527,7 +527,7 @@ Non-ignored `scale_safety_*` gates (bounded fixture): request limits, resolver o
 | Paged routes + capability `cc-history.paged-sync.v1` atomic | Verified by inventory + protocol unit tests |
 | Mixed-version new↔new / new↔legacy / legacy↔new | Verified (`backend_scale` + mixed_version_harness) |
 | Claim IO outside SQLite transaction / CAS no duplicate | Verified (`backend_scale` orchestrator_claim_* + `scale_safety_*`) |
-| Production SQLite pool expansion to 2 | **NOT VERIFIED / keep `max_connections(1)`** — Task 8 `backend_scale_benchmark` (release, 6 JSON samples: pool 1×3 + pool 2×3) **did not authorize expansion**. §4.2 gates: (1) pool=1 acquire wait p95 was 27/21/23ms — **not** >50ms for three consecutive runs; (2) pool=2 p95 29/29/33ms did **not** cut wait ≥30% (worse/flat vs baseline); (3) correctness suite green; (4) pool=2 SQLITE_BUSY 0/0/2 **not** ≤ pool=1 baseline 0/0/0; (5) no max≥3. Production remains `max_connections(1)`. |
+| Production SQLite pool expansion to 8 | **VERIFIED 2026-10-02 (supersedes Task 8 verdict)** — Task 8 `backend_scale_benchmark` rejected pool=2 when acquire p95 was only ~27ms; by 2026-10 the 308MB DB drove 14k+/day sqlx slow-acquire (≥1s) warnings that queued the per-keystroke terminal-input path. User approved `max_connections(8)` + `busy_timeout` 5s→15s (WAL reader concurrency safe; busy_timeout covers writer collisions). Task 8 benchmark methodology stays available for regression tracking. |
 | Metrics telemetry upload | **Out of product scope** — process-local + sanitized tracing only |
 
 ## Hosted smoke: NOT VERIFIED

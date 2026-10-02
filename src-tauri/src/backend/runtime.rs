@@ -332,16 +332,18 @@ const WORKBENCH_WORKSPACE_LAYOUT_SCHEMA: &str =
 ///     GUI 与 headless 后端必须共享完全一致的数据 schema 初始化路径，保证旧用户库无损升级。
 ///
 /// Code Logic（这个函数做什么）:
-///     用 `SqliteConnectOptions` 开启 create_if_missing、WAL，并**显式** `busy_timeout=5s`
-///     （不依赖 sqlx 默认值，避免升级时无声漂移）；`max_connections(1)` 保持单连接语义；
+///     用 `SqliteConnectOptions` 开启 create_if_missing、WAL，并**显式** `busy_timeout=15s`
+///     （不依赖 sqlx 默认值，避免升级时无声漂移；多连接下并发写会在 SQLite 写锁上碰撞，
+///     15s 给批量写入留足重试余量）；`max_connections(8)`：WAL 下读并发安全，历史单连接
+///     池会被周期任务的大查询独占，导致终端输入等热路径取连接排队秒级卡顿；
 ///     再按固定顺序逐条执行幂等建表 SQL 与各 repo 的 schema 迁移 helper。
 pub(crate) async fn init_db(db_path: &str) -> Result<sqlx::SqlitePool, AppError> {
     let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path))?
         .create_if_missing(true)
         .pragma("journal_mode", "WAL")
-        .busy_timeout(Duration::from_secs(5));
+        .busy_timeout(Duration::from_secs(15));
     let pool = SqlitePoolOptions::new()
-        .max_connections(1)
+        .max_connections(8)
         .connect_with(options)
         .await?;
 
